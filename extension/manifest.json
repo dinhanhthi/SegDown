@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "SegDown",
+  "version": "0.1.0",
+  "description": "Mark segments on a web video and download them with the SegDown app.",
+  "permissions": [
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAthI3qV4qSWJPwhaGhE++A1a2NCP2cZyJ/ABVGHuzgsTYL46DZqGLZb7DX4XdpW7kL4UcUxC3EUmvQNuelYQ1aRffZLNzMkV9RylQUGmSbfxmVPGcYDvS0j7cvXe2FpaCMkI/pz4PKqPfO1mR1y/4y3XVlGEtZ8FMfvcDWcx6ABZqC94kwiA3bnAwHc6JLG2FBxqpA28cihdQBBJdVofaXGFM+yL2n8vpgTBae4l+UBJBPOel6l5RJqyOvFnNcUsBB7IsbLOmfhoQDlDcYHX57O11LPkF7LdevxrEJUMQo2KJrL7/+55pCJpGNFaYIG0fVfjbPd4sM+dnyLLihJHU4QIDAQAB"
+}

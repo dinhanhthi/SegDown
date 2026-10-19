@@ -3,7 +3,7 @@ Download video as segments from the internet.
 
 ## What it is
 
-SegDown will be a macOS menu bar app plus a browser extension: mark time ranges on a video in the browser, and only those ranges are downloaded. It is a work in progress; for now the repo holds the core package (`Packages/SegDownCore`) and a dev CLI, `segdown-cli`.
+SegDown will be a macOS menu bar app plus a browser extension: mark time ranges on a video in the browser, and only those ranges are downloaded. It is a work in progress; for now the repo holds the core package (`Packages/SegDownCore`), a dev CLI (`segdown-cli`), the menu bar app with its native messaging host (`segdown-host`), and a Chromium extension skeleton (manifest and an empty service worker; the marking UI comes in a later phase).
 
 - Direct media (mp4) and HLS streams, including clear-key AES-128 HLS, are cut with `ffmpeg`. Pages that `yt-dlp` supports go through `yt-dlp`.
 - Each range is saved as its own file, or all ranges are joined into one merged mp4.
@@ -18,6 +18,53 @@ SegDown will be a macOS menu bar app plus a browser extension: mark time ranges 
   ```sh
   brew install yt-dlp ffmpeg deno xcodegen
   ```
+
+## Build the app
+
+The Xcode project is generated from `project.yml` by XcodeGen; `SegDown.xcodeproj` is gitignored.
+
+```sh
+xcodegen generate
+xcodebuild -project SegDown.xcodeproj -scheme SegDown -configuration Debug build
+```
+
+Do not pass `-derivedDataPath`; without it the build lands in Xcode's own DerivedData folder, so Xcode and the command line reuse each other's builds. To find the built `SegDown.app`:
+
+```sh
+xcodebuild -project SegDown.xcodeproj -scheme SegDown -configuration Debug -showBuildSettings | grep -m1 BUILT_PRODUCTS_DIR
+```
+
+The app is ad-hoc signed, for personal use only. `segdown-host` is embedded in `SegDown.app/Contents/MacOS`.
+
+## Menu bar app
+
+SegDown runs as a menu bar item only (scissors icon, no Dock icon). Its window shows:
+
+- Dependencies: whether `yt-dlp`, `ffmpeg`, `ffprobe` and `deno` are found, with a `brew install …` line for the missing ones, and a Re-check button.
+- Browser integration: the browsers that have the native messaging host manifest, and the "Install browser integration" button.
+- Jobs: title, state, progress per segment, Cancel, and Show in Finder for the output files; Clear finished removes finished jobs.
+- Default precision: Precise or Fast. It is only stored for now; each job carries its own precision.
+- Quit SegDown.
+
+## Browser integration (Chromium)
+
+1. Copy `SegDown.app` to `/Applications` and open it from there.
+2. In Chrome, open `chrome://extensions`, turn on Developer mode, click Load unpacked and pick the `extension/` folder. The `key` in `extension/manifest.json` fixes the extension ID to `kigkemeomlcgfgnknafeomgglcjeoicb`.
+3. In the SegDown menu, click "Install browser integration". It writes `com.math2it.segdown.json` into the `NativeMessagingHosts` folder of each installed Chromium browser (Chrome, Chromium, Brave, Edge, Arc) under `~/Library/Application Support/`, pointing at the app's embedded `segdown-host`.
+
+The manifest holds the app's absolute path, so install again after moving the app; the menu warns when the installed path is stale. When the app is not running, `segdown-host` launches it hidden.
+
+The extension's marking UI is not there yet. To check the connection, open the extension's service worker console (`chrome://extensions` → SegDown → service worker) and run:
+
+```js
+chrome.runtime.sendNativeMessage("com.math2it.segdown", {type: "ping"}, console.log)
+```
+
+It logs the app version and the missing tools.
+
+## How it fits together
+
+The extension talks to `segdown-host` through Chrome native messaging. The host accepts only the SegDown extension's origin and relays each message as one JSON line over a Unix socket, `~/Library/Application Support/SegDown/segdown.sock` (folder 0700, socket 0600; the app serves only processes of the same user). The menu bar app runs the jobs with `ffmpeg` and `yt-dlp`.
 
 ## Core package and CLI
 
