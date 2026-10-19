@@ -38,6 +38,40 @@ targets:
         embed: true
         copy:
           destination: executables
+      - target: SegDownSafari
+        embed: true
+  # Safari Web Extension, embedded at SegDown.app/Contents/PlugIns. Safari reads manifest.json at
+  # the root of Contents/Resources, so the shared extension/ files land there with paths kept.
+  SegDownSafari:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: SafariExtension
+      - path: extension/manifest.json
+        buildPhase: resources
+      - path: extension/background.js
+        buildPhase: resources
+      - path: extension/content
+        type: folder
+        buildPhase: resources
+      - path: extension/popup
+        type: folder
+        buildPhase: resources
+      - path: extension/icons
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.math2it.segdown.safari
+        PRODUCT_NAME: SegDownSafari
+        INFOPLIST_FILE: SafariExtension/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: SafariExtension/SegDownSafari.entitlements
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: NO
+    dependencies:
+      - package: SegDownCore
+        product: SegDownCore
   segdown-host:
     type: tool
     platform: macOS

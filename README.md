@@ -3,7 +3,7 @@ Download video as segments from the internet.
 
 ## What it is
 
-SegDown is a macOS menu bar app plus a browser extension: mark time ranges on a video in the browser, and only those ranges are downloaded. The repo holds the core package (`Packages/SegDownCore`), a dev CLI (`segdown-cli`), the menu bar app with its native messaging host (`segdown-host`), and a Chromium extension that marks segments on a page's video and sends them to the app as download jobs. Safari support is still to come.
+SegDown is a macOS menu bar app plus a browser extension: mark time ranges on a video in the browser, and only those ranges are downloaded. The repo holds the core package (`Packages/SegDownCore`), a dev CLI (`segdown-cli`), the menu bar app with its native messaging host (`segdown-host`), and a browser extension (Chromium, and Safari through the app's embedded Safari Web Extension) that marks segments on a page's video and sends them to the app as download jobs.
 
 - Direct media (mp4) and HLS streams, including clear-key AES-128 HLS, are cut with `ffmpeg`. Pages that `yt-dlp` supports go through `yt-dlp`.
 - Each range is saved as its own file, or all ranges are joined into one merged mp4.
@@ -62,6 +62,33 @@ chrome.runtime.sendNativeMessage("com.math2it.segdown", {type: "ping"}, console.
 
 It logs the app version and the missing tools.
 
+## Browser integration (Safari)
+
+The same extension ships inside `SegDown.app` as a Safari Web Extension (`SegDownSafari.appex`, built from `extension/`). It is ad-hoc signed, so Safari treats it as unsigned:
+
+1. Copy `SegDown.app` to `/Applications` and open it once, so macOS registers the extension.
+2. In Safari, open Settings › Advanced and turn on "Show features for web developers".
+3. In Settings › Developer, turn on "Allow unsigned extensions" (asks for your password). Safari turns this off again every time it quits, so repeat this step after each Safari restart.
+4. In Settings › Extensions, tick SegDown. If it is not listed, close and reopen the Settings window, or quit and reopen `SegDown.app`. After replacing `SegDown.app` with a new build, untick and tick SegDown once, so Safari reloads the extension.
+5. Grant website access: in the same pane, "Always Allow on Every Website…" (or allow sites one by one from the toolbar button). Without it the extension sees no media requests and runs no content scripts.
+
+The Safari extension talks to the app directly, without `segdown-host`: each `sendNativeMessage` goes to the appex, which relays it over the same Unix socket and launches the app hidden when it is not running. The appex is sandboxed; a `com.apple.security.temporary-exception.sbpl` entitlement allows it to connect to `~/Library/Application Support/SegDown/segdown.sock` and nothing else.
+
+To check the connection, open Develop › Web Extension Background Content › SegDown and run:
+
+```js
+await browser.runtime.sendNativeMessage("com.math2it.segdown", {type: "ping"})
+```
+
+Known limits in Safari:
+
+- Usually no `Cookie` header: Safari's `webRequest` has no `extraHeaders` option, so the captured headers normally lack cookies and sites that need a login cookie for their media links fail with HTTP 403. Use "Use yt-dlp (page URL)" where `yt-dlp` supports the site.
+- Media capture is best effort; when a source is missing, play the video again or use "Use yt-dlp (page URL)".
+- Content scripts can read the extension's local storage (saved segments per page URL): Safari has no `storage.local.setAccessLevel`.
+- Single-page sites that change the URL without reloading keep the previous URL's segments (no `webNavigation.onHistoryStateUpdated` in Safari).
+- Job progress is read with one native call per second instead of one open connection.
+- The frame label in the panel shows Safari's long frame ids.
+
 ### Using the panel
 
 The toolbar button opens the SegDown popup: its Toggle panel button (or Alt+Shift+S) shows or hides a floating panel (drag it by its title bar). The popup also lists this tab's jobs and the app's other recent jobs with their progress, errors, a Cancel button for queued and running jobs, and the file names of finished ones (open them from the SegDown menu bar).
@@ -94,7 +121,7 @@ Files land in `~/Downloads/SegDown/<page title>/`: `<page title> - 01 [0h00m02s-
 ### Keyboard shortcuts
 
 - `[` marks a start, `]` marks an end. They work only while the panel is open, also when the player inside an iframe has focus. They are ignored while you type in a text field, and with Ctrl, Cmd or Alt held. On keyboard layouts where `[` and `]` need Option (for example German on a Mac), use the panel buttons.
-- Alt+Shift+S shows or hides the panel. Change it in `chrome://extensions/shortcuts`.
+- Alt+Shift+S shows or hides the panel. Change it in `chrome://extensions/shortcuts`, or in Safari Settings › Extensions › SegDown.
 
 ### Permissions
 

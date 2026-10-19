@@ -193,10 +193,13 @@ public enum IPC {
 
     /// `~/Library/Application Support/SegDown/segdown.sock`. The single place the socket path is
     /// decided; the folder is not created here. The `sun_path` length is checked by `socketAddress`.
+    /// `~` is the user's real home from the password database, so the sandboxed Safari appex (whose
+    /// `FileManager`/`NSHomeDirectory` point into its container) resolves the same path as the app.
     public static func socketURL() -> URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support")
-        return support.appending(path: "SegDown/segdown.sock", directoryHint: .notDirectory)
+        let home = getpwuid(getuid()).flatMap { $0.pointee.pw_dir.map { String(cString: $0) } }
+            ?? NSHomeDirectory()
+        return URL(filePath: home, directoryHint: .isDirectory)
+            .appending(path: "Library/Application Support/SegDown/segdown.sock", directoryHint: .notDirectory)
     }
 
     /// The `AF_UNIX` address of `url`, for `connect` here and `bind` in the server.

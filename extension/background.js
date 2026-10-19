@@ -225,23 +225,29 @@ function getCaptures(tabId) {
 // Media capture: listeners (registered synchronously at top level)
 // ---------------------------------------------------------------------------
 
-chrome.webRequest.onSendHeaders.addListener(
-  (details) => {
-    if (details.tabId < 0) return;
-    const now = Date.now();
-    pending.delete(details.requestId); // redirects re-fire with the same id; keep order honest
-    pending.set(details.requestId, {
-      tabId: details.tabId,
-      frameId: details.frameId,
-      url: details.url,
-      headers: pickHeaders(details.requestHeaders),
-      ts: now,
-    });
-    prunePending(now);
-  },
-  { urls: ["<all_urls>"] },
-  ["requestHeaders", "extraHeaders"]
-);
+function onSendHeaders(details) {
+  if (details.tabId < 0) return;
+  const now = Date.now();
+  pending.delete(details.requestId); // redirects re-fire with the same id; keep order honest
+  pending.set(details.requestId, {
+    tabId: details.tabId,
+    frameId: details.frameId,
+    url: details.url,
+    headers: pickHeaders(details.requestHeaders),
+    ts: now,
+  });
+  prunePending(now);
+}
+
+// Safari rejects the "extraHeaders" option (and never exposes Cookie): register without it.
+try {
+  chrome.webRequest.onSendHeaders.addListener(onSendHeaders, { urls: ["<all_urls>"] }, [
+    "requestHeaders",
+    "extraHeaders",
+  ]);
+} catch {
+  chrome.webRequest.onSendHeaders.addListener(onSendHeaders, { urls: ["<all_urls>"] }, ["requestHeaders"]);
+}
 
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
@@ -532,11 +538,12 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   request) and fails every pending one; so does onDisconnect. After either,
 //   the next status goes through sendNativeMessage and the one after reopens
 //   the port. enqueue, cancel, probe and ping always use sendNativeMessage. Jobs run
-//   in the app: closing the port never affects them.
+//   in the app: closing the port never affects them. Safari never opens the port:
+//   every status there is its own sendNativeMessage (a short appex call).
 //
 // Popup (4.4, extension page popup/popup.html). Accepted only from this
 // extension (sender.id) without sender.tab and with sender.url under
-// chrome-extension://<id>/popup/. The popup is trusted, so these bodies carry
+// runtime.getURL("popup/") (chrome-extension://<id>/ or safari-web-extension://<uuid>/). The popup is trusted, so these bodies carry
 // the tab: tabId is the active tab from chrome.tabs.query in the popup (an
 // integer >= 0, or null when there is none). Content scripts cannot send these.
 //   togglePanel {tabId} -> {ok}: setPanelOpen(tabId, null), as the shortcut.
@@ -1584,6 +1591,9 @@ function cleanJobStatus(s) {
 
 // The status port: one connectNative port, replies matched to requests in order.
 const statusPort = { port: null, pending: [], idleTimer: null, fallbackNext: false };
+// Safari (the only target with globalThis.browser) hands port messages to the appex but
+// never routes its replies back to the port, so status always uses sendNativeMessage there.
+const HAS_STATUS_PORT = typeof chrome.runtime.connectNative === "function" && typeof globalThis.browser === "undefined";
 
 function openStatusPort() {
   const port = chrome.runtime.connectNative(NATIVE_HOST);
@@ -1668,7 +1678,7 @@ async function statusOnce() {
   const msg = { type: "status" };
   let reply;
   try {
-    if (statusPort.fallbackNext || typeof chrome.runtime.connectNative !== "function") {
+    if (statusPort.fallbackNext || !HAS_STATUS_PORT) {
       statusPort.fallbackNext = false;
       reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, msg);
     } else {
@@ -1828,7 +1838,7 @@ function replyAsync(promise, sendResponse) {
 }
 
 const isPopupSender = (sender) =>
-  !sender.tab && typeof sender.url === "string" && sender.url.startsWith(`chrome-extension://${chrome.runtime.id}/popup/`);
+  !sender.tab && typeof sender.url === "string" && sender.url.startsWith(chrome.runtime.getURL("popup/"));
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id || !isObject(msg)) return undefined;
@@ -1850,7 +1860,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
   if (details.frameId > 0) dropFrame(details.tabId, details.frameId);
 });
 
-chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+// Safari has no onHistoryStateUpdated: SPA navigations there keep the old page key.
+chrome.webNavigation.onHistoryStateUpdated?.addListener((details) => {
   if (details.frameId !== 0) return;
   setTopURL(details.tabId, details.url).catch(hubWarn);
   onPageChanged(details.tabId, details.url).catch(hubWarn);
