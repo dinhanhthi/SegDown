@@ -1,0 +1,112 @@
+// Turns the untrusted page title into exactly one safe path component and builds the output
+// paths under ~/Downloads/SegDown/<title>/. Nothing here ever lets a title escape the base dir.
+import Foundation
+
+public enum PathSanitizer {
+    public static let maxTitleLength = 120
+    /// APFS limits a name to 255 UTF-8 bytes; this leaves room for the segment/merged suffix and " (n)".
+    public static let maxTitleBytes = 200
+
+    /// `~/Downloads/SegDown`.
+    public static var defaultBaseDirectory: URL {
+        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+        return downloads.appendingPathComponent("SegDown", isDirectory: true)
+    }
+
+    /// Returns `title` as a single path component, or `segdown-<yyyy-MM-dd-HHmmss>` when nothing is left.
+    public static func sanitize(_ title: String, now: Date = Date()) -> String {
+        var name = String(String.UnicodeScalarView(title.unicodeScalars.filter { scalar in
+            scalar != "/" && scalar != ":" && scalar != "\\" && !CharacterSet.controlCharacters.contains(scalar)
+        }))
+        while name.contains("..") {
+            name = name.replacingOccurrences(of: "..", with: ".")
+        }
+        name = trimmed(name)
+        if name.count > maxTitleLength {
+            name = String(name.prefix(maxTitleLength))
+        }
+        while name.utf8.count > maxTitleBytes {
+            name.removeLast()
+        }
+        name = trimmed(name)
+        return name.isEmpty ? fallbackName(now: now) : name
+    }
+
+    /// `segdown-<yyyy-MM-dd-HHmmss>` in the local time zone, independent of the user's locale.
+    public static func fallbackName(now: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        return "segdown-" + formatter.string(from: now)
+    }
+
+    /// `<base>/<sanitized title>/`. Throws if the result is not a direct child of `base`.
+    public static func outputDirectory(
+        title: String,
+        base: URL = PathSanitizer.defaultBaseDirectory,
+        now: Date = Date()
+    ) throws -> URL {
+        let standardBase = base.standardizedFileURL
+        let directory = standardBase
+            .appendingPathComponent(sanitize(title, now: now), isDirectory: true)
+            .standardizedFileURL
+        guard directory.deletingLastPathComponent().standardizedFileURL.path == standardBase.path else {
+            throw JobError.invalid("Output directory escapes \(standardBase.path)")
+        }
+        return directory
+    }
+
+    /// `<title> - 01 [0h01m05s-0h01m30s].mp4`. `index` is 1-based; `title` must already be sanitized.
+    public static func segmentFileName(title: String, index: Int, segment: Segment) -> String {
+        let number = index < 10 ? "0\(index)" : "\(index)"
+        return "\(title) - \(number) [\(timestamp(segment.start))-\(timestamp(segment.end))].mp4"
+    }
+
+    /// `<title> - merged.mp4`. `title` must already be sanitized.
+    public static func mergedFileName(title: String) -> String {
+        "\(title) - merged.mp4"
+    }
+
+    /// `directory/fileName`, or `directory/<name> (2).<ext>`, ` (3)`… when that file already exists.
+    public static func uniqueFileURL(in directory: URL, fileName: String) -> URL {
+        let fileManager = FileManager.default
+        var candidate = directory.appendingPathComponent(fileName, isDirectory: false)
+        let stem = (fileName as NSString).deletingPathExtension
+        let ext = (fileName as NSString).pathExtension
+        var counter = 2
+        while fileManager.fileExists(atPath: candidate.path) {
+            let numbered = ext.isEmpty ? "\(stem) (\(counter))" : "\(stem) (\(counter)).\(ext)"
+            candidate = directory.appendingPathComponent(numbered, isDirectory: false)
+            counter += 1
+        }
+        return candidate
+    }
+
+    /// Whole seconds (floored) as `<h>h<mm>m<ss>s`, e.g. `0h01m05s`. Huge values are capped so the
+    /// `Int` conversion cannot trap.
+    static func timestamp(_ seconds: Double) -> String {
+        let total = seconds.isFinite && seconds > 0 ? Int(min(seconds, 9e15).rounded(.down)) : 0
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        return "\(hours)h\(twoDigits(minutes))m\(twoDigits(secs))s"
+    }
+
+    private static func twoDigits(_ value: Int) -> String {
+        value < 10 ? "0\(value)" : "\(value)"
+    }
+
+    private static func trimmed(_ name: String) -> String {
+        var result = Substring(name)
+        while let first = result.first, first == "." || first.isWhitespace {
+            result.removeFirst()
+        }
+        while let last = result.last, last.isWhitespace {
+            result.removeLast()
+        }
+        return String(result)
+    }
+}
