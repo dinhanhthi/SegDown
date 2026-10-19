@@ -5,6 +5,19 @@
 // 3.6: segment list (the `[` / `]` keys live in agent.js), 3.7 persistence,
 // 3.8: hidden while another element is fullscreen; the segments go to the hub
 // for the compact fullscreen panel (agent.js).
+// 4.1: the hub's chosen source (summary only: kind, host, file, frame, how it was
+// chosen) above the Download area; clicking a Sources row chooses that source.
+// 4.2: for an HLS master, a Quality <select> of its variants (resolution and
+// bandwidth labels only; the variant URLs stay in the hub), highest preselected.
+// 4.3: the Download button sends `download` {title, mode, precision}; the hub
+// builds the job from its own state (segments, source with headers) and shows
+// the app's answer here.
+// 4.4: below it, this tab's jobs (state, segment i/N, progress, message, Cancel),
+// from the hub's `jobs` every JOBS_POLL_MS while shown and a job is queued or running.
+// 4.5: a "Use yt-dlp (page URL)" checkbox (setYtDlp) makes the page URL the source;
+// the hub's `deps` (the app's missing tools) disables Download when the source
+// needs one (page: yt-dlp, ffmpeg; hls/mp4: ffmpeg, ffprobe) and warns when a page
+// source lacks deno.
 // Page data (URLs) is untrusted: DOM is built with createElement/textContent only.
 
 "use strict";
@@ -23,6 +36,10 @@
   const TIMELINE_H = 32;
   const MARGIN = 8; // min gap between the panel and the viewport edge
   const POLL_MS = 2000; // captures have no push path; refresh them while shown
+  const JOBS_POLL_MS = 1000; // only while a listed job is queued or running
+  const JOB_STATE_LABEL = {
+    queued: "Queued", running: "Running", done: "Done", failed: "Failed", cancelled: "Cancelled", unknown: "Unknown",
+  };
   const MAX_SOURCES = 20;
   const MAX_SEGMENTS = 100; // SegDownCore Validation
   const EXCLUDED_LABEL = { ad: "ad", small: "small", live: "live" };
@@ -35,7 +52,20 @@
     "no-start": "Mark a start first.",
     "end-not-after-start": "The end must be after the start.",
     "selection-changed": "The video changed; mark again.",
+    "unknown-source": "That source is gone; pick another one.",
+    "unknown-variant": "That quality is gone; pick another one.",
+    "no-segments": "Mark a segment first.",
+    "no-source": "No source yet. Play the video.",
+    "unknown-job": "That job is gone.",
   };
+  const QUEUED_TEXT = "Queued — see SegDown in the menu bar.";
+  const VIA_LABEL = { currentSrc: "video src", capture: "captured", page: "yt-dlp", user: "chosen" };
+  // Tools each source kind needs (SegDownCore Tool raw values); ffprobe ships in the ffmpeg formula.
+  const PAGE_TOOLS = ["yt-dlp", "ffmpeg"];
+  const MEDIA_TOOLS = ["ffmpeg", "ffprobe"];
+  const FORMULA = { "yt-dlp": "yt-dlp", ffmpeg: "ffmpeg", ffprobe: "ffmpeg" };
+  const DENO_TEXT = "deno is missing: some sites (e.g. YouTube) may fail. brew install deno";
+  const KIND_LABEL = { hls: "HLS", mp4: "MP4", page: "Page" };
 
   // ---------------------------------------------------------------------------
   // State
@@ -46,6 +76,9 @@
     candidates: [], // [{frameId, videoKey, area, duration, live, paused, excluded, score, currentSrc?}]
     tick: null, // last tick of the selected video {frameId, videoKey, currentTime, duration, paused}
     captures: null, // {entries: [{url, frameId, kind, isMaster, ts}], active: {<frameId>: {count, ts}}}
+    // hub summary {kind, host, file, frameId, via, probe?, variants?, variant?} or null
+    // (never URLs or headers; variants: [{width, height, bandwidth}], highest first)
+    source: null,
     lastMark: null, // last `mark` relay {action, time, start?, frameId, videoKey}
     segments: [], // [{start, end}] sorted by start, at most MAX_SEGMENTS (3.7 persists them)
     segError: null, // {seg, text}: the last rejected edit, shown under that row
@@ -53,13 +86,25 @@
     precision: "precise", // "precise" | "fast" (3.7 persists it)
     error: "", // last failed action, shown in the status line
     pos: null, // {x, y} once loaded or dragged
+    download: { busy: false, text: "", ok: false }, // last Download result (4.3)
+    // hub job summaries {id, title, state, segmentIndex, segmentCount, fraction, message}, newest first (4.4)
+    jobs: [],
+    jobsError: "", // the hub's appError
+    cancelError: "", // the last failed Cancel, until the next one
+    ytDlp: false, // the hub's "Use yt-dlp (page URL)" toggle (4.5)
+    missing: [], // tools the app reports missing, from the hub's `deps` (4.5)
   };
 
   const ui = {}; // DOM refs, filled by mount()
   let pollTimer = null;
   let restored = false; // saves wait for the stored entry, or they would overwrite it
+  let loadFailed = false; // loadPage failed: saves stay blocked (and are not retried) until the next page
   let saveTimer = null;
   let loadGen = 0; // a loadPage reply for an older page (pageChanged) is ignored
+  let sourceGen = 0; // only the newest getSource / chooseSource reply is shown
+  let jobsTimer = null;
+  let jobsGen = 0; // only the newest `jobs` reply is shown
+  let depsGen = 0; // only the newest `deps` reply is used
 
   const isShown = () => Boolean(view.state && view.state.panelOpen);
 
@@ -139,6 +184,54 @@
     const r = await act({ type: "select", frameId, videoKey });
     if (r.ok) setState(r.state);
     render();
+    refreshSource();
+  }
+
+  function applySource(gen, r) {
+    if (gen !== sourceGen || !r.ok) return;
+    view.source = r.source && typeof r.source === "object" ? r.source : null;
+    view.ytDlp = r.ytDlp === true;
+    if (ui.host) renderSource();
+  }
+
+  async function refreshSource() {
+    const gen = ++sourceGen;
+    applySource(gen, await ask({ type: "getSource" }));
+  }
+
+  // index/url: the row's entry in view.captures (the hub re-checks both).
+  async function chooseSource(index, url) {
+    const gen = ++sourceGen;
+    const r = await act({ type: "chooseSource", index, url });
+    if (!r.ok) refresh(false); // the list moved on
+    applySource(gen, r);
+  }
+
+  // index into view.source.variants; the hub maps it to the variant.
+  async function chooseVariant(index) {
+    const gen = ++sourceGen;
+    const r = await act({ type: "chooseVariant", index });
+    if (!r.ok) refreshSource(); // puts the select back
+    applySource(gen, r);
+  }
+
+  // on: the checkbox's new value; a failure puts it back.
+  async function setYtDlp(on) {
+    const gen = ++sourceGen;
+    const r = await act({ type: "setYtDlp", on });
+    if (!r.ok) refreshSource();
+    applySource(gen, r);
+  }
+
+  // Asked when the panel opens (each ping spawns a host, which may launch the
+  // app, so not on the poll). An app error leaves the list empty (Download
+  // reports it as before).
+  async function refreshDeps() {
+    const gen = ++depsGen;
+    const r = await ask({ type: "deps" });
+    if (gen !== depsGen || !r.ok) return;
+    view.missing = Array.isArray(r.missing) ? r.missing.filter((t) => typeof t === "string") : [];
+    if (ui.host) renderSource();
   }
 
   // full: take everything (first load); otherwise only captures, because a late
@@ -155,6 +248,9 @@
       if (Array.isArray(r.candidates)) view.candidates = r.candidates;
     }
     view.captures = r.captures || null;
+    // Only while shown: getSource can start an HLS probe (a native host, which
+    // may launch the app) on a page the user never opened the panel on.
+    if (isShown()) refreshSource();
     if (full) applyVisibility();
     else if (ui.host) renderSources();
   }
@@ -168,6 +264,7 @@
           renderPicker();
           renderControls();
           renderStatus();
+          renderDownload(); // live flag
         }
         return;
       case "tick":
@@ -186,9 +283,13 @@
       case "state":
         setState(msg.state);
         applyVisibility();
+        if (isShown()) refreshSource(); // the selection may have changed
         return;
       case "pageChanged":
         onPageChanged();
+        return;
+      case "sourceChanged":
+        if (isShown()) refreshSource(); // a probe finished
         return;
       default:
     }
@@ -243,8 +344,11 @@
     renderPicker();
     renderSegments();
     renderControls(); // also draws the timeline
+    renderSource();
     renderSources();
     renderStatus();
+    renderDownload();
+    renderJobs();
   }
 
   // Rebuilt only when the options change: agents resend candidates on scroll
@@ -493,10 +597,14 @@
     const same = lis.length === ui.segList.children.length && lis.every((li, i) => ui.segList.children[i] === li);
     if (!same) ui.segList.replaceChildren(...lis);
     ui.segTitle.textContent = segs.length ? `Segments (${segs.length})` : "Segments";
-    ui.segWarn.textContent = overlaps ? "⚠ Some segments overlap." : "";
-    ui.segWarn.hidden = !overlaps;
+    const notes = [];
+    if (overlaps) notes.push("⚠ Some segments overlap.");
+    if (loadFailed) notes.push("⚠ Could not load this page's saved segments; changes are not saved.");
+    ui.segWarn.textContent = notes.join(" ");
+    ui.segWarn.hidden = !notes.length;
     if (!segs.length) ui.clearArmed = false;
     renderClear();
+    renderDownload();
   }
 
   // Two clicks, no dialog: "Clear", then "Yes". "No" lands where "Clear" was, so
@@ -525,21 +633,256 @@
     return parts.length > 1 ? `${u.host}/…/${last}` : `${u.host}/${last}`;
   }
 
+  // The source the download will use (4.3 puts the Download button below it).
+  function renderSource() {
+    const s = view.source;
+    let text = "No source yet. Play the video.";
+    if (s && s.kind === "page") text = `Page URL via yt-dlp · ${s.host}/${s.file}`;
+    else if (s) {
+      const kind = KIND_LABEL[s.kind] || String(s.kind);
+      text = `${kind} · ${s.host}/${s.file} · ${frameLabel(s.frameId)} · ${VIA_LABEL[s.via] || String(s.via)}`;
+    }
+    ui.source.textContent = text;
+    ui.source.title = text;
+    ui.source.classList.toggle("warn", !s);
+    ui.ytDlp.checked = view.ytDlp;
+    const deno = Boolean(s && s.kind === "page" && view.missing.includes("deno"));
+    ui.depsInfo.textContent = deno ? DENO_TEXT : "";
+    ui.depsInfo.hidden = !deno;
+    renderVariants(s);
+    renderDownload();
+  }
+
+  // "Install yt-dlp and ffmpeg: brew install yt-dlp ffmpeg" for the tools source s
+  // needs and the app lacks, or "".
+  function installHint(s) {
+    const need = s.kind === "page" ? PAGE_TOOLS : MEDIA_TOOLS;
+    const formulas = [...new Set(need.filter((t) => view.missing.includes(t)).map((t) => FORMULA[t]))];
+    return formulas.length ? `Install ${formulas.join(" and ")}: brew install ${formulas.join(" ")}` : "";
+  }
+
+  const isDim = (n) => Number.isInteger(n) && n > 0;
+
+  // 6200000 -> "6.2 Mbps", 128000 -> "128 kbps".
+  function fmtBandwidth(b) {
+    if (!Number.isFinite(b) || b < 0) return "? kbps";
+    return b >= 1e6 ? `${(b / 1e6).toFixed(1)} Mbps` : `${Math.round(b / 1e3)} kbps`;
+  }
+
+  // "1920×1080 · 6.2 Mbps". Without a resolution: "audio only" when other variants
+  // have one (a master's resolution-less variant is its audio-only stream), else "unknown".
+  function variantLabel(v, all) {
+    let res = "unknown";
+    if (isDim(v.width) && isDim(v.height)) res = `${v.width}×${v.height}`;
+    else if (all.some((x) => isDim(x.width) && isDim(x.height))) res = "audio only";
+    return `${res} · ${fmtBandwidth(v.bandwidth)}`;
+  }
+
+  // Options are rebuilt only when the labels change: the poll would close an open dropdown.
+  function renderVariants(s) {
+    const list = s && Array.isArray(s.variants) ? s.variants.filter((v) => v && typeof v === "object") : [];
+    ui.variantRow.hidden = !list.length;
+    if (list.length) {
+      const labels = list.map((v) => variantLabel(v, list));
+      const sig = JSON.stringify(labels);
+      if (sig !== ui.variantSig) {
+        ui.variantSig = sig;
+        ui.variant.replaceChildren(
+          ...labels.map((label, i) => {
+            const opt = el("option", { text: label });
+            opt.value = String(i);
+            return opt;
+          })
+        );
+      }
+      const want = String(Number.isInteger(s.variant) && s.variant >= 0 && s.variant < list.length ? s.variant : 0);
+      if (ui.variant.value !== want) ui.variant.value = want; // also undoes a failed choice
+    }
+    const p = s && s.probe && typeof s.probe === "object" ? s.probe : null;
+    let info = "";
+    if (p && p.state === "pending") info = "Reading qualities…";
+    else if (p && p.state === "error") info = String(p.message || "Could not read the playlist.");
+    ui.probeInfo.textContent = info;
+    ui.probeInfo.title = info;
+    ui.probeInfo.hidden = !info;
+    ui.probeInfo.classList.toggle("warn", Boolean(p && p.state === "error"));
+  }
+
+  // --- download (4.3) ---
+
+  // Why Download is disabled, or "" when it can be used.
+  function downloadBlocker() {
+    const s = view.source;
+    const c = selectedCandidate();
+    const hint = s ? installHint(s) : "";
+    if (hint) return hint;
+    if (!view.segments.length) return ERROR_TEXT["no-segments"];
+    if (!s) return ERROR_TEXT["no-source"];
+    if (c && c.live) return "Live streams cannot be downloaded.";
+    if (s.kind === "hls" && s.probe && s.probe.state === "pending") return "Wait for the quality list.";
+    return "";
+  }
+
+  function renderDownload() {
+    if (!ui.download) return;
+    const d = view.download;
+    const reason = downloadBlocker();
+    ui.download.disabled = d.busy || Boolean(reason);
+    ui.download.title = reason;
+    let text = d.text; // a later block replaces the last result with its reason
+    if (d.busy) text = "Sending to SegDown…";
+    else if (reason) text = reason;
+    const isResult = !d.busy && !reason && Boolean(d.text);
+    ui.downloadInfo.textContent = text;
+    ui.downloadInfo.title = text;
+    ui.downloadInfo.hidden = !text;
+    ui.downloadInfo.classList.toggle("ok", isResult && d.ok);
+    ui.downloadInfo.classList.toggle("warn", isResult && !d.ok);
+  }
+
+  // The hub takes the segments and the source from its own state.
+  async function download() {
+    if (view.download.busy || downloadBlocker()) return;
+    view.download = { busy: true, text: "", ok: false };
+    renderDownload();
+    const r = await ask({ type: "download", title: String(document.title || ""), mode: view.mode, precision: view.precision });
+    let text = QUEUED_TEXT;
+    if (!r.ok) {
+      text = typeof r.message === "string" && r.message ? r.message : ERROR_TEXT[r.error] || `Failed (${String(r.error || "unknown")}).`;
+    }
+    view.download = { busy: false, text, ok: r.ok === true };
+    renderDownload();
+    if (r.ok) refreshJobs();
+  }
+
+  // --- jobs (4.4) ---
+
+  const isActiveJob = (j) => j.state === "queued" || j.state === "running";
+
+  // Asks the hub once, then again every JOBS_POLL_MS while shown and a job is active.
+  async function refreshJobs() {
+    clearTimeout(jobsTimer);
+    jobsTimer = null;
+    const gen = ++jobsGen;
+    const r = await ask({ type: "jobs" });
+    if (gen !== jobsGen || r.error === "no-reply") return; // superseded, or orphaned
+    if (r.ok) {
+      view.jobs = Array.isArray(r.jobs) ? r.jobs.filter((j) => j && typeof j === "object" && typeof j.id === "string") : [];
+      view.jobsError = typeof r.appError === "string" ? r.appError : "";
+    }
+    if (ui.host) renderJobs();
+    if (isShown() && view.jobs.some(isActiveJob)) jobsTimer = setTimeout(refreshJobs, JOBS_POLL_MS);
+  }
+
+  function stopJobs() {
+    clearTimeout(jobsTimer);
+    jobsTimer = null;
+    jobsGen++; // a reply in flight schedules nothing
+  }
+
+  async function cancelJob(id, button) {
+    button.disabled = true;
+    const r = await ask({ type: "cancel", id });
+    view.cancelError = r.ok
+      ? ""
+      : (typeof r.message === "string" && r.message) || ERROR_TEXT[r.error] || `Failed (${String(r.error || "unknown")}).`;
+    button.disabled = false;
+    refreshJobs();
+  }
+
+  // "Segment 2/5 · 37%"; a queued job shows its segment count.
+  function jobProgressText(j) {
+    const n = Number.isInteger(j.segmentCount) ? j.segmentCount : 0;
+    if (!n) return "";
+    if (j.state === "queued") return `${n} segment${n === 1 ? "" : "s"}`;
+    const i = Number.isInteger(j.segmentIndex) ? Math.min(j.segmentIndex + 1, n) : 1;
+    const pct = Math.round(Math.max(0, Math.min(1, Number(j.fraction) || 0)) * 100);
+    return `Segment ${i}/${n} · ${pct}%`;
+  }
+
+  // One row per job id, reused across polls so a Cancel click is not lost to a rebuild.
+  const jobRows = new Map();
+
+  function jobRow(id) {
+    let row = jobRows.get(id);
+    if (row) return row;
+    row = {
+      title: el("span", { class: "jtitle" }),
+      state: el("span", { class: "jstate" }),
+      cancel: el("button", { class: "jcancel", text: "Cancel" }),
+      fill: el("div", { class: "fill" }),
+      info: el("div", { class: "jinfo" }),
+      msg: el("div", { class: "jmsg" }),
+    };
+    row.cancel.addEventListener("click", () => cancelJob(id, row.cancel));
+    row.li = el(
+      "li",
+      { class: "job" },
+      el("div", { class: "jhead" }, row.title, row.state, row.cancel),
+      el("div", { class: "bar" }, row.fill),
+      row.info,
+      row.msg
+    );
+    jobRows.set(id, row);
+    return row;
+  }
+
+  function renderJobs() {
+    const lis = view.jobs.map((j) => {
+      const row = jobRow(j.id);
+      const title = String(j.title || "");
+      row.title.textContent = title;
+      row.title.title = title;
+      row.state.textContent = Object.hasOwn(JOB_STATE_LABEL, j.state) ? JOB_STATE_LABEL[j.state] : String(j.state);
+      row.state.className = `jstate ${Object.hasOwn(JOB_STATE_LABEL, j.state) ? j.state : ""}`;
+      row.cancel.hidden = !isActiveJob(j);
+      const frac = Math.max(0, Math.min(1, Number(j.fraction) || 0));
+      row.fill.style.setProperty("width", `${(frac * 100).toFixed(1)}%`);
+      row.info.textContent = jobProgressText(j);
+      const msg = typeof j.message === "string" ? j.message : "";
+      row.msg.textContent = msg;
+      row.msg.hidden = !msg;
+      row.msg.classList.toggle("warn", j.state === "failed");
+      return row.li;
+    });
+    for (const id of jobRows.keys()) if (!view.jobs.some((j) => j.id === id)) jobRows.delete(id);
+    const same = lis.length === ui.jobs.children.length && lis.every((li, i) => ui.jobs.children[i] === li);
+    if (!same) ui.jobs.replaceChildren(...lis);
+    const err = [view.jobsError, view.cancelError].filter(Boolean).join(" ");
+    ui.jobsSlot.hidden = !lis.length && !err;
+    ui.jobsInfo.textContent = err;
+    ui.jobsInfo.hidden = !err;
+  }
+
+  // Entry rows choose that source on click (or Enter / Space).
+  function sourceRow(e, index, kind) {
+    const li = el(
+      "li",
+      { class: "pick", role: "button", tabindex: "0", title: "Use this source" },
+      el("span", { class: "kind", text: kind }),
+      el("span", { class: "name", text: sourceName(e.url) }),
+      el("span", { class: "frame", text: frameLabel(e.frameId) })
+    );
+    li.addEventListener("click", () => chooseSource(index, e.url));
+    li.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      ev.preventDefault();
+      chooseSource(index, e.url);
+    });
+    return li;
+  }
+
   function renderSources() {
     const cap = view.captures;
     const rows = [];
-    const entries = cap && Array.isArray(cap.entries) ? cap.entries.slice(-MAX_SOURCES).reverse() : [];
-    for (const e of entries) {
+    const keys = []; // index + url per row: rows with the same text may hold another entry
+    const all = cap && Array.isArray(cap.entries) ? cap.entries : [];
+    for (let i = all.length - 1; i >= Math.max(0, all.length - MAX_SOURCES); i--) {
+      const e = all[i];
+      if (!e || typeof e.url !== "string") continue;
       const kind = e.kind === "hls" ? (e.isMaster ? "HLS master" : "HLS") : e.kind === "mp4" ? "MP4" : String(e.kind);
-      rows.push(
-        el(
-          "li",
-          null,
-          el("span", { class: "kind", text: kind }),
-          el("span", { class: "name", text: sourceName(e.url) }),
-          el("span", { class: "frame", text: frameLabel(e.frameId) })
-        )
-      );
+      rows.push(sourceRow(e, i, kind));
+      keys.push(`${i} ${e.url}`);
     }
     const active = cap && cap.active && typeof cap.active === "object" ? cap.active : {};
     for (const [frameId, a] of Object.entries(active)) {
@@ -555,7 +898,7 @@
       );
     }
     if (!rows.length) rows.push(el("li", { class: "empty", text: "Nothing captured yet. Play the video." }));
-    const sig = rows.map((r) => r.textContent).join("\n");
+    const sig = rows.map((r) => r.textContent).concat(keys).join("\n");
     if (sig === ui.sourcesSig) return; // polled every POLL_MS; keep the list's scroll
     ui.sourcesSig = sig;
     ui.sources.replaceChildren(...rows);
@@ -599,10 +942,15 @@
     if (show) {
       render();
       placePanel();
-      if (pollTimer === null) pollTimer = setInterval(() => refresh(false), POLL_MS);
-    } else if (pollTimer !== null) {
-      clearInterval(pollTimer);
+      if (pollTimer === null) {
+        pollTimer = setInterval(() => refresh(false), POLL_MS);
+        refreshJobs(); // just shown
+        refreshDeps();
+      }
+    } else {
+      if (pollTimer !== null) clearInterval(pollTimer);
       pollTimer = null;
+      stopJobs();
     }
   }
 
@@ -661,6 +1009,40 @@
     li .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
     li .frame { flex: none; color: #8e8e93; }
     li.empty { color: #8e8e93; }
+    li.pick { cursor: pointer; border-radius: 4px; }
+    li.pick:hover, li.pick:focus-visible { background: #2c2c2e; outline: none; }
+    .source { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .source.warn, .probe.warn, .deps { color: #ffd60a; }
+    label.check { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+    label.check input { margin: 0; }
+    button.download {
+      width: 100%; padding: 6px 0; border-radius: 6px; border: 0; background: #0a84ff; color: #fff;
+      font-weight: 600; cursor: pointer;
+    }
+    button.download:hover:not(:disabled) { background: #409cff; }
+    button.download:disabled { opacity: 0.45; cursor: default; }
+    .dlinfo { color: #aeaeb2; white-space: normal; overflow-wrap: anywhere; }
+    .dlinfo.ok { color: #30d158; }
+    .dlinfo.warn { color: #ff453a; }
+    ul.jobs { max-height: 180px; }
+    li.job { display: block; white-space: normal; padding: 4px 0; border-top: 1px solid #2c2c2e; }
+    .jhead { display: flex; align-items: center; gap: 6px; }
+    .jtitle { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .jstate { flex: none; color: #aeaeb2; }
+    .jstate.running { color: #64d2ff; }
+    .jstate.done { color: #30d158; }
+    .jstate.failed { color: #ff453a; }
+    button.jcancel {
+      flex: none; padding: 0 6px; border-radius: 4px; border: 1px solid #48484a; background: #2c2c2e;
+      cursor: pointer; font-size: 11px; color: #aeaeb2;
+    }
+    button.jcancel:hover:not(:disabled) { color: #fff; }
+    .bar { height: 4px; margin: 3px 0; background: #3a3a3c; border-radius: 2px; overflow: hidden; }
+    .bar .fill { height: 100%; width: 0; background: #0a84ff; }
+    .jinfo { color: #8e8e93; font-variant-numeric: tabular-nums; }
+    .jmsg { color: #aeaeb2; overflow-wrap: anywhere; }
+    .jmsg.warn, .jobsinfo { color: #ff453a; }
+    .probe { color: #aeaeb2; }
     ul.segments { max-height: 160px; }
     li.segment { align-items: center; gap: 4px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
     li.segment .idx { flex: none; width: 18px; text-align: right; color: #8e8e93; }
@@ -764,6 +1146,26 @@
     ui.modeRadios = mode.radios;
     ui.precisionRadios = precision.radios;
 
+    ui.source = el("div", { class: "source" });
+    ui.ytDlp = el("input", { type: "checkbox" });
+    ui.ytDlp.addEventListener("change", () => setYtDlp(ui.ytDlp.checked));
+    ui.ytDlpRow = el(
+      "label",
+      { class: "check", title: "Send the page URL to yt-dlp instead of the captured media" },
+      ui.ytDlp,
+      "Use yt-dlp (page URL)"
+    );
+    ui.depsInfo = el("div", { class: "deps" });
+    ui.variant = el("select", { "aria-label": "Quality" });
+    ui.variant.addEventListener("change", () => chooseVariant(Number(ui.variant.value)));
+    ui.variantRow = el("div", { class: "row" }, el("span", { class: "optname", text: "Quality" }), ui.variant);
+    ui.probeInfo = el("div", { class: "probe" });
+    ui.download = el("button", { class: "download", text: "Download" });
+    ui.download.addEventListener("click", download);
+    ui.downloadInfo = el("div", { class: "dlinfo" });
+    ui.jobs = el("ul", { class: "jobs" });
+    ui.jobsInfo = el("div", { class: "jobsinfo" });
+    ui.jobsSlot = el("div", null, el("h3", { text: "Jobs" }), ui.jobs, ui.jobsInfo);
     ui.sources = el("ul");
     ui.status = el("div", { class: "status" });
 
@@ -777,7 +1179,16 @@
       ui.segmentsSlot,
       el("div", { class: "row" }, el("span", { class: "optname", text: "Output" }), mode.box),
       el("div", { class: "row" }, el("span", { class: "optname", text: "Cut" }), precision.box),
-      el("h3", { text: "Sources" }),
+      el("h3", { text: "Source" }),
+      ui.source,
+      ui.ytDlpRow,
+      ui.variantRow,
+      ui.probeInfo,
+      ui.depsInfo,
+      ui.download,
+      ui.downloadInfo,
+      ui.jobsSlot,
+      el("h3", { text: "Sources", title: "Click one to use it" }),
       ui.sources,
       ui.status
     );
@@ -851,6 +1262,7 @@
   // panel's fields has focus: its key listener only sees the closed root's host.
   window.segdownPanelHasTextFocus = () => {
     const a = ui.root && ui.root.activeElement;
+    if (a && a.localName === "input" && a.type === "checkbox") return false; // the yt-dlp toggle takes no text
     return Boolean(a && ["input", "textarea", "select"].includes(a.localName));
   };
 
@@ -881,14 +1293,23 @@
 
   // Position and segments first, so the first show lands where the user left the
   // panel, with the restored marks (no flash of defaults).
+  // A failed load leaves saves blocked for this page (loadFailed): a save would
+  // overwrite the stored entry that could not be read.
   function loadStored() {
     const gen = ++loadGen;
+    loadFailed = false;
     return ask({ type: "loadPage" }).then((got) => {
       if (gen !== loadGen) return;
-      if (got.ok) applyStored(got);
-      restored = true;
+      if (got.ok) {
+        applyStored(got);
+        restored = true;
+        if (saveTimer !== null) scheduleSave(); // a change arrived before the load
+      } else {
+        loadFailed = true;
+        if (saveTimer !== null) clearTimeout(saveTimer);
+        saveTimer = null;
+      }
       pushSegments(); // restored marks reach the compact panel too
-      if (saveTimer !== null) scheduleSave(); // a change arrived before the load
       if (ui.host) render();
     });
   }
@@ -902,6 +1323,7 @@
     saveTimer = null;
     restored = false;
     Object.assign(view, { segments: [], segError: null, lastMark: null, error: "" });
+    view.download = { busy: view.download.busy, text: "", ok: false }; // the result belonged to the old page
     if (ui.host) render();
     loadStored();
   }
@@ -925,7 +1347,7 @@
   // (the hub writes both and prunes old pages).
   function save() {
     if (!restored) {
-      scheduleSave(); // retried once the stored entry is in
+      if (!loadFailed) scheduleSave(); // retried once the stored entry is in
       return;
     }
     const segments = view.segments.map(({ start, end }) => ({ start, end }));

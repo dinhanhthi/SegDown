@@ -3,7 +3,7 @@ Download video as segments from the internet.
 
 ## What it is
 
-SegDown will be a macOS menu bar app plus a browser extension: mark time ranges on a video in the browser, and only those ranges are downloaded. It is a work in progress; for now the repo holds the core package (`Packages/SegDownCore`), a dev CLI (`segdown-cli`), the menu bar app with its native messaging host (`segdown-host`), and a Chromium extension that marks segments on a page's video. The extension does not send the segments to the app yet, so downloads go through `segdown-cli` for now.
+SegDown is a macOS menu bar app plus a browser extension: mark time ranges on a video in the browser, and only those ranges are downloaded. The repo holds the core package (`Packages/SegDownCore`), a dev CLI (`segdown-cli`), the menu bar app with its native messaging host (`segdown-host`), and a Chromium extension that marks segments on a page's video and sends them to the app as download jobs. Safari support is still to come.
 
 - Direct media (mp4) and HLS streams, including clear-key AES-128 HLS, are cut with `ffmpeg`. Pages that `yt-dlp` supports go through `yt-dlp`.
 - Each range is saved as its own file, or all ranges are joined into one merged mp4.
@@ -64,18 +64,32 @@ It logs the app version and the missing tools.
 
 ### Using the panel
 
-The toolbar button or Alt+Shift+S shows or hides a floating panel (drag it by its title bar).
+The toolbar button opens the SegDown popup: its Toggle panel button (or Alt+Shift+S) shows or hides a floating panel (drag it by its title bar). The popup also lists this tab's jobs and the app's other recent jobs with their progress, errors, a Cancel button for queued and running jobs, and the file names of finished ones (open them from the SegDown menu bar).
 
 - Video: the panel picks the page's main video across all frames, including players in cross-origin iframes. Videos smaller than 200×112, videos inside ad containers and live streams are not picked automatically (a live stream shows as live and cannot be marked). When the page has several videos, a picker lets you choose another one; small and ad videos are listed with the reason and can still be chosen.
 - Timeline: a mini timeline shows the playhead and the segments; click it to seek.
 - Mark start / Mark end: mark a range at the video's current time. The end must be after the start.
 - Segments: the list is kept sorted. Edit a start or end as `h:mm:ss.s`, `mm:ss.s` or `ss.s`, jump to a segment's start, or delete it. Clear removes all segments after an inline "Clear? Yes / No". Overlapping segments get a warning. At most 100 segments.
 - Output: Separate (one file per segment) or Merged (one mp4). Cut: Precise (default) or Fast.
-- Sources: the media requests captured in the tab (MP4, HLS, and a count of loaded stream chunks per frame).
+- Sources: the media requests captured in the tab (MP4, HLS, and a count of loaded stream chunks per frame). Click one to download from it instead of the chosen source.
+- Jobs: below Download, this tab's jobs with their state, segment, progress, errors (for example an expired media link) and a Cancel button. Jobs run in the app, so closing the panel, the popup or the tab does not stop them.
 
 Segments, output and cut are saved per page URL (without the `#hash`) and come back when the page reloads. On sites that change the URL without reloading (single-page apps), the panel switches to the new URL's segments and a pending start is dropped.
 
 Fullscreen: when a player fullscreens its container, a compact panel (timeline, Mark start, Mark end) appears inside it. When a player fullscreens the bare `<video>`, or a page fullscreens the iframe that holds the player, there is no panel: use the keys and see the marks after leaving fullscreen.
+
+### Download segments
+
+1. Open the page and play the video, so the browser loads its media and the extension captures the request.
+2. Open the panel: toolbar button → Toggle panel, or Alt+Shift+S.
+3. Mark the segments (Mark start / Mark end, or `[` / `]`).
+4. Check the Source line: kind, host and file, frame, and how it was chosen. If it is wrong, click another entry in Sources.
+5. For an HLS master playlist, pick a Quality (the highest is preselected).
+6. Choose Output (Separate or Merged) and Cut (Precise or Fast).
+7. Optional: tick "Use yt-dlp (page URL)" to send the page URL to `yt-dlp` instead of the captured media. `yt-dlp` gets only the URL, no captured headers or cookies.
+8. Click Download. Follow the progress in the panel's Jobs or in the popup, and cancel a job there.
+
+Files land in `~/Downloads/SegDown/<page title>/`: `<page title> - 01 [0h00m02s-0h00m04s].mp4` per segment, or `<page title> - merged.mp4`. When a file with that name exists, the new one gets ` (2)`, ` (3)`… before the extension. Open them from the SegDown menu bar (Jobs → Show in Finder).
 
 ### Keyboard shortcuts
 
@@ -84,11 +98,10 @@ Fullscreen: when a player fullscreens its container, a compact panel (timeline, 
 
 ### Permissions
 
-- `nativeMessaging`: talk to the SegDown app through `segdown-host`. For now only the connection check above uses it.
+- `nativeMessaging`: talk to the SegDown app through `segdown-host`: send download jobs, read HLS qualities, and read job progress or cancel a job. Only the service worker uses it. While the panel or the popup shows a running job, progress is read every second over one open connection, which closes a few seconds after nothing needs it.
 - `storage`: segments, output and cut choices and the panel position in local storage, which only the service worker reads and writes (the panel asks it for the current page's entry); captured requests and per-tab panel state in session storage, which only the extension's trusted contexts can read.
 - `webRequest`: see the page's media requests (mp4, HLS) and their `Referer`, `Origin`, `User-Agent` and `Cookie` headers, so the media can be downloaded later as the browser would. The header values stay in the service worker's session storage; they are never given to pages or content scripts.
-- `webNavigation`: clear a tab's captures and panel state when it navigates, notice when a single-page site changes its URL, and drop a frame's videos when that frame navigates.
-- `tabs`: send messages to the right tab and frame, and find the active tab for the keyboard shortcut.
+- `webNavigation`: clear a tab's captures and panel state when it navigates, notice when a single-page site changes its URL, drop a frame's videos when that frame navigates, and record the top frame's URL for the yt-dlp page source.
 - Host access to all sites (`<all_urls>`): capture media requests on any site and run the content scripts in every frame, including cross-origin player iframes.
 
 ## How it fits together
@@ -141,6 +154,17 @@ swift run --package-path Packages/SegDownCore segdown-cli \
 - `--header` accepts only `Referer`, `Origin`, `User-Agent` and `Cookie`, and only with `--media`.
 - Files go to `~/Downloads/SegDown/<title>/` (title defaults to `segdown-cli`); `--out DIR` replaces `~/Downloads/SegDown`. Separate files are named `<title> - 01 [0h00m02s-0h00m04s].mp4`, a merged file `<title> - merged.mp4`. With `--page`, a separate file keeps the container yt-dlp picked (for example `.avi`).
 - Ctrl+C cancels the running download.
+
+## Troubleshooting
+
+- Progress stays near 0% for a long time on a late segment of an mp4: the server does not support HTTP Range requests, so `ffmpeg` cannot seek and reads the file from the start up to the segment.
+- "Media link expired or forbidden (HTTP 403/410). Play the video again and retry.": the captured link was tokenized or timed out. Play the video again and download right away.
+- DRM (Widevine, FairPlay) is not supported: there is no media request to capture, or the output is encrypted and does not play.
+- Wrong source picked: check the Source line before Download and pick another entry in Sources, or use "Use yt-dlp (page URL)" on sites `yt-dlp` supports.
+- "SegDown app not reachable: install browser integration": copy `SegDown.app` to `/Applications` first, then click "Install browser integration" in the SegDown menu. Install again after moving the app. The `ping` check in [Browser integration (Chromium)](#browser-integration-chromium) tests the connection.
+- Download disabled with a `brew install …` line: a tool the source needs is missing. Run the line, click Re-check in the SegDown menu, then reopen the panel. The extension caches the app's tool list for 30 seconds, so wait that long if the line stays.
+- "The site refused the download (HTTP 403/410)…", or YouTube or another site blocks `yt-dlp`: run `brew upgrade yt-dlp`; YouTube also needs `deno` (`brew install deno`).
+- Which hosts get a captured cookie: see the cookie note in [Not supported](#not-supported).
 
 ## Not supported
 

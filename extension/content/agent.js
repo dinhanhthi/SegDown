@@ -466,14 +466,47 @@
   // the page's open shadow roots; the SegDown panel's root is closed, so its
   // host is the target there and the panel says whether one of its fields has
   // focus (panel.js shares this frame's isolated world).
+  // A page's closed shadow root hides its focused element the same way: the
+  // target is then the host. Two tiers:
+  // - chrome.dom.openOrClosedShadowRoot (Chrome 88+, content scripts): descend
+  //   through the focused element's shadow roots, open or closed, to the element
+  //   that really has focus, then apply the text-field check to it.
+  // - without that API (e.g. Safari): a custom element (name with "-") without a
+  //   reachable shadowRoot counts as typing, since closed roots live on custom
+  //   elements in practice. Known false positive: while a focusable light-DOM
+  //   custom element has focus (e.g. <video-js tabindex="-1">), `[` / `]` are
+  //   left to the page and do not mark.
+  // The SegDown hosts are exempt (the panel is asked above; the compact panel
+  // has buttons only).
+  function shadowRootOf(t) {
+    try {
+      return chrome.dom.openOrClosedShadowRoot(t) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function isTextField(t) {
+    return t.isContentEditable || ["input", "textarea", "select"].includes(t.localName);
+  }
+
   function typingTarget(e) {
-    const t = e.composedPath()[0] || e.target;
+    let t = e.composedPath()[0] || e.target;
     if (!t || t.nodeType !== 1) return false;
     if (t.localName === "segdown-panel") {
       const hasFocus = window.segdownPanelHasTextFocus;
       return typeof hasFocus !== "function" || hasFocus();
     }
-    return t.isContentEditable || ["input", "textarea", "select"].includes(t.localName);
+    if (t.localName === "segdown-compact") return false;
+    const api = typeof chrome !== "undefined" && chrome.dom && typeof chrome.dom.openOrClosedShadowRoot === "function";
+    if (!api) return (t.localName.includes("-") && !t.shadowRoot) || isTextField(t);
+    for (let depth = 0; depth < 32; depth++) {
+      const root = shadowRootOf(t);
+      const inner = root && root.activeElement;
+      if (!inner || inner.nodeType !== 1) break;
+      t = inner;
+    }
+    return isTextField(t);
   }
 
   function onKeyDown(e) {

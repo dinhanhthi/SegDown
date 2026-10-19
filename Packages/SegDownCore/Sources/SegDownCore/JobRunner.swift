@@ -108,7 +108,8 @@ public actor JobRunner {
         switch request.source {
         case let .media(url, kind, headers, variantURL, audioURL):
             let (input, audio) = try await resolveMedia(
-                url: url, kind: kind, headers: headers, variantURL: variantURL, audioURL: audioURL, tracker: tracker
+                id: id, url: url, kind: kind, headers: headers, variantURL: variantURL, audioURL: audioURL,
+                tracker: tracker
             )
             parts = try await downloadMedia(
                 id: id, input: input, kind: kind, audio: audio, headers: headers, source: url,
@@ -142,13 +143,16 @@ public actor JobRunner {
     }
 
     /// The input (and separate audio) URLs for ffmpeg. For HLS without a chosen variant the
-    /// playlist is fetched, and a master playlist is replaced by its best variant.
+    /// playlist is fetched, and a master playlist is replaced by its best variant. A chosen
+    /// variant without an audio URL gets its audio rendition from the master (see `resolveVariant`).
     private func resolveMedia(
-        url: URL, kind: MediaKind, headers: [String: String], variantURL: URL?, audioURL: URL?,
+        id: String, url: URL, kind: MediaKind, headers: [String: String], variantURL: URL?, audioURL: URL?,
         tracker: ProgressTracker
     ) async throws -> (input: URL, audio: URL?) {
-        guard kind == .hls, variantURL == nil else {
-            return (variantURL ?? url, audioURL)
+        guard kind == .hls else { return (variantURL ?? url, audioURL) }
+        if let variantURL {
+            guard audioURL == nil else { return (variantURL, audioURL) }
+            return try await resolveVariant(variantURL, master: url, headers: headers, id: id, tracker: tracker)
         }
         tracker.begin(index: 0, message: "Reading playlist")
         let playlist = try await HLSPlaylist.fetch(url, headers: headers)
@@ -157,6 +161,28 @@ public actor JobRunner {
             throw JobError.invalid("The HLS master playlist has no playable variant")
         }
         return (selection.variant.url, selection.audioURL)
+    }
+
+    /// `variantURL` plus the audio rendition the master `url` lists for it. Falls back to the
+    /// variant alone when the fetch fails, `url` is a media playlist, or the master does not list
+    /// `variantURL` (`pickVariant` would then return another variant).
+    private func resolveVariant(
+        _ variantURL: URL, master url: URL, headers: [String: String], id: String, tracker: ProgressTracker
+    ) async throws -> (input: URL, audio: URL?) {
+        tracker.begin(index: 0, message: "Reading playlist")
+        let playlist: HLSPlaylist
+        do {
+            playlist = try await HLSPlaylist.fetch(url, headers: headers)
+        } catch {
+            // A cancel makes the fetch throw too: end the job instead of falling back.
+            try checkCancelled(id)
+            return (variantURL, nil)
+        }
+        guard let selection = playlist.pickVariant(preferred: variantURL),
+              selection.variant.url.absoluteString == variantURL.absoluteString else {
+            return (variantURL, nil)
+        }
+        return (variantURL, selection.audioURL)
     }
 
     /// One ffmpeg run per segment into `<tmp>/part-NNN.mp4`.

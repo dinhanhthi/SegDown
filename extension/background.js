@@ -1,6 +1,8 @@
 // SegDown background service worker (classic script, no modules).
 // Sections: config, media capture (3.2), hub + frame routing (3.3, auto-pick 3.4,
-// panel toggle 3.5, marking 3.6, fullscreen compact panel relay 3.8).
+// panel toggle 3.5, marking 3.6, fullscreen compact panel relay 3.8, source
+// correlation 4.1, HLS variant picker 4.2, send the job 4.3, progress + cancel
+// and the popup 4.4, yt-dlp secondary path 4.5).
 
 "use strict";
 
@@ -15,6 +17,9 @@ const DEBUG = true;
 const ALLOWED_HEADERS = ["Referer", "Origin", "User-Agent", "Cookie"];
 const MAX_HEADER_VALUE_BYTES = 8 * 1024; // Validation.maxHeaderValueBytes
 const MAX_ENTRIES_PER_TAB = 50;
+// Within the tab cap, so one frame (e.g. a page flooding fake .m3u8 requests)
+// cannot evict another frame's playlist.
+const MAX_ENTRIES_PER_FRAME = 20;
 const PENDING_TTL_MS = 60 * 1000;
 const MAX_PENDING = 500;
 // Request types that never carry media we can download.
@@ -86,7 +91,14 @@ function classify(pathname, ctype) {
 // Media capture: per-tab store in chrome.storage.session
 // Keys: cap:<tabId> -> [{url, frameId, kind, isMaster?, headers, ts}] (oldest first)
 //       act:<tabId> -> {<frameId>: {lastChunkUrl, count, ts}}
-//       hub:<tabId>, cand:<tabId>, segs:<tabId> and page:<tabId> belong to the hub (see the hub section).
+//       top:<tabId> -> the top frame's http(s) URL, from webNavigation (never from a content script)
+//       hub:<tabId>, cand:<tabId>, segs:<tabId>, page:<tabId>, src:<tabId>, probe:<tabId>, var:<tabId>,
+//       jobs:<tabId> and ytd:<tabId> belong to the hub (see the hub section).
+// isMaster comes from the app's probe (4.2): set on every entry with the probed URL,
+// and on entries captured later from the probe:<tabId> cache.
+// At most MAX_ENTRIES_PER_FRAME entries per frame (that frame's oldest mp4 goes
+// first, then its oldest entry) and MAX_ENTRIES_PER_TAB per tab (taken from the
+// frame with the most entries, same order).
 // Never call storage.session.setAccessLevel: Cookie values live here. (storage.local,
 // the panel's saved segments, is owned by the hub; see the end of its section.)
 // ---------------------------------------------------------------------------
@@ -97,6 +109,12 @@ const hubKey = (tabId) => `hub:${tabId}`;
 const candKey = (tabId) => `cand:${tabId}`;
 const segsKey = (tabId) => `segs:${tabId}`;
 const pageKey = (tabId) => `page:${tabId}`;
+const srcKey = (tabId) => `src:${tabId}`;
+const topKey = (tabId) => `top:${tabId}`;
+const probeKey = (tabId) => `probe:${tabId}`;
+const varKey = (tabId) => `var:${tabId}`;
+const jobsKey = (tabId) => `jobs:${tabId}`;
+const ytdKey = (tabId) => `ytd:${tabId}`;
 
 // Serialises read-modify-write per tab. A failed task never blocks the next one.
 const tabQueues = new Map();
@@ -117,22 +135,40 @@ function logError(err) {
 
 async function addEntry(tabId, entry) {
   const key = capKey(tabId);
-  const entries = (await chrome.storage.session.get({ [key]: [] }))[key];
+  const got = await chrome.storage.session.get({ [key]: [], [probeKey(tabId)]: {} });
+  const entries = got[key];
+  const probed = got[probeKey(tabId)][entry.url];
+  if (probed && Array.isArray(probed.variants)) entry.isMaster = probed.variants.length > 0;
   const index = entries.findIndex((e) => e.url === entry.url);
   const isNew = index < 0;
   if (!isNew) entries.splice(index, 1); // dedupe by URL (mp4 Range requests, playlist refetches)
   entries.push(entry);
-  while (entries.length > MAX_ENTRIES_PER_TAB) {
-    // Drop the oldest mp4 first so segment churn never evicts a playlist.
-    const mp4 = entries.findIndex((e) => e.kind === "mp4");
-    entries.splice(mp4 >= 0 ? mp4 : 0, 1);
-  }
+  const inFrame = () => entries.filter((e) => e.frameId === entry.frameId).length;
+  while (inFrame() > MAX_ENTRIES_PER_FRAME) dropOldest(entries, entry.frameId);
+  while (entries.length > MAX_ENTRIES_PER_TAB) dropOldest(entries, largestFrame(entries));
   await chrome.storage.session.set({ [key]: entries });
   if (DEBUG && isNew) {
     console.debug(
       `[SegDown] capture tab=${tabId} frame=${entry.frameId} kind=${entry.kind} headers=[${Object.keys(entry.headers).join(", ")}]`
     );
   }
+}
+
+// Removes one entry of frameId: its oldest mp4 first, so segment churn never
+// evicts a playlist, else its oldest entry.
+function dropOldest(entries, frameId) {
+  let i = entries.findIndex((e) => e.frameId === frameId && e.kind === "mp4");
+  if (i < 0) i = entries.findIndex((e) => e.frameId === frameId);
+  entries.splice(i, 1);
+}
+
+// The frame with the most entries (ties: the one holding the oldest entry).
+function largestFrame(entries) {
+  const counts = new Map();
+  for (const e of entries) counts.set(e.frameId, (counts.get(e.frameId) || 0) + 1);
+  let best = entries[0].frameId;
+  for (const [frameId, n] of counts) if (n > counts.get(best)) best = frameId;
+  return best;
 }
 
 async function bumpActive(tabId, frameId, url, ts) {
@@ -143,7 +179,12 @@ async function bumpActive(tabId, frameId, url, ts) {
   await chrome.storage.session.set({ [key]: active });
 }
 
+// Bumped by clearTab, so a probe that was in flight does not write into the next page.
+const tabGens = new Map();
+const tabGen = (tabId) => tabGens.get(tabId) || 0;
+
 function clearTab(tabId) {
+  tabGens.set(tabId, tabGen(tabId) + 1);
   return withTab(tabId, () =>
     chrome.storage.session.remove([
       capKey(tabId),
@@ -152,7 +193,22 @@ function clearTab(tabId) {
       candKey(tabId),
       segsKey(tabId),
       pageKey(tabId),
+      srcKey(tabId),
+      topKey(tabId),
+      probeKey(tabId),
+      varKey(tabId),
+      jobsKey(tabId),
+      ytdKey(tabId),
     ])
+  );
+}
+
+// The top frame's URL for the yt-dlp page source (4.1). Only http(s) URLs are kept.
+function setTopURL(tabId, url) {
+  return withTab(tabId, () =>
+    httpURL(url) && url.length <= MAX_URL_LENGTH
+      ? chrome.storage.session.set({ [topKey(tabId)]: url })
+      : chrome.storage.session.remove(topKey(tabId))
   );
 }
 
@@ -204,7 +260,7 @@ chrome.webRequest.onHeadersReceived.addListener(
     // If the worker restarted since onSendHeaders, store the entry without headers.
     const p = pending.get(requestId);
     const headers = p ? p.headers : {};
-    // isMaster stays undefined here; phase 4 probes playlists through the app.
+    // isMaster: from an earlier probe of this URL (addEntry), else set by the 4.2 probe.
     withTab(tabId, () => addEntry(tabId, { url, frameId, kind, headers, ts })).catch(logError);
   },
   { urls: ["<all_urls>"] },
@@ -219,8 +275,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   clearTab(tabId).catch(logError);
 });
 
+// clearTab and setTopURL share the tab queue, so the new URL lands after the clear.
 chrome.webNavigation.onCommitted.addListener((details) => {
-  if (details.frameId === 0) clearTab(details.tabId).catch(logError);
+  if (details.frameId !== 0) return;
+  clearTab(details.tabId).catch(logError);
+  setTopURL(details.tabId, details.url).catch(logError);
 });
 
 // ---------------------------------------------------------------------------
@@ -230,8 +289,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //
 // Content -> hub: chrome.runtime.sendMessage({type, ...}). The hub takes the tab
 // and frame ONLY from sender.tab.id / sender.frameId, never from the body. It
-// ignores other extensions (sender.id), senders without a tab, and types it does
-// not own (no sendResponse, so later onMessage listeners still get them). A
+// ignores other extensions (sender.id), senders without a tab (except the popup,
+// see "Popup" below), and types it does not own (no sendResponse, so later onMessage listeners still get them). A
 // malformed hub message gets {ok: false, error: "bad-message"}. Every hub reply
 // has `ok`; failures add `error`.
 //
@@ -321,6 +380,173 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              200 most recent seg:* entries are kept.
 //   savePos {x, y} (finite) -> {ok}. Writes panel:pos.
 //
+//   Source correlation (4.1), top frame only (else {ok: false, error:
+//   "not-top-frame"}). Content scripts only ever get a source summary
+//   {kind: "hls" | "mp4" | "page", host, file (last path component, no query),
+//   frameId, via: "currentSrc" | "capture" | "page" | "user"}, never the URL's
+//   query or header values. The full Source (URL + captured headers) stays in
+//   this worker: resolveSource(tabId) builds it for the job (4.3).
+//   getSource  -> {ok, source: summary | null, ytDlp: boolean} (null: nothing
+//              captured and no http(s) top URL; ytDlp: the 4.5 toggle below).
+//              For an hls source the summary adds the 4.2 variant fields
+//              (below). Also starts the probe when one is due and the panel
+//              is open.
+//   chooseSource {index, url}: index into getState's captures.entries and that
+//              entry's url (the list shifts between polls, so the hub checks
+//              entries[index].url === url and else looks the url up). Only hls
+//              and mp4 entries. -> {ok, source: summary}, or {ok: false, error:
+//              "unknown-source"} when it is gone. The choice (src:<tabId>)
+//              overrides the auto order until the selected video or the page
+//              changes. It also turns the 4.5 yt-dlp toggle off.
+//   Order (first match wins; `selected` is hub:<tabId>.selected):
+//     0. the 4.5 yt-dlp toggle, when on and top:<tabId> holds an http(s) URL:
+//        the page URL (via "page"); without a top URL the order goes on;
+//     1. the user's choice (via "user");
+//     2. the selected candidate's currentSrc (http(s) only, via "currentSrc"):
+//        kind and headers from the capture with the same URL, else kind from
+//        the path (.m3u8 -> hls, otherwise mp4) and no headers;
+//     3. in the selected video's frame, the newest hls capture with isMaster,
+//        then the newest hls capture (isMaster is unknown until a probe), then
+//        the newest mp4 (via "capture");
+//     4. tab-wide, when that frame has nothing (or nothing is selected): frames
+//        with active .ts/.m4s chunks (act:<tabId>) first, then hls before mp4,
+//        then a probed master (4.2), then the newest (via "capture", with the capture's own frameId; the
+//        panel's Sources list lets the user pick another one);
+//     5. the page URL for yt-dlp, from top:<tabId> (via "page").
+//
+//   HLS variant picker (4.2). Only this worker talks to the app:
+//   chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "probe", source:
+//   {type: "media", url, kind: "hls", headers}}) -> {type: "variants", variants:
+//   [{url, bandwidth, resolution?: {width, height} | null, audioGroup?}]} ([] for
+//   a media playlist) or {type: "error", code, message}. getSource and
+//   chooseSource start a probe run while the panel is open (one per tab at a
+//   time, in the background):
+//   it probes the resolved hls source when its URL has no cached result (a
+//   failure is retried after PROBE_RETRY_MS, a success is kept until the tab is
+//   cleared). When that source came from the capture order and is a media
+//   playlist (players fetch the variant playlists after the master), it then
+//   probes the same frame's other hls captures with unknown isMaster, oldest
+//   first, until one is a master; at most MAX_PROBES_PER_RUN probes, stopping at
+//   the first failure. Each result sets isMaster on the captures with that URL
+//   (variants non-empty), so the order above prefers the master. A run that
+//   stored anything sends `sourceChanged` to the panel.
+//   Summary fields for an hls source (numbers only, never variant URLs):
+//     probe {state: "pending"} (not probed yet) | {state: "error", message}
+//       (message: "SegDown app not reachable: install browser integration" when
+//       the native call fails, else the app's message);
+//     variants [{width, height (null when the playlist has no RESOLUTION),
+//       bandwidth}], highest bandwidth first (ties: playlist order, so index 0
+//       is the variant the app picks by default), and variant: the chosen index.
+//   chooseVariant {index}: index into the current source's variants. -> {ok,
+//              source: summary}, or {ok: false, error: "unknown-variant"}.
+//              Index 0 removes the choice. The choice (var:<tabId>) holds for
+//              that source and selected video until either changes or the page
+//              changes.
+//   resolveSource adds variantURL only for a non-default choice: without it the
+//   app fetches the master itself and also takes the variant's separate audio
+//   rendition; with it the app uses that playlist as is (a separate audio
+//   rendition is not added). audioURL is never set.
+//
+//   yt-dlp secondary path (4.5), top frame only (else {ok: false, error:
+//   "not-top-frame"}). A page source {type: "page", url} is the top URL; it has
+//   no headers (yt-dlp fetches the page itself), no probe and no variants.
+//   setYtDlp {on: boolean}: the panel's "Use yt-dlp (page URL)" checkbox. on
+//              stores ytd:<tabId>, off removes it. -> {ok, source: summary,
+//              ytDlp}. While on, the source is the page URL whatever the
+//              captures (order step 0). Cleared with the tab (top-frame
+//              navigation), on a same-document page change and by chooseSource.
+//   deps       -> {ok, missing: [tool], appError?}: the tools the app reports
+//              missing, each one of "yt-dlp" | "ffmpeg" | "ffprobe" | "deno"
+//              (others dropped). The hub asks the app
+//              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "ping"}) ->
+//              {type: "pong", version, missing: [string]}, at most once per
+//              DEPS_TTL_MS (one cached answer for every tab; concurrent callers
+//              share one request). Any other reply or a failed call -> missing
+//              [] and appError (APP_UNREACHABLE when the call fails), cached
+//              the same way. The panel asks when it opens (not on its poll); it
+//              disables Download when the source needs a missing tool (page:
+//              yt-dlp, ffmpeg; hls/mp4: ffmpeg, ffprobe) and warns, without
+//              blocking, when a page source lacks deno. appError blocks nothing
+//              (Download then reports the app's state as before).
+//
+//   Send the job (4.3), top frame only (else {ok: false, error: "not-top-frame"}).
+//   download {title: string, mode: "separate" | "merged", precision: "precise" |
+//              "fast"}: the panel's Download button. title is the top document's
+//              title, untrusted: the hub turns control characters (U+0000-U+001F,
+//              U+007F-U+009F) into spaces, trims, and keeps the first MAX_TITLE_CHARS code points (the
+//              app counts characters, which are never more than code points, and
+//              sanitizes it again). Everything else comes from the hub's own
+//              state: segments from segs:<tabId> (segmentsChanged; [] ->
+//              {ok: false, error: "no-segments"}) and the source from
+//              resolveSource(tabId) (with captured headers; null -> {ok: false,
+//              error: "no-source"}). Then:
+//              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "enqueue", job:
+//              {source, title, segments: [{start, end}], mode, precision}}) ->
+//                {type: "enqueued", id} -> {ok, jobId}; {jobId, title, ts} is
+//                  appended to jobs:<tabId> (for 4.4);
+//                {type: "error", code, message} -> {ok: false, error: "app-error",
+//                  code, message} (the app's message, e.g. a validation error);
+//                the native call fails -> {ok: false, error: "app-unreachable",
+//                  message: "SegDown app not reachable: install browser integration"};
+//                any other reply -> {ok: false, error: "app-error", code:
+//                  "internal", message}.
+//              The reply never carries the source, its URL or headers. The panel
+//              disables the button while a call is in flight; the hub does not
+//              dedupe (two clicks are two jobs). The id and title also go into
+//              jobt (below), which survives the tab's navigation.
+//
+//   Progress + cancel (4.4), top frame only (else {ok: false, error:
+//   "not-top-frame"}); the popup sends the same types (see "Popup" below).
+//   jobs       -> {ok, jobs: [job], appError?}: this tab's jobs (jobs:<tabId>),
+//              newest first. job = {id, title, state: "queued" | "running" |
+//              "done" | "failed" | "cancelled" | "unknown", segmentIndex (0-based,
+//              < segmentCount), segmentCount, fraction (0...1, the whole job),
+//              message (string | null, the app's text, e.g. "Media link expired
+//              or forbidden (HTTP 403/410). Play the video again and retry."),
+//              outputs (file names only, never folders)}. "unknown": the app's
+//              status does not list the id (the app restarted or dropped it).
+//              An empty jobs:<tabId> answers [] without asking the app. Else the
+//              hub asks the app {type: "status"} (all jobs; concurrent callers
+//              share one request) -> {type: "status", jobs: [JobStatus]}; every
+//              field is checked and copied (fraction clamped, message capped at
+//              MAX_MESSAGE_CHARS, outputs reduced to their last path component).
+//              When that fails, appError carries the reason and the jobs keep the
+//              last status this worker saw (or "unknown").
+//   cancel {id} id: [A-Za-z0-9-]{1,64}, and one of this tab's jobs:<tabId> ids
+//              (else {ok: false, error: "unknown-job"}).
+//              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "cancel", id})
+//                {type: "cancelled", id} -> {ok};
+//                {type: "error", code, message} -> {ok: false, error: "app-error",
+//                  code, message};
+//                the native call fails -> {ok: false, error: "app-unreachable",
+//                  message: APP_UNREACHABLE}; any other reply -> app-error
+//                  "internal".
+//   Polling: the panel and the popup ask `jobs` every JOBS_POLL_MS (1 s) while
+//   they are shown and a listed job is queued or running, plus once when they
+//   open and after a Download or Cancel. The hub sends `status` over ONE
+//   chrome.runtime.connectNative(NATIVE_HOST) port (the host relays every frame
+//   as its own request and answers in order, so replies resolve a FIFO of
+//   pending requests): opened on the first status, reused, closed after
+//   PORT_IDLE_MS without a request. A request without an answer after
+//   STATUS_TIMEOUT_MS closes the port (a late reply would resolve the wrong
+//   request) and fails every pending one; so does onDisconnect. After either,
+//   the next status goes through sendNativeMessage and the one after reopens
+//   the port. enqueue, cancel, probe and ping always use sendNativeMessage. Jobs run
+//   in the app: closing the port never affects them.
+//
+// Popup (4.4, extension page popup/popup.html). Accepted only from this
+// extension (sender.id) without sender.tab and with sender.url under
+// chrome-extension://<id>/popup/. The popup is trusted, so these bodies carry
+// the tab: tabId is the active tab from chrome.tabs.query in the popup (an
+// integer >= 0, or null when there is none). Content scripts cannot send these.
+//   togglePanel {tabId} -> {ok}: setPanelOpen(tabId, null), as the shortcut.
+//   jobs {tabId} -> {ok, jobs, recent, appError?}: jobs as above for that tab
+//              ([] for null), and recent: the app's other jobs (newest first, at
+//              most MAX_RECENT_JOBS), titled from jobt or "Job <first 8 chars of
+//              the id>". Always asks the app.
+//   cancel {id} -> as above, but the id may be any id in jobt or in the last
+//              status reply.
+//
 // Hub -> content: chrome.tabs.sendMessage(tabId, msg, {frameId}). agent.js and
 // panel.js share each frame, so every message names its receiver in `to`;
 // each listener ignores the others.
@@ -333,6 +559,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //     segments {segments: [{start, end}]}
 //     mark {action, time, frameId, videoKey, start?, end?} | markError {action, error}
 //   to "panel" (frameId 0):
+//     sourceChanged {}: a probe run stored results; the panel asks getSource.
 //     pageChanged {}: the top URL (without hash) changed without a reload
 //       (pushState / replaceState); the panel flushes its pending save (still
 //       keyed to the old page) and runs loadPage for the new one.
@@ -345,14 +572,16 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //     Also sent after panelOpen changes: agents listen for `[` / `]` only while
 //     the panel is open, and the panel shows or hides itself.
 //
-// Panel toggle (3.5): chrome.action.onClicked and the "toggle-panel" command
-// flip panelOpen for that tab, then send state to "all". The panel starts hidden
+// Panel toggle (3.5): the "toggle-panel" command and the popup's Toggle panel
+// button (togglePanel, 4.4; with a default_popup chrome.action.onClicked never
+// fires) flip panelOpen for that tab, then send state to "all". The panel starts hidden
 // and mounts on the first panelOpen: true. Top-frame navigation clears hub:<tabId>,
 // so the panel is closed again on the next page.
 //
-// Same-document URL changes (webNavigation.onHistoryStateUpdated, frame 0, to a
-// URL that, without its hash, differs from the one page:<tabId> was loaded for): the hub
-// clears pendingStart and segs:<tabId> (captures stay; the next video's requests
+// Same-document URL changes (webNavigation.onHistoryStateUpdated, frame 0) update
+// top:<tabId>. When the URL, without its hash, differs from the one page:<tabId> was
+// loaded for, the hub also clears pendingStart, segs:<tabId>, the source and
+// variant choices src:<tabId> / var:<tabId> and the 4.5 yt-dlp toggle ytd:<tabId> (captures and probe results stay; the next video's requests
 // add to them), relays [] segments to the compact panel and sends `state` to
 // "all" and `pageChanged` to the panel. The selection stays until the agents
 // report other videos.
@@ -371,6 +600,20 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   cand:<tabId> -> {<frameId>: [candidate, ...]}
 //   segs:<tabId> -> [{start, end}]   (the top panel's segments, for the compact panel)
 //   page:<tabId> -> {key: "seg:<url>", documentId}   (persistence key, see above)
+//   src:<tabId>  -> {url, selected}   (chooseSource: the entry's URL and the
+//                    selection it was made for; never sent to content scripts)
+//   probe:<tabId> -> {<playlist url>: {ts, variants: [{url, bandwidth, width,
+//                    height, audio (has an AUDIO group)}]} | {ts, error: {code,
+//                    message}}}   (4.2 probe results, no headers; at most
+//                    MAX_PROBE_CACHE URLs, oldest ts dropped)
+//   var:<tabId>  -> {source, url, selected}   (chooseVariant: the master's URL, the
+//                    chosen variant's URL, the selection; never sent to content scripts)
+//   ytd:<tabId>  -> true   (4.5 setYtDlp: the page URL goes to yt-dlp; absent = off)
+//   jobs:<tabId> -> [{jobId, title, ts}]   (4.3 enqueued jobs, oldest first, at most
+//                    MAX_JOBS_PER_TAB; title as sent to the app)
+//   jobt         -> {<jobId>: {title, ts}}   (4.4: every job this extension enqueued,
+//                    for the popup's titles and its cancel check; at most
+//                    MAX_KNOWN_JOBS, oldest ts dropped; not cleared with a tab)
 // chrome.storage.local (persistent; only this worker reads or writes it, and its
 // access level is set to trusted contexts where the browser supports that):
 //   seg:<url>    -> {segments, mode, precision, ts}   (at most 200, newest ts kept)
@@ -390,12 +633,33 @@ const PREFS_KEY = "panel:prefs";
 const POS_KEY = "panel:pos";
 const MODES = new Set(["separate", "merged"]);
 const PRECISIONS = new Set(["precise", "fast"]);
+const NATIVE_HOST = "com.math2it.segdown";
+const APP_UNREACHABLE = "SegDown app not reachable: install browser integration";
+const PROBE_RETRY_MS = 30 * 1000; // a failed probe of a URL is not repeated sooner
+const MAX_PROBES_PER_RUN = 6;
+const MAX_PROBE_CACHE = 50; // probed URLs kept per tab
+const MAX_VARIANTS = 100; // variants kept per master
+const MAX_MESSAGE_CHARS = 300;
+const MAX_TITLE_CHARS = 300; // Validation.maxTitleLength
+const MAX_JOBS_PER_TAB = 20;
+const JOB_ID_RE = /^[A-Za-z0-9-]{1,64}$/; // the app's ids are UUIDs
+const JOB_STATES = new Set(["queued", "running", "done", "failed", "cancelled"]);
+const MAX_KNOWN_JOBS = 100; // jobt entries
+const MAX_RECENT_JOBS = 50;
+const MAX_OUTPUTS = 100; // output names per job
+const PORT_IDLE_MS = 5 * 1000;
+const STATUS_TIMEOUT_MS = 20 * 1000;
+const TITLES_KEY = "jobt";
+const DEPS_TTL_MS = 30 * 1000; // ping answers (missing tools) are reused this long
+const TOOLS = new Set(["yt-dlp", "ffmpeg", "ffprobe", "deno"]); // SegDownCore Tool raw values
 
 const isFiniteNum = (n) => typeof n === "number" && Number.isFinite(n);
 const isTime = (n) => isFiniteNum(n) && n >= 0;
 const isDuration = (n) => n === null || isTime(n);
 const isVideoKey = (k) => typeof k === "string" && VIDEO_KEY_RE.test(k);
 const isObject = (o) => o !== null && typeof o === "object" && !Array.isArray(o);
+const isJobId = (id) => typeof id === "string" && JOB_ID_RE.test(id);
+const isTabId = (id) => Number.isInteger(id) && id >= 0;
 
 function hubLog(...args) {
   if (DEBUG) console.debug("[SegDown] hub", ...args);
@@ -476,7 +740,46 @@ const HUB_VALIDATORS = new Map([
     },
   ],
   ["savePos", (m) => (isFiniteNum(m.x) && isFiniteNum(m.y) ? { x: m.x, y: m.y } : null)],
+  ["getSource", () => ({})],
+  [
+    "chooseSource",
+    (m) =>
+      Number.isInteger(m.index) && m.index >= 0 && m.index < MAX_ENTRIES_PER_TAB &&
+      typeof m.url === "string" && m.url.length <= MAX_URL_LENGTH
+        ? { index: m.index, url: m.url }
+        : null,
+  ],
+  [
+    "chooseVariant",
+    (m) => (Number.isInteger(m.index) && m.index >= 0 && m.index < MAX_VARIANTS ? { index: m.index } : null),
+  ],
+  [
+    "download",
+    (m) =>
+      typeof m.title === "string" && MODES.has(m.mode) && PRECISIONS.has(m.precision)
+        ? { title: cleanTitle(m.title), mode: m.mode, precision: m.precision }
+        : null,
+  ],
+  ["jobs", () => ({})],
+  ["cancel", (m) => (isJobId(m.id) ? { id: m.id } : null)],
+  ["setYtDlp", (m) => (typeof m.on === "boolean" ? { on: m.on } : null)],
+  ["deps", () => ({})],
 ]);
+
+// Messages from the popup (an extension page; see "Popup" in the protocol).
+const POPUP_VALIDATORS = new Map([
+  ["togglePanel", (m) => (isTabId(m.tabId) ? { tabId: m.tabId } : null)],
+  ["jobs", (m) => (m.tabId === null || isTabId(m.tabId) ? { tabId: m.tabId } : null)],
+  ["cancel", (m) => (isJobId(m.id) ? { id: m.id } : null)],
+]);
+
+// Control characters become spaces, then at most MAX_TITLE_CHARS code points (never splits
+// a surrogate pair).
+function cleanTitle(title) {
+  return Array.from(title.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim())
+    .slice(0, MAX_TITLE_CHARS)
+    .join("");
+}
 
 function cleanSegments(list) {
   if (!Array.isArray(list) || list.length > MAX_SEGMENTS) return null;
@@ -838,7 +1141,7 @@ async function onPageChanged(tabId, url) {
     const h = await readHub(tabId);
     h.pendingStart = null; // a start belongs to the page it was marked on
     await writeHub(tabId, h);
-    await chrome.storage.session.remove(segsKey(tabId));
+    await chrome.storage.session.remove([segsKey(tabId), srcKey(tabId), varKey(tabId), ytdKey(tabId)]);
     return h;
   });
   if (!hub) return;
@@ -846,6 +1149,620 @@ async function onPageChanged(tabId, url) {
   notifyAll(tabId, { type: "state", state: hub });
   notifyPanel(tabId, { type: "pageChanged" });
   hubLog(`pageChanged tab=${tabId}`);
+}
+
+// --- source correlation (4.1; rules under "Source correlation" in the protocol) ---
+
+const isMediaEntry = (e) => isObject(e) && (e.kind === "hls" || e.kind === "mp4") && typeof e.url === "string";
+
+// Only allowlisted headers, copied (the entry came from pickHeaders already).
+function entrySource(e, via) {
+  const headers = {};
+  for (const name of ALLOWED_HEADERS) if (isObject(e.headers) && typeof e.headers[name] === "string") headers[name] = e.headers[name];
+  return { source: { type: "media", url: e.url, kind: e.kind, headers }, frameId: e.frameId, via };
+}
+
+// Pure: {source, frameId, via} or null. `media` holds hls/mp4 entries, oldest first.
+function pickSource({ selected, currentSrc, choice, media, active, topURL, forcePage }) {
+  if (forcePage && topURL) return { source: { type: "page", url: topURL }, frameId: 0, via: "page" };
+  if (choice) {
+    const e = media.findLast((x) => x.url === choice.url);
+    if (e) return entrySource(e, "user");
+  }
+  if (selected && currentSrc) {
+    const e = media.findLast((x) => x.url === currentSrc);
+    if (e) return entrySource(e, "currentSrc");
+    const kind = httpURL(currentSrc).pathname.toLowerCase().endsWith(".m3u8") ? "hls" : "mp4";
+    return { source: { type: "media", url: currentSrc, kind, headers: {} }, frameId: selected.frameId, via: "currentSrc" };
+  }
+  if (selected) {
+    const own = media.filter((e) => e.frameId === selected.frameId);
+    const e =
+      own.findLast((x) => x.kind === "hls" && x.isMaster === true) ||
+      own.findLast((x) => x.kind === "hls") ||
+      own.findLast((x) => x.kind === "mp4");
+    if (e) return entrySource(e, "capture");
+  }
+  let best = null;
+  let bestTier = -1;
+  for (const e of media) {
+    const tier = (isObject(active[e.frameId]) ? 4 : 0) + (e.kind === "hls" ? 2 : 0) + (e.isMaster === true ? 1 : 0);
+    if (tier >= bestTier) [best, bestTier] = [e, tier]; // >=: the newest wins a tie
+  }
+  if (best) return entrySource(best, "capture");
+  return topURL ? { source: { type: "page", url: topURL }, frameId: 0, via: "page" } : null;
+}
+
+// Reads everything in one tab-queue turn. A choice made for another video (or
+// none) is dropped here, so it cannot come back when that video is re-selected.
+function correlate(tabId) {
+  return withTab(tabId, async () => {
+    const keys = [capKey(tabId), actKey(tabId), candKey(tabId), srcKey(tabId), topKey(tabId), ytdKey(tabId)];
+    const got = await chrome.storage.session.get(keys);
+    const hub = await readHub(tabId);
+    const sel = hub.selected;
+    const cand = sel ? ((got[candKey(tabId)] || {})[sel.frameId] || []).find((v) => v.videoKey === sel.videoKey) : null;
+    let choice = isObject(got[srcKey(tabId)]) ? got[srcKey(tabId)] : null;
+    if (choice && !sameSelection(choice.selected || null, sel)) {
+      await chrome.storage.session.remove(srcKey(tabId));
+      choice = null;
+    }
+    const top = got[topKey(tabId)];
+    return pickSource({
+      selected: sel,
+      currentSrc: cand && cand.currentSrc ? cand.currentSrc : null,
+      choice,
+      media: (got[capKey(tabId)] || []).filter(isMediaEntry),
+      active: isObject(got[actKey(tabId)]) ? got[actKey(tabId)] : {},
+      topURL: typeof top === "string" && httpURL(top) ? top : null,
+      forcePage: got[ytdKey(tabId)] === true,
+    });
+  });
+}
+
+// For the job builder (4.3): the full Source with captured headers, or null.
+// Service-worker only; never send its result to a content script. Reads the
+// probe cache only (no native call); variantURL only for a non-default choice.
+async function resolveSource(tabId) {
+  const r = await correlate(tabId);
+  if (!r) return null;
+  if (isHLS(r)) {
+    const { list, choice } = await readVariants(tabId, r.source.url);
+    const i = choice ? list.findIndex((v) => v.url === choice.url) : -1;
+    if (i > 0) r.source.variantURL = list[i].url;
+  }
+  return r.source;
+}
+
+// Explicit field map: no query, no headers (see the protocol).
+function summarizeSource(r) {
+  if (!r) return null;
+  const u = new URL(r.source.url);
+  const parts = u.pathname.split("/").filter(Boolean);
+  return {
+    kind: r.source.type === "page" ? "page" : r.source.kind,
+    host: u.host,
+    file: parts.length ? parts[parts.length - 1].slice(0, 200) : "",
+    frameId: r.frameId,
+    via: r.via,
+  };
+}
+
+const readYtDlp = (tabId) =>
+  withTab(tabId, async () => (await chrome.storage.session.get(ytdKey(tabId)))[ytdKey(tabId)] === true);
+
+async function onGetSource(tabId, frameId) {
+  if (frameId !== 0) return { ok: false, error: "not-top-frame" };
+  const source = await describeSource(tabId, await correlate(tabId));
+  return { ok: true, source, ytDlp: await readYtDlp(tabId) };
+}
+
+async function onChooseSource(tabId, frameId, { index, url }) {
+  if (frameId !== 0) return { ok: false, error: "not-top-frame" };
+  const chosen = await withTab(tabId, async () => {
+    const key = capKey(tabId);
+    const entries = (await chrome.storage.session.get({ [key]: [] }))[key];
+    const at = entries[index];
+    const e = at && at.url === url ? at : entries.findLast((x) => isObject(x) && x.url === url);
+    if (!isMediaEntry(e)) return null;
+    const { selected } = await readHub(tabId);
+    await chrome.storage.session.set({ [srcKey(tabId)]: { url: e.url, selected } });
+    await chrome.storage.session.remove(ytdKey(tabId)); // a picked capture beats the yt-dlp toggle
+    return e;
+  });
+  if (!chosen) return { ok: false, error: "unknown-source" };
+  hubLog(`chooseSource tab=${tabId} frame=${chosen.frameId} kind=${chosen.kind}`);
+  return { ok: true, source: await describeSource(tabId, await correlate(tabId)) };
+}
+
+// --- yt-dlp secondary path (4.5; rules under "yt-dlp secondary path" in the protocol) ---
+
+async function onSetYtDlp(tabId, frameId, { on }) {
+  if (frameId !== 0) return { ok: false, error: "not-top-frame" };
+  await withTab(tabId, () =>
+    on ? chrome.storage.session.set({ [ytdKey(tabId)]: true }) : chrome.storage.session.remove(ytdKey(tabId))
+  );
+  hubLog(`setYtDlp tab=${tabId} ${on}`);
+  const source = await describeSource(tabId, await correlate(tabId));
+  return { ok: true, source, ytDlp: await readYtDlp(tabId) };
+}
+
+// -> {missing: [tool]} or {missing: [], appError}. Never throws.
+async function pingNative() {
+  let reply;
+  try {
+    reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "ping" });
+  } catch {
+    return { missing: [], appError: APP_UNREACHABLE };
+  }
+  if (isObject(reply) && reply.type === "pong" && Array.isArray(reply.missing)) {
+    return { missing: [...new Set(reply.missing.filter((t) => typeof t === "string" && TOOLS.has(t)))] };
+  }
+  return { missing: [], appError: "Unexpected reply from the SegDown app." };
+}
+
+const depsCache = { ts: 0, result: null, run: null };
+
+function fetchDeps() {
+  if (depsCache.result && Date.now() - depsCache.ts < DEPS_TTL_MS) return Promise.resolve(depsCache.result);
+  if (!depsCache.run) {
+    depsCache.run = pingNative()
+      .then((result) => {
+        Object.assign(depsCache, { ts: Date.now(), result });
+        hubLog(`ping missing=[${result.missing.join(", ")}]${result.appError ? " (app error)" : ""}`);
+        return result;
+      })
+      .finally(() => {
+        depsCache.run = null;
+      });
+  }
+  return depsCache.run;
+}
+
+async function onDeps(frameId) {
+  if (frameId !== 0) return { ok: false, error: "not-top-frame" };
+  const { missing, appError } = await fetchDeps();
+  const reply = { ok: true, missing: [...missing] };
+  if (appError) reply.appError = appError;
+  return reply;
+}
+
+// --- HLS variant picker (4.2; rules under "HLS variant picker" in the protocol) ---
+
+const isHLS = (r) => Boolean(r && r.source.type === "media" && r.source.kind === "hls");
+
+// Highest bandwidth first; sort is stable, so equal bandwidths keep playlist
+// order and index 0 is the variant HLSPlaylist.pickVariant() takes by default.
+const sortVariants = (variants) => [...variants].sort((a, b) => b.bandwidth - a.bandwidth);
+
+// One probe result, kept or null (the app is trusted, the playlist it parsed is not).
+function cleanVariant(v) {
+  if (!isObject(v) || typeof v.url !== "string" || v.url.length > MAX_URL_LENGTH || !httpURL(v.url)) return null;
+  if (!Number.isInteger(v.bandwidth) || v.bandwidth < 0) return null;
+  let width = null;
+  let height = null;
+  if (v.resolution !== undefined && v.resolution !== null) {
+    const r = v.resolution;
+    if (!isObject(r) || !Number.isInteger(r.width) || !Number.isInteger(r.height) || r.width <= 0 || r.height <= 0) return null;
+    [width, height] = [r.width, r.height];
+  }
+  const audio = typeof v.audioGroup === "string" && v.audioGroup.length > 0;
+  return { url: v.url, bandwidth: v.bandwidth, width, height, audio };
+}
+
+// -> {variants} or {error: {code, message}}. Never throws.
+async function probeNative(source) {
+  let reply;
+  try {
+    reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "probe", source });
+  } catch {
+    // Host manifest missing, host not allowed for this extension, or it crashed.
+    return { error: { code: "unreachable", message: APP_UNREACHABLE } };
+  }
+  if (isObject(reply) && reply.type === "variants" && Array.isArray(reply.variants)) {
+    return { variants: reply.variants.slice(0, MAX_VARIANTS).map(cleanVariant).filter(Boolean) };
+  }
+  if (isObject(reply) && reply.type === "error" && typeof reply.code === "string") {
+    const text = typeof reply.message === "string" ? reply.message.slice(0, MAX_MESSAGE_CHARS) : "";
+    return { error: { code: reply.code.slice(0, 32), message: text || "SegDown could not read the playlist." } };
+  }
+  return { error: { code: "internal", message: "Unexpected reply from the SegDown app." } };
+}
+
+// A cached result that makes a new probe unnecessary.
+const isFresh = (rec, now) => isObject(rec) && (Array.isArray(rec.variants) || now - rec.ts < PROBE_RETRY_MS);
+
+// The next Source to probe for resolved source r, or null (rules in the protocol).
+function nextProbe(tabId, r) {
+  return withTab(tabId, async () => {
+    const got = await chrome.storage.session.get({ [probeKey(tabId)]: {}, [capKey(tabId)]: [] });
+    const cache = got[probeKey(tabId)];
+    const now = Date.now();
+    const rec = cache[r.source.url];
+    if (!isFresh(rec, now)) return r.source;
+    if (r.via !== "capture" || !Array.isArray(rec.variants) || rec.variants.length) return null;
+    const next = got[capKey(tabId)].find(
+      (e) => isMediaEntry(e) && e.kind === "hls" && e.frameId === r.frameId && e.isMaster === undefined && !isFresh(cache[e.url], now)
+    );
+    return next ? entrySource(next, "capture").source : null;
+  });
+}
+
+// Writes one result and sets isMaster on the captures with that URL.
+function storeProbe(tabId, gen, url, result) {
+  return withTab(tabId, async () => {
+    if (tabGen(tabId) !== gen) return false; // the tab was cleared meanwhile
+    const got = await chrome.storage.session.get({ [probeKey(tabId)]: {}, [capKey(tabId)]: [] });
+    const cache = got[probeKey(tabId)];
+    delete cache[url]; // re-inserted last
+    cache[url] = { ts: Date.now(), ...result };
+    const urls = Object.keys(cache).sort((a, b) => cache[a].ts - cache[b].ts);
+    for (const old of urls.slice(0, Math.max(0, urls.length - MAX_PROBE_CACHE))) delete cache[old];
+    const entries = got[capKey(tabId)];
+    if (result.variants) for (const e of entries) if (isObject(e) && e.url === url) e.isMaster = result.variants.length > 0;
+    await chrome.storage.session.set({ [probeKey(tabId)]: cache, [capKey(tabId)]: entries });
+    return true;
+  });
+}
+
+async function runProbes(tabId) {
+  const gen = tabGen(tabId);
+  let stored = false;
+  for (let n = 0; n < MAX_PROBES_PER_RUN; n++) {
+    const r = await correlate(tabId);
+    if (!isHLS(r)) break;
+    const source = await nextProbe(tabId, r);
+    if (!source) break;
+    const result = await probeNative({ type: "media", url: source.url, kind: "hls", headers: source.headers });
+    if (!(await storeProbe(tabId, gen, source.url, result))) return;
+    stored = true;
+    hubLog(`probe tab=${tabId} ${result.error ? `error=${result.error.code}` : `variants=${result.variants.length}`}`);
+    if (result.error) break;
+  }
+  if (stored) notifyPanel(tabId, { type: "sourceChanged" });
+}
+
+// One run per tab at a time; later calls share it.
+const probeRuns = new Map();
+
+function startProbes(tabId) {
+  if (probeRuns.has(tabId)) return probeRuns.get(tabId);
+  const run = runProbes(tabId)
+    .catch(hubWarn)
+    .finally(() => probeRuns.delete(tabId));
+  probeRuns.set(tabId, run);
+  return run;
+}
+
+// The cached result for url and the variant choice that still applies to it
+// (a choice for another source, video or a vanished variant is dropped here).
+function readVariants(tabId, url) {
+  return withTab(tabId, async () => {
+    const got = await chrome.storage.session.get([probeKey(tabId), varKey(tabId)]);
+    const rec = isObject(got[probeKey(tabId)]) ? got[probeKey(tabId)][url] : undefined;
+    const list = isObject(rec) && Array.isArray(rec.variants) ? sortVariants(rec.variants) : [];
+    let choice = isObject(got[varKey(tabId)]) ? got[varKey(tabId)] : null;
+    if (choice) {
+      const { selected } = await readHub(tabId);
+      if (choice.source !== url || !sameSelection(choice.selected || null, selected) || !list.some((v) => v.url === choice.url)) {
+        await chrome.storage.session.remove(varKey(tabId));
+        choice = null;
+      }
+    }
+    return { rec: isObject(rec) ? rec : null, list, choice };
+  });
+}
+
+// summarizeSource plus the variant fields for an hls source; starts a probe run
+// only while the panel is open (a probe spawns the native host).
+async function describeSource(tabId, r) {
+  const summary = summarizeSource(r);
+  if (!isHLS(r)) return summary;
+  const { panelOpen } = await withTab(tabId, () => readHub(tabId));
+  if (panelOpen) startProbes(tabId);
+  const { rec, list, choice } = await readVariants(tabId, r.source.url);
+  if (!rec) summary.probe = { state: "pending" };
+  else if (rec.error) summary.probe = { state: "error", message: String(rec.error.message) };
+  else if (list.length) {
+    summary.variants = list.map((v) => ({ width: v.width, height: v.height, bandwidth: v.bandwidth }));
+    const i = choice ? list.findIndex((v) => v.url === choice.url) : -1;
+    summary.variant = Math.max(0, i);
+  }
+  return summary;
+}
+
+async function onChooseVariant(tabId, frameId, { index }) {
+  if (frameId !== 0) return { ok: false, error: "not-top-frame" };
+  const r = await correlate(tabId);
+  if (!isHLS(r)) return { ok: false, error: "unknown-variant" };
+  const { list } = await readVariants(tabId, r.source.url);
+  if (index >= list.length) return { ok: false, error: "unknown-variant" };
+  await withTab(tabId, async () => {
+    if (index === 0) return chrome.storage.session.remove(varKey(tabId));
+    const { selected } = await readHub(tabId);
+    return chrome.storage.session.set({ [varKey(tabId)]: { source: r.source.url, url: list[index].url, selected } });
+  });
+  hubLog(`chooseVariant tab=${tabId} index=${index}`);
+  return { ok: true, source: await describeSource(tabId, await correlate(tabId)) };
+}
+
+// --- send the job (4.3; rules under "Send the job" in the protocol) ---
+
+// The app's reply mapped to the panel's (never the job or its source).
+async function enqueueNative(job) {
+  let reply;
+  try {
+    reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "enqueue", job });
+  } catch {
+    return { ok: false, error: "app-unreachable", message: APP_UNREACHABLE };
+  }
+  if (isObject(reply) && reply.type === "enqueued" && typeof reply.id === "string" && reply.id) {
+    return { ok: true, jobId: reply.id.slice(0, 64) };
+  }
+  if (isObject(reply) && reply.type === "error" && typeof reply.code === "string") {
+    const text = typeof reply.message === "string" ? reply.message.slice(0, MAX_MESSAGE_CHARS) : "";
+    return { ok: false, error: "app-error", code: reply.code.slice(0, 32), message: text || "SegDown refused the job." };
+  }
+  return { ok: false, error: "app-error", code: "internal", message: "Unexpected reply from the SegDown app." };
+}
+
+async function onDownload(tabId, frameId, { title, mode, precision }) {
+  if (frameId !== 0) return { ok: false, error: "not-top-frame" };
+  const segments = await withTab(tabId, () => readSegments(tabId));
+  if (!segments.length) return { ok: false, error: "no-segments" };
+  const source = await resolveSource(tabId); // own withTab turns; never nest
+  if (!source) return { ok: false, error: "no-source" };
+  const job = { source, title, segments: segments.map(({ start, end }) => ({ start, end })), mode, precision };
+  const result = await enqueueNative(job);
+  hubLog(`download tab=${tabId} kind=${source.type === "page" ? "page" : source.kind} segments=${segments.length} ${result.ok ? "enqueued" : `error=${result.code || result.error}`}`);
+  if (result.ok) {
+    await withTab(tabId, async () => {
+      const key = jobsKey(tabId);
+      const jobs = (await chrome.storage.session.get({ [key]: [] }))[key];
+      const list = Array.isArray(jobs) ? jobs : [];
+      list.push({ jobId: result.jobId, title, ts: Date.now() });
+      await chrome.storage.session.set({ [key]: list.slice(-MAX_JOBS_PER_TAB) });
+    });
+    await rememberJob(result.jobId, title);
+  }
+  return result;
+}
+
+// --- progress + cancel (4.4; rules under "Progress + cancel" and "Popup" in the protocol) ---
+
+// jobt is shared by every tab, so it has its own queue.
+const TITLES_QUEUE = "jobt";
+
+function readTitles() {
+  return withTab(TITLES_QUEUE, async () => {
+    const got = (await chrome.storage.session.get(TITLES_KEY))[TITLES_KEY];
+    return isObject(got) ? got : {};
+  });
+}
+
+function rememberJob(jobId, title) {
+  return withTab(TITLES_QUEUE, async () => {
+    const got = (await chrome.storage.session.get(TITLES_KEY))[TITLES_KEY];
+    const titles = isObject(got) ? got : {};
+    titles[jobId] = { title, ts: Date.now() };
+    const ids = Object.keys(titles).sort((a, b) => titles[a].ts - titles[b].ts);
+    for (const old of ids.slice(0, Math.max(0, ids.length - MAX_KNOWN_JOBS))) delete titles[old];
+    await chrome.storage.session.set({ [TITLES_KEY]: titles });
+  });
+}
+
+function readTabJobs(tabId) {
+  return withTab(tabId, async () => {
+    const key = jobsKey(tabId);
+    const list = (await chrome.storage.session.get({ [key]: [] }))[key];
+    return Array.isArray(list) ? list.filter((j) => isObject(j) && isJobId(j.jobId)) : [];
+  });
+}
+
+// "/Users/me/Downloads/SegDown/T/T - 01.mp4" -> "T - 01.mp4"
+function baseName(path) {
+  const parts = path.split("/").filter(Boolean);
+  return parts.length ? parts[parts.length - 1].slice(0, 255) : "";
+}
+
+// One JobStatus from the app, copied field by field, or null.
+function cleanJobStatus(s) {
+  if (!isObject(s) || !isJobId(s.id) || !JOB_STATES.has(s.state)) return null;
+  const count = Number.isInteger(s.segmentCount) && s.segmentCount >= 0 ? s.segmentCount : 0;
+  const index = Number.isInteger(s.segmentIndex) && s.segmentIndex >= 0 ? Math.min(s.segmentIndex, Math.max(0, count - 1)) : 0;
+  const outputs = Array.isArray(s.outputs) ? s.outputs.slice(0, MAX_OUTPUTS).filter((o) => typeof o === "string") : [];
+  return {
+    id: s.id,
+    state: s.state,
+    segmentIndex: index,
+    segmentCount: count,
+    fraction: isFiniteNum(s.fraction) ? Math.min(1, Math.max(0, s.fraction)) : 0,
+    message: typeof s.message === "string" && s.message ? s.message.slice(0, MAX_MESSAGE_CHARS) : null,
+    outputs: outputs.map(baseName).filter(Boolean),
+  };
+}
+
+// The status port: one connectNative port, replies matched to requests in order.
+const statusPort = { port: null, pending: [], idleTimer: null, fallbackNext: false };
+
+function openStatusPort() {
+  const port = chrome.runtime.connectNative(NATIVE_HOST);
+  port.onMessage.addListener((msg) => {
+    if (statusPort.port !== port) return;
+    const head = statusPort.pending.shift();
+    if (!head) return; // nothing asked: ignore
+    clearTimeout(head.timer);
+    head.resolve(msg);
+    armPortIdle();
+  });
+  port.onDisconnect.addListener(() => {
+    void chrome.runtime.lastError; // read, so Chrome does not report it as unchecked
+    if (statusPort.port === port) closeStatusPort(true);
+  });
+  statusPort.port = port;
+  hubLog("status port opened");
+}
+
+// failed: the next status goes through sendNativeMessage. Fails every pending request.
+function closeStatusPort(failed) {
+  const { port, pending } = statusPort;
+  statusPort.port = null;
+  statusPort.pending = [];
+  clearTimeout(statusPort.idleTimer);
+  statusPort.idleTimer = null;
+  if (failed) statusPort.fallbackNext = true;
+  try {
+    if (port) port.disconnect();
+  } catch {
+    // already gone
+  }
+  for (const p of pending) {
+    clearTimeout(p.timer);
+    p.reject(new Error("status port closed"));
+  }
+  if (port) hubLog(`status port closed${failed ? " (failed)" : ""}`);
+}
+
+function armPortIdle() {
+  clearTimeout(statusPort.idleTimer);
+  statusPort.idleTimer = null;
+  if (!statusPort.port || statusPort.pending.length) return;
+  statusPort.idleTimer = setTimeout(() => {
+    if (!statusPort.pending.length) closeStatusPort(false);
+  }, PORT_IDLE_MS);
+}
+
+function portRequest(msg) {
+  if (!statusPort.port) openStatusPort();
+  const port = statusPort.port;
+  return new Promise((resolve, reject) => {
+    const entry = { resolve, reject, timer: null };
+    entry.timer = setTimeout(() => {
+      if (statusPort.port === port) closeStatusPort(true);
+    }, STATUS_TIMEOUT_MS);
+    statusPort.pending.push(entry);
+    armPortIdle(); // pending: clears the idle timer
+    try {
+      port.postMessage(msg);
+    } catch {
+      closeStatusPort(true);
+    }
+  });
+}
+
+// The last good status, for appError replies and the popup's cancel check.
+let lastJobs = [];
+let statusRun = null;
+
+// -> {jobs: [clean JobStatus]} or {error: message}. Concurrent callers share one request.
+function fetchStatus() {
+  if (!statusRun) {
+    statusRun = statusOnce().finally(() => {
+      statusRun = null;
+    });
+  }
+  return statusRun;
+}
+
+async function statusOnce() {
+  const msg = { type: "status" };
+  let reply;
+  try {
+    if (statusPort.fallbackNext || typeof chrome.runtime.connectNative !== "function") {
+      statusPort.fallbackNext = false;
+      reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, msg);
+    } else {
+      reply = await portRequest(msg);
+    }
+  } catch {
+    return { error: APP_UNREACHABLE };
+  }
+  if (isObject(reply) && reply.type === "status" && Array.isArray(reply.jobs)) {
+    lastJobs = reply.jobs.map(cleanJobStatus).filter(Boolean);
+    return { jobs: lastJobs };
+  }
+  if (isObject(reply) && reply.type === "error" && typeof reply.message === "string" && reply.message) {
+    return { error: reply.message.slice(0, MAX_MESSAGE_CHARS) };
+  }
+  return { error: "Unexpected reply from the SegDown app." };
+}
+
+const jobTitle = (titles, id) =>
+  Object.hasOwn(titles, id) && isObject(titles[id]) && typeof titles[id].title === "string" && titles[id].title
+    ? titles[id].title
+    : `Job ${id.slice(0, 8)}`;
+
+// tabId: null for none. withRecent: the popup's list of the app's other jobs.
+async function onJobs(tabId, withRecent) {
+  const tabJobs = tabId === null ? [] : await readTabJobs(tabId);
+  if (!withRecent && !tabJobs.length) return { ok: true, jobs: [] };
+  const st = await fetchStatus();
+  const list = st.jobs || lastJobs;
+  const byId = new Map(list.map((j) => [j.id, j]));
+  const unknown = (id) => ({ id, state: "unknown", segmentIndex: 0, segmentCount: 0, fraction: 0, message: null, outputs: [] });
+  const jobs = tabJobs
+    .slice()
+    .reverse()
+    .map((j) => ({ ...(byId.get(j.jobId) || unknown(j.jobId)), title: typeof j.title === "string" && j.title ? j.title : `Job ${j.jobId.slice(0, 8)}` }));
+  const reply = { ok: true, jobs };
+  if (st.error) reply.appError = st.error;
+  if (withRecent) {
+    const titles = await readTitles();
+    const mine = new Set(tabJobs.map((j) => j.jobId));
+    reply.recent = list
+      .filter((j) => !mine.has(j.id))
+      .slice(0, MAX_RECENT_JOBS)
+      .map((j) => ({ ...j, title: jobTitle(titles, j.id) }));
+  }
+  return reply;
+}
+
+async function cancelNative(id) {
+  let reply;
+  try {
+    reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "cancel", id });
+  } catch {
+    return { ok: false, error: "app-unreachable", message: APP_UNREACHABLE };
+  }
+  if (isObject(reply) && reply.type === "cancelled") return { ok: true };
+  if (isObject(reply) && reply.type === "error" && typeof reply.code === "string") {
+    const text = typeof reply.message === "string" ? reply.message.slice(0, MAX_MESSAGE_CHARS) : "";
+    return { ok: false, error: "app-error", code: reply.code.slice(0, 32), message: text || "SegDown could not cancel the job." };
+  }
+  return { ok: false, error: "app-error", code: "internal", message: "Unexpected reply from the SegDown app." };
+}
+
+// The panel may cancel its own tab's jobs only.
+async function onCancel(tabId, frameId, { id }) {
+  if (frameId !== 0) return { ok: false, error: "not-top-frame" };
+  if (!(await readTabJobs(tabId)).some((j) => j.jobId === id)) return { ok: false, error: "unknown-job" };
+  const result = await cancelNative(id);
+  hubLog(`cancel tab=${tabId} ${result.ok ? "ok" : `error=${result.code || result.error}`}`);
+  return result;
+}
+
+// The popup may cancel any job this extension enqueued or the app listed.
+async function onPopupCancel({ id }) {
+  const titles = await readTitles();
+  if (!Object.hasOwn(titles, id) && !lastJobs.some((j) => j.id === id)) return { ok: false, error: "unknown-job" };
+  const result = await cancelNative(id);
+  hubLog(`cancel (popup) ${result.ok ? "ok" : `error=${result.code || result.error}`}`);
+  return result;
+}
+
+function popupDispatch(msg) {
+  const body = POPUP_VALIDATORS.get(msg.type)(msg);
+  if (!body) return Promise.resolve({ ok: false, error: "bad-message" });
+  switch (msg.type) {
+    case "togglePanel":
+      return setPanelOpen(body.tabId, null).then(() => ({ ok: true }));
+    case "jobs":
+      return onJobs(body.tabId, true);
+    case "cancel":
+      return onPopupCancel(body);
+    default:
+      return Promise.resolve({ ok: false, error: "bad-message" });
+  }
 }
 
 // Single entry point for every hub message (the listener and the debug helper).
@@ -879,6 +1796,22 @@ function hubDispatch(tabId, frameId, msg, from = {}) {
       return onSavePage(tabId, frameId, from, body);
     case "savePos":
       return onSavePos(frameId, body);
+    case "getSource":
+      return onGetSource(tabId, frameId);
+    case "chooseSource":
+      return onChooseSource(tabId, frameId, body);
+    case "chooseVariant":
+      return onChooseVariant(tabId, frameId, body);
+    case "download":
+      return onDownload(tabId, frameId, body);
+    case "jobs":
+      return frameId === 0 ? onJobs(tabId, false) : Promise.resolve({ ok: false, error: "not-top-frame" });
+    case "cancel":
+      return onCancel(tabId, frameId, body);
+    case "setYtDlp":
+      return onSetYtDlp(tabId, frameId, body);
+    case "deps":
+      return onDeps(frameId);
     default:
       return Promise.resolve({ ok: false, error: "bad-message" });
   }
@@ -886,19 +1819,29 @@ function hubDispatch(tabId, frameId, msg, from = {}) {
 
 // --- listeners (registered synchronously at top level) ---
 
+function replyAsync(promise, sendResponse) {
+  promise.then(sendResponse, (err) => {
+    hubWarn(err);
+    sendResponse({ ok: false, error: "internal" });
+  });
+  return true; // async reply
+}
+
+const isPopupSender = (sender) =>
+  !sender.tab && typeof sender.url === "string" && sender.url.startsWith(`chrome-extension://${chrome.runtime.id}/popup/`);
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (sender.id !== chrome.runtime.id) return undefined;
-  if (!isObject(msg) || !HUB_VALIDATORS.has(msg.type)) return undefined; // not a hub message
+  if (sender.id !== chrome.runtime.id || !isObject(msg)) return undefined;
+  if (isPopupSender(sender)) {
+    return POPUP_VALIDATORS.has(msg.type) ? replyAsync(popupDispatch(msg), sendResponse) : undefined;
+  }
+  if (!HUB_VALIDATORS.has(msg.type)) return undefined; // not a hub message
   const tabId = sender.tab && sender.tab.id;
   if (!Number.isInteger(tabId) || tabId < 0 || !Number.isInteger(sender.frameId) || sender.frameId < 0) {
     return undefined;
   }
   const from = { url: sender.url, documentId: sender.documentId };
-  hubDispatch(tabId, sender.frameId, msg, from).then(sendResponse, (err) => {
-    hubWarn(err);
-    sendResponse({ ok: false, error: "internal" });
-  });
-  return true; // async reply
+  return replyAsync(hubDispatch(tabId, sender.frameId, msg, from), sendResponse);
 });
 
 // A subframe that navigates takes its videos with it (top-frame navigation clears
@@ -908,7 +1851,9 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 });
 
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
-  if (details.frameId === 0) onPageChanged(details.tabId, details.url).catch(hubWarn);
+  if (details.frameId !== 0) return;
+  setTopURL(details.tabId, details.url).catch(hubWarn);
+  onPageChanged(details.tabId, details.url).catch(hubWarn);
 });
 
 // Content scripts reach storage.local only through loadPage / savePage / savePos.
@@ -919,14 +1864,12 @@ try {
   hubWarn(err);
 }
 
-// Toolbar button and keyboard shortcut (3.5). From 4.4 the popup's "Toggle panel"
-// button replaces the action click.
+// Keyboard shortcut (3.5). The toolbar button opens the popup, whose "Toggle
+// panel" button sends togglePanel (4.4).
 function togglePanelIn(tab) {
   if (!tab || !Number.isInteger(tab.id) || tab.id < 0) return;
   setPanelOpen(tab.id, null).catch(hubWarn);
 }
-
-chrome.action.onClicked.addListener(togglePanelIn);
 
 chrome.commands.onCommand.addListener((command, tab) => {
   if (command !== "toggle-panel") return;
