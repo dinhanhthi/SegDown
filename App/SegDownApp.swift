@@ -89,9 +89,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func observeActiveCount() {
         let count = withObservationTracking {
             store.items.count { !$0.status.state.isFinished }
-        } onChange: {
+        } onChange: { [weak self] in
             // onChange fires before the new value is stored; read it on the next turn.
-            Task { @MainActor [weak self] in self?.observeActiveCount() }
+            Task { @MainActor in self?.observeActiveCount() }
         }
         NSApp.dockTile.badgeLabel = count == 0 ? nil : String(count)
         statusItem?.setActiveCount(count)
