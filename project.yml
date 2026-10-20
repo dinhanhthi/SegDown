@@ -56,9 +56,6 @@ targets:
       - path: extension/content
         type: folder
         buildPhase: resources
-      - path: extension/popup
-        type: folder
-        buildPhase: resources
       - path: extension/icons
         type: folder
         buildPhase: resources

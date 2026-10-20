@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SegDown",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Mark segments on a web video and download them with the SegDown app.",
   "permissions": [
     "nativeMessaging",
@@ -18,7 +18,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content/agent.js", "content/panel.js"],
+      "js": ["content/agent.js", "content/overlay.js"],
       "all_frames": true,
       "match_about_blank": true,
       "match_origin_as_fallback": true,
@@ -31,7 +31,7 @@
         "default": "Alt+Shift+S",
         "mac": "Alt+Shift+S"
       },
-      "description": "Toggle the SegDown panel"
+      "description": "Toggle the SegDown overlay"
     }
   },
   "icons": {
@@ -44,7 +44,6 @@
   },
   "action": {
     "default_title": "SegDown",
-    "default_popup": "popup/popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
