@@ -41,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             onOpen: { [weak self] in self?.showMainWindow() },
             onSettings: { [weak self] in self?.showSettings() },
             onAbout: { [weak self] in self?.showAbout() })
+        observeActiveCount()
         // `segdown-host` and the Safari appex launch the app hidden with `--background`: menu bar only, no Dock
         // icon. The argument does not reach the app from the sandboxed appex, so a hidden launch (`hides = true`,
         // `open -j`) counts too; `NSApp.isHidden` is already set here (`NSRunningApplication.current.isHidden` is not).
@@ -60,6 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 rootView: MainView(store: store, settings: settings, navigation: navigation))
             // The window owns its size, not the SwiftUI content.
             hosting.sizingOptions = []
+            // The SwiftUI toolbar (the page tabs) becomes the window's toolbar, in the traffic-light row.
+            hosting.sceneBridgingOptions = [.toolbars]
             let window = NSWindow(contentViewController: hosting)
             window.title = "SegDown"
             window.titleVisibility = .hidden
@@ -70,14 +73,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Full size content: the background runs under the toolbar too.
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
             window.isReleasedWhenClosed = false
-            window.minSize = NSSize(width: 640, height: 420)
-            window.setContentSize(NSSize(width: 820, height: 560))
-            if !window.setFrameUsingName("MainWindow") { window.center() }
-            window.setFrameAutosaveName("MainWindow")
+            window.minSize = NSSize(width: 600, height: 420)
+            window.setContentSize(NSSize(width: 640, height: 560))
+            // A new name since the tabs left the sidebar: the frame saved for the wider window is not restored.
+            if !window.setFrameUsingName("MainWindowTabs") { window.center() }
+            window.setFrameAutosaveName("MainWindowTabs")
             window.delegate = self
             self.window = window
         }
         bringToFront()
+    }
+
+    /// Shows the queued and running downloads in the Dock icon's red badge and in the menu bar menu; again after
+    /// each change of the list.
+    private func observeActiveCount() {
+        let count = withObservationTracking {
+            store.items.count { !$0.status.state.isFinished }
+        } onChange: {
+            // onChange fires before the new value is stored; read it on the next turn.
+            Task { @MainActor [weak self] in self?.observeActiveCount() }
+        }
+        NSApp.dockTile.badgeLabel = count == 0 ? nil : String(count)
+        statusItem?.setActiveCount(count)
     }
 
     /// Opens the main window on the Settings page.

@@ -1,16 +1,16 @@
-// The Downloads page: one card per job, newest first, with selection and remove-with-confirmation.
+// The Downloads page: one card per job, newest first, with selection; remove from the list, or also move the files to
+// the Trash after a confirmation.
 import AppKit
 import SegDownCore
 import SwiftUI
 
 /// The jobs as cards. Click selects one, ⌘-click toggles, ⇧-click extends from the last clicked card; ⌘A (the Edit
-/// menu's Select All) and ⌫ work while the page has focus, which a click on a card gives it.
+/// menu's Select All) and ⌫ (remove from the list) work while the page has focus, which a click on a card gives it.
 struct DownloadsView: View {
     let store: JobStore
     @State private var selection: Set<String> = []
     @State private var anchor: String?
-    @State private var confirmRemove = false
-    @State private var trashFiles = false
+    @State private var confirmTrash = false
     @State private var trashFailures: [JobStore.TrashFailure] = []
     /// Shown once the sheet is gone: a window shows one sheet or alert at a time.
     @State private var pendingFailures: [JobStore.TrashFailure] = []
@@ -31,20 +31,20 @@ struct DownloadsView: View {
         .onCommand(#selector(NSResponder.selectAll(_:))) {
             selection = Set(store.items.map(\.id))
         }
-        .onDeleteCommand(perform: askRemove)
+        .onDeleteCommand(perform: removeFromList)
         // Jobs that left the list (trimmed, history cleared, removed) are not selected.
         .onChange(of: store.items.map(\.id)) { _, ids in
             selection.formIntersection(ids)
         }
-        .sheet(isPresented: $confirmRemove, onDismiss: {
+        .sheet(isPresented: $confirmTrash, onDismiss: {
             trashFailures = pendingFailures
             pendingFailures = []
         }) {
-            RemoveSheet(count: selection.count, trashFiles: $trashFiles, remove: {
-                pendingFailures = store.remove(ids: selection, trashFiles: trashFiles)
+            TrashSheet(count: selection.count, remove: {
+                pendingFailures = store.remove(ids: selection, trashFiles: true)
                 selection.removeAll()
-                confirmRemove = false
-            }, cancel: { confirmRemove = false })
+                confirmTrash = false
+            }, cancel: { confirmTrash = false })
         }
         .alert("Some files were not moved to the Trash", isPresented: failuresShown) {
             Button("OK") {}
@@ -84,11 +84,21 @@ struct DownloadsView: View {
             Text(selection.isEmpty ? "Downloads" : "\(selection.count) selected")
                 .font(.headline)
             Spacer()
-            Button(action: askRemove) {
-                Label("Remove", systemImage: "trash")
+            Menu {
+                Button("Remove from List", action: removeFromList)
+                Button("Move to Trash…", action: askTrash)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "trash").accessibilityLabel("Remove")
+                    MenuChevron()
+                }
             }
+            .menuStyle(.button)
+            .buttonStyle(RaisedButtonStyle(horizontalPadding: 10))
+            .menuIndicator(.hidden)
+            .fixedSize()
             .disabled(selection.isEmpty)
-            .help("Remove the selected downloads (⌫)")
+            .help("Remove the selected downloads from the list (⌫), or also move their files to the Trash")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -99,10 +109,16 @@ struct DownloadsView: View {
         Binding(get: { !trashFailures.isEmpty }, set: { if !$0 { trashFailures = [] } })
     }
 
-    private func askRemove() {
+    /// Running downloads are cancelled; files stay on disk.
+    private func removeFromList() {
         guard !selection.isEmpty else { return }
-        trashFiles = false
-        confirmRemove = true
+        store.remove(ids: selection, trashFiles: false)
+        selection.removeAll()
+    }
+
+    private func askTrash() {
+        guard !selection.isEmpty else { return }
+        confirmTrash = true
     }
 
     private func select(_ id: String) {
@@ -129,8 +145,8 @@ struct DownloadsView: View {
     }
 }
 
-/// One job: title, state, segment, duration, size, progress, message and its buttons. Selected adds an accent fill
-/// and stroke.
+/// One job: title, Reveal in Finder and state, segment, duration, size, progress, then the message and Cancel.
+/// Selected adds an accent fill and stroke.
 private struct DownloadCard: View {
     let item: JobStore.Item
     let store: JobStore
@@ -153,6 +169,15 @@ private struct DownloadCard: View {
                     .truncationMode(.tail)
                     .help(item.title)
                 Spacer(minLength: 8)
+                if !status.outputs.isEmpty {
+                    Button(action: showInFinder) {
+                        Label("Reveal in Finder", systemImage: "folder")
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(RaisedButtonStyle(height: 26))
+                    .help("Reveal in Finder")
+                }
                 StateBadge(state: status.state)
             }
             HStack(spacing: 12) {
@@ -160,7 +185,7 @@ private struct DownloadCard: View {
                 Text(verbatim: Self.durationText(item.totalDuration))
                 Text(verbatim: item.bytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
             }
-            .font(.caption)
+            .font(.callout)
             .foregroundStyle(.secondary)
             .monospacedDigit()
             if status.state == .running {
@@ -171,21 +196,23 @@ private struct DownloadCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if let message = status.message {
-                Text(verbatim: message)
-                    .font(.caption)
-                    .foregroundStyle(status.state == .failed ? .red : .secondary)
-                    .lineLimit(3)
-            }
-            HStack(spacing: 14) {
-                if !status.outputs.isEmpty {
-                    rowButton("Show in Finder", systemImage: "folder", action: showInFinder)
+            if status.message != nil || !status.state.isFinished {
+                HStack(spacing: 8) {
+                    if let message = status.message {
+                        Text(verbatim: message)
+                            .font(.caption)
+                            .foregroundStyle(status.state == .failed ? .red : .secondary)
+                            .lineLimit(3)
+                    }
+                    Spacer(minLength: 8)
+                    if !status.state.isFinished {
+                        Button("Cancel") { store.cancel(item.id) }
+                            .buttonStyle(RowTextButtonStyle())
+                            .fixedSize()
+                            .help("Cancel the download")
+                    }
                 }
-                if !status.state.isFinished {
-                    rowButton("Cancel", systemImage: "xmark.circle") { store.cancel(item.id) }
-                }
             }
-            .padding(.top, 2)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -212,17 +239,6 @@ private struct DownloadCard: View {
             : String(format: "%d:%02d", minutes, secs)
     }
 
-    private func rowButton(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .labelStyle(.iconOnly)
-                .font(.system(size: 15))
-        }
-        .buttonStyle(RowIconButtonStyle())
-        .foregroundStyle(.secondary)
-        .help(title)
-    }
-
     /// The outputs still on disk; a beep when none is left.
     private func showInFinder() {
         let urls = item.status.outputs.filter { FileManager.default.fileExists(atPath: $0) }.map { URL(filePath: $0) }
@@ -246,37 +262,36 @@ private struct StateBadge: View {
         case .failed: ("Failed", .red)
         case .cancelled: ("Cancelled", .orange)
         }
+        let solid = state == .running
         Text(title)
             .font(.caption.weight(.semibold))
-            .foregroundStyle(color)
+            // Running is solid accent with white text: the accent on its own tint was hard to read.
+            .foregroundStyle(solid ? Color.white : color)
             .padding(.horizontal, 8)
             .padding(.vertical, 2)
-            .background(Capsule().fill(color.opacity(0.15)))
+            .background(Capsule().fill(solid ? color : color.opacity(0.15)))
     }
 }
 
-/// The confirmation: the count and "Also move files to Trash" (off by default).
-private struct RemoveSheet: View {
+/// The confirmation before the files go to the Trash.
+private struct TrashSheet: View {
     let count: Int
-    @Binding var trashFiles: Bool
     let remove: () -> Void
     let cancel: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(count == 1 ? "Remove 1 download?" : "Remove \(count) downloads?")
+            Text(count == 1 ? "Move 1 download to the Trash?" : "Move \(count) downloads to the Trash?")
                 .font(.headline)
-            Text("Running downloads are cancelled. Files stay on disk unless you move them to the Trash.")
+            Text("Running downloads are cancelled, the downloads leave the list and their files go to the Trash.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Toggle("Also move files to Trash", isOn: $trashFiles)
-                .toggleStyle(.checkbox)
             HStack {
                 Spacer()
                 Button("Cancel", action: cancel)
                     .keyboardShortcut(.cancelAction)
-                Button("Remove", role: .destructive, action: remove)
+                Button("Move to Trash", role: .destructive, action: remove)
                     .keyboardShortcut(.defaultAction)
             }
         }

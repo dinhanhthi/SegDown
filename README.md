@@ -39,21 +39,22 @@ The app is ad-hoc signed, for personal use only. `segdown-host` is embedded in `
 
 ## The app
 
-SegDown has one window with a sidebar (Downloads, Settings, Dependencies, Browsers, About) and a menu bar item (the SegDown logo) whose menu has Open SegDown, Settings…, About SegDown and Quit SegDown. The Dock icon shows only while the window is open; closing the window keeps the app running in the menu bar, and jobs go on. When a browser needs the app and it is not running, `segdown-host` or the Safari extension launches it hidden (`--background`): no window and no Dock icon.
+SegDown has one window with its pages as tabs in the toolbar (Downloads, Settings, Dependencies, Browsers, About) and a menu bar item (the SegDown logo) whose menu shows the number of active (queued or running) downloads, then Open SegDown, Settings…, About SegDown and Quit SegDown. The Dock icon shows only while the window is open, with the number of active downloads in a red badge; closing the window keeps the app running in the menu bar, and jobs go on. When a browser needs the app and it is not running, `segdown-host` or the Safari extension launches it hidden (`--background`): no window and no Dock icon.
 
-- Downloads: one card per job, newest first: title, state (Queued, Running, Done, Failed, Cancelled), segment, total duration, size, a progress bar while it runs, "Switched to the captured media" when it fell back, the app's message, Show in Finder and Cancel. An incognito job has an eye icon. Click a card to select it, ⌘-click to add or remove one, ⇧-click to select a range, ⌘A to select all. Remove (or ⌫) asks "Remove 1 download?" with "Also move files to Trash" (off by default): running jobs are cancelled, the jobs leave the list and the history, and the files stay on disk unless that box is ticked.
+- Downloads: one card per job, newest first: title, Reveal in Finder, state (Queued, Running, Done, Failed, Cancelled), segment, total duration, size, a progress bar while it runs, "Switched to the captured media" when it fell back, the app's message and, until the job ends, Cancel. An incognito job has an eye icon. Click a card to select it, ⌘-click to add or remove one, ⇧-click to select a range, ⌘A to select all. The trash menu has Remove from List (or ⌫): running jobs are cancelled, the jobs leave the list and the history, and the files stay on disk; and Move to Trash…, which asks first, then does the same and moves the files to the Trash.
 - Settings, saved on each change:
   - Output folder: `~/Downloads/SegDown` by default; Choose… picks another one.
-  - Default output: Separate (default) or Merged. The extension starts with it; the Download menu can change it per download.
+  - Default output: Separate or Merged (default). The extension starts with it; the Download menu can change it per download.
   - Default precision: Precise (default) or Fast, for every job.
   - Auto fallback: on by default. If `yt-dlp` fails on a page, download the captured media instead.
+  - Compress after download: off by default. On, each finished file (the merged file in Merged) is re-encoded with `ffmpeg` (H.264 CRF 28, AAC 128k) to make it smaller; it takes longer. If compression fails, the files are kept uncompressed.
   - Limit size: off by default. On, it sets Max size in MB or GB (1 GB when first turned on).
   - Limit total duration: off by default. On, it sets Max total duration as `h:mm:ss` or `m:ss`, for all the segments of a job (1:00:00 when first turned on).
   - Incognito by default: off by default. Jobs are not kept in history; the browser does not keep their segments.
   - History: Clear history… removes every finished download from the list and the history. Files stay on disk.
 - Dependencies: whether `yt-dlp`, `ffmpeg`, `ffprobe` and `deno` are found (with their path) or Missing, a `brew install …` line for the missing ones, and a Re-check button.
 - Browsers: for each Chromium browser (Chrome, Chromium, Brave, Edge, Arc), Installed, Not installed, or a Re-install warning when the app moved since the browser integration was installed, with "Last connected …" or "Not connected yet". The Browser integration row has the Install button (Reinstall once installed); Re-check refreshes the list. Under Safari, the SegDown extension shows On, Off or Unknown, with its last connection, and Open Safari Settings opens Safari's extension settings.
-- About: the version and a link to this README.
+- About: the version, the license (MIT) and a link to the GitHub repository.
 
 While the window is open, the app menu also has About SegDown, Settings… (⌘,), Hide SegDown and Quit SegDown.
 

@@ -32,6 +32,8 @@ public actor JobRunner {
         /// Why the runner itself stopped the job (`JobError.sizeExceeded`); it then ends `failed`
         /// with this error instead of `cancelled`.
         var abortReason: JobError?
+        /// Set when a compression failed; the job still ends `done` with the uncompressed file(s).
+        var compressionFailed = false
     }
 
     private let binaries: Binaries
@@ -105,7 +107,9 @@ public actor JobRunner {
             )
             final = JobStatus(
                 id: id, state: .done, segmentIndex: count - 1, segmentCount: count,
-                fraction: 1, outputs: outputs.map(\.path)
+                fraction: 1,
+                message: jobs[id]?.compressionFailed == true ? "Compression failed; saved uncompressed" : nil,
+                outputs: outputs.map(\.path)
             )
         } catch {
             // Checked first: an abort goes through the cancel path, so `cancelled` is set too.
@@ -200,10 +204,24 @@ public actor JobRunner {
         let title = outputDirectory.lastPathComponent
         switch request.mode {
         case .separate:
-            return try moveParts(parts, segments: request.segments, title: title, to: outputDirectory)
+            var files = parts
+            if options.compress {
+                files = []
+                for (index, part) in parts.enumerated() {
+                    tracker.begin(index: index, message: "Compressing segment \(index + 1) of \(parts.count)")
+                    files.append(try await compress(id: id, file: part, ffmpeg: ffmpeg))
+                }
+                tracker.setBytes(Self.totalSize(of: files))
+            }
+            return try moveParts(files, segments: request.segments, title: title, to: outputDirectory)
         case .merged:
             tracker.begin(index: request.segments.count - 1, message: "Merging")
-            let merged = try await merge(id: id, parts: parts, ffmpeg: ffmpeg, tempDirectory: workDirectory)
+            var merged = try await merge(id: id, parts: parts, ffmpeg: ffmpeg, tempDirectory: workDirectory)
+            if options.compress {
+                tracker.begin(index: request.segments.count - 1, message: "Compressing")
+                merged = try await compress(id: id, file: merged, ffmpeg: ffmpeg)
+                tracker.setBytes(Self.totalSize(of: [merged]))
+            }
             try checkCancelled(id)
             try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
             // No await between picking the name and moving: the actor keeps concurrent jobs apart.
@@ -420,6 +438,34 @@ public actor JobRunner {
         return output
     }
 
+    /// Re-encodes `file` into `<name>.compressed.mp4` next to it, in the temp dir, so a failed or
+    /// cancelled compression leaves nothing in the output dir; then removes `file`.
+    /// If ffmpeg fails (not a cancel or abort, which rethrow), removes the partial output, marks the
+    /// job `compressionFailed` and returns `file` unchanged, so the download is kept uncompressed.
+    private func compress(id: String, file: URL, ffmpeg: URL) async throws -> URL {
+        let output = file.deletingPathExtension().appendingPathExtension("compressed.mp4")
+        do {
+            try await runProcess(
+                .ffmpeg, executable: ffmpeg, arguments: CommandBuilder.ffmpegCompress(input: file, output: output),
+                jobID: id
+            ) { _, _ in }
+        } catch {
+            try checkCancelled(id)
+            try? FileManager.default.removeItem(at: output)
+            jobs[id]?.compressionFailed = true
+            return file
+        }
+        try FileManager.default.removeItem(at: file)
+        return output
+    }
+
+    /// The sum of the files' sizes, for `JobStatus.bytes` once compressed files replace the downloaded ones.
+    private static func totalSize(of files: [URL]) -> Int64 {
+        files.reduce(0) { sum, file in
+            sum + ((try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int64) ?? 0)
+        }
+    }
+
     /// Moves each part to `<output dir>/<title> - NN [start-end].<ext>` (ext of the part, mp4 normally).
     private func moveParts(_ parts: [URL], segments: [Segment], title: String, to directory: URL) throws -> [URL] {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -569,11 +615,14 @@ public struct JobOptions: Sendable {
     public var maxBytes: Int64?
     /// Fall back to the captured media when yt-dlp fails on a supported site.
     public var autoFallback: Bool
+    /// Re-encode the finished files to make them smaller (`CommandBuilder.ffmpegCompress`).
+    public var compress: Bool
 
-    public init(baseDirectory: URL? = nil, maxBytes: Int64? = nil, autoFallback: Bool = true) {
+    public init(baseDirectory: URL? = nil, maxBytes: Int64? = nil, autoFallback: Bool = true, compress: Bool = false) {
         self.baseDirectory = baseDirectory
         self.maxBytes = maxBytes
         self.autoFallback = autoFallback
+        self.compress = compress
     }
 }
 

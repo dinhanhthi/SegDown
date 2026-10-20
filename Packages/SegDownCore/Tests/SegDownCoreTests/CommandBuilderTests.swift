@@ -69,6 +69,18 @@ struct CommandBuilderTests {
         #expect(!args.contains("-protocol_whitelist"))
     }
 
+    @Test func compressReencodesToSmallerH264() {
+        let args = CommandBuilder.ffmpegCompress(
+            input: URL(fileURLWithPath: "/tmp/job/merged.mp4"),
+            output: URL(fileURLWithPath: "/tmp/job/merged.compressed.mp4")
+        )
+        #expect(args.contains("libx264"))
+        #expect(args.firstIndex(of: "-crf").map { args[$0 + 1] } == "28")
+        #expect(args.firstIndex(of: "-pix_fmt").map { args[$0 + 1] } == "yuv420p")
+        #expect(args.firstIndex(of: "-i").map { args[$0 + 1] } == "/tmp/job/merged.mp4")
+        #expect(args.last == "/tmp/job/merged.compressed.mp4")
+    }
+
     @Test func ytDlpPutsURLAfterDoubleDash() {
         let url = URL(string: "https://www.youtube.com/watch?v=aqz-KE-bpKQ")!
         let args = CommandBuilder.ytDlp(

@@ -1,12 +1,14 @@
 import AppKit
 
-/// Menu bar item with a plain AppKit menu. Its actions are closures set by the app delegate.
+/// Menu bar item with a plain AppKit menu: the active downloads count, then its actions, closures set by the app
+/// delegate.
 @MainActor
 final class StatusItemController: NSObject {
     private let onOpen: () -> Void
     private let onSettings: () -> Void
     private let onAbout: () -> Void
     private let statusItem: NSStatusItem
+    private let activeItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
 
     init(onOpen: @escaping () -> Void, onSettings: @escaping () -> Void, onAbout: @escaping () -> Void) {
         self.onOpen = onOpen
@@ -17,12 +19,25 @@ final class StatusItemController: NSObject {
         statusItem.button?.image = Self.logo
         statusItem.button?.setAccessibilityLabel("SegDown")
         let menu = NSMenu()
+        // No action: shown disabled, as information.
+        menu.addItem(activeItem)
+        menu.addItem(.separator())
         menu.addItem(item("Open SegDown", #selector(open)))
         menu.addItem(item("Settings…", #selector(openSettings)))
         menu.addItem(item("About SegDown", #selector(about)))
         menu.addItem(.separator())
         menu.addItem(item("Quit SegDown", #selector(quit)))
         statusItem.menu = menu
+        setActiveCount(0)
+    }
+
+    /// Queued and running downloads.
+    func setActiveCount(_ count: Int) {
+        activeItem.title = switch count {
+        case 0: "No active downloads"
+        case 1: "1 active download"
+        default: "\(count) active downloads"
+        }
     }
 
     /// The full-colour logo at 18×18 pt, not a template image.

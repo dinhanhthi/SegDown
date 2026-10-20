@@ -22,10 +22,11 @@ enum PlatformFeatures {
 /// The app colors. The app is dark only, so each color has one value.
 enum Palette {
     static let hoverFill = Color.white.opacity(0.1)
-    static let pressedFill = Color.white.opacity(0.2)
     static let switchOffFill = Color.white.opacity(0.22)
     /// Cards and panels, a step above the window. #2C2C2E
     static let surface = Color(red: 44 / 255, green: 44 / 255, blue: 46 / 255)
+    /// Controls on a card, a step above `surface`. #3A3A3C
+    static let inputSurface = Color(red: 58 / 255, green: 58 / 255, blue: 60 / 255)
     /// The 1 pt edge of cards and panels.
     static let surfaceBorder = Color.white.opacity(0.08)
     /// The edge of a raised card: bright at the top, dim on the sides, a faint highlight at the bottom.
@@ -38,37 +39,164 @@ enum Palette {
         startPoint: .top, endPoint: .bottom)
 }
 
-/// The icon buttons of a row: a round highlight on hover, darker and a bit smaller while pressed. The highlight
-/// reaches past the label without changing the row's layout.
-struct RowIconButtonStyle: ButtonStyle {
-    /// A capsule highlight, for a label wider than an icon.
-    var capsule = false
+/// A raised button like the toolbar's: `height` tall (a circle for an icon, with no `horizontalPadding`). Liquid Glass
+/// on macOS 26; before, a capsule lit from above with a soft shadow, like `GlassCard(raised:)`. Lighter on hover,
+/// darker while pressed, dimmed when disabled.
+struct RaisedButtonStyle: ButtonStyle {
+    var height: CGFloat = 28
+    var horizontalPadding: CGFloat = 0
 
     func makeBody(configuration: Configuration) -> some View {
-        Highlight(configuration: configuration, capsule: capsule)
+        Raised(configuration: configuration, height: height, horizontalPadding: horizontalPadding)
+    }
+
+    private struct Raised: View {
+        let configuration: ButtonStyleConfiguration
+        let height: CGFloat
+        let horizontalPadding: CGFloat
+        @State private var hovered = false
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            let fill = configuration.isPressed ? Color.black.opacity(0.2) : hovered && isEnabled ? Palette.hoverFill : .clear
+            configuration.label
+                .foregroundStyle(.primary)
+                .padding(.horizontal, horizontalPadding)
+                .frame(minWidth: height, minHeight: height, maxHeight: height)
+                .modifier(RaisedCapsule())
+                .overlay(Capsule().fill(fill).allowsHitTesting(false))
+                .contentShape(Capsule())
+                .opacity(isEnabled ? 1 : 0.45)
+                .animation(.easeOut(duration: 0.12), value: hovered)
+                .onHover { hovered = $0 }
+        }
+    }
+
+    private struct RaisedCapsule: ViewModifier {
+        func body(content: Content) -> some View {
+            if #available(macOS 26, *), PlatformFeatures.liquidGlass {
+                content.glassEffect(.regular, in: Capsule())
+            } else {
+                content
+                    .background {
+                        Capsule().fill(Palette.inputSurface)
+                            .overlay(Capsule().fill(LinearGradient(
+                                colors: [.white.opacity(0.08), .clear], startPoint: .top, endPoint: .center)))
+                            .shadow(color: .black.opacity(0.35), radius: 3, y: 1.5)
+                    }
+                    .overlay(Capsule().strokeBorder(Palette.raisedRim, lineWidth: 1).allowsHitTesting(false))
+            }
+        }
+    }
+}
+
+/// A small text button of a card row: a capsule of the input color, lighter on hover, darker while pressed.
+struct RowTextButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Highlight(configuration: configuration)
     }
 
     private struct Highlight: View {
         let configuration: ButtonStyleConfiguration
-        let capsule: Bool
         @State private var hovered = false
-        @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
         var body: some View {
-            let fill = configuration.isPressed ? Palette.pressedFill : hovered ? Palette.hoverFill : .clear
             configuration.label
-                .background {
-                    if capsule {
-                        Capsule().fill(fill).padding(-5)
-                    } else {
-                        Circle().fill(fill).padding(-5)
-                    }
-                }
-                .contentShape(Rectangle())
-                .scaleEffect(configuration.isPressed && !reduceMotion ? 0.88 : 1)
-                .animation(reduceMotion ? nil : .snappy(duration: 0.12), value: configuration.isPressed)
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule()
+                        .fill(Palette.inputSurface)
+                        .overlay(Capsule().fill(
+                            configuration.isPressed ? Color.black.opacity(0.2) : hovered ? Palette.hoverFill : .clear)))
+                .contentShape(Capsule())
                 .animation(.easeOut(duration: 0.12), value: hovered)
                 .onHover { hovered = $0 }
+        }
+    }
+}
+
+/// The arrow of a menu button.
+struct MenuChevron: View {
+    var body: some View {
+        Image(systemName: "chevron.down")
+            .font(.system(size: 9, weight: .bold))
+            .accessibilityHidden(true)
+    }
+}
+
+/// Tabs for a toolbar item, as tall as its buttons' highlights, in the toolbar's capsule on macOS 26 (a surface capsule
+/// before): the selected tab is an accent capsule that slides between the tabs (no slide under Reduce Motion).
+struct CapsuleTabs<Tab: Hashable>: View {
+    @Binding var selection: Tab
+    let tabs: [Tab]
+    let title: (Tab) -> Text
+    @Namespace private var namespace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(tabs, id: \.self) { tab in
+                Item(tab: tab, title: title(tab), selected: tab == selection, namespace: namespace) {
+                    withAnimation(animation) { selection = tab }
+                }
+            }
+        }
+        // One pill that follows the selected item's frame, so it slides instead of fading between items.
+        .background {
+            Capsule()
+                .fill(Color.accentColor)
+                .matchedGeometryEffect(id: selection, in: namespace, isSource: false)
+        }
+        // Also animates a selection set from code (the menus).
+        .animation(animation, value: selection)
+        .modifier(SurfaceTrack())
+    }
+
+    private var animation: Animation? { reduceMotion ? nil : .snappy(duration: 0.25) }
+
+    /// Before macOS 26 the toolbar draws no capsule around its items.
+    private struct SurfaceTrack: ViewModifier {
+        func body(content: Content) -> some View {
+            if #available(macOS 26, *), PlatformFeatures.liquidGlass {
+                content
+            } else {
+                content
+                    .padding(3)
+                    .background(Capsule().fill(Palette.surface))
+                    .overlay(Capsule().strokeBorder(Palette.surfaceBorder, lineWidth: 1).allowsHitTesting(false))
+            }
+        }
+    }
+
+    private struct Item: View {
+        let tab: Tab
+        let title: Text
+        let selected: Bool
+        let namespace: Namespace.ID
+        let action: () -> Void
+        @State private var hovered = false
+        /// A toolbar button's highlight.
+        static var height: CGFloat { 28 }
+
+        var body: some View {
+            Button(action: action) {
+                title
+                    .font(.callout)
+                    .lineLimit(1)
+                    .foregroundStyle(selected ? Color.white : Color.secondary)
+                    .padding(.horizontal, 12)
+                    .frame(height: Self.height)
+                    .background {
+                        if hovered && !selected { Capsule().fill(Palette.hoverFill) }
+                    }
+                    .matchedGeometryEffect(id: tab, in: namespace)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovered = $0 }
+            .accessibilityAddTraits(selected ? .isSelected : [])
         }
     }
 }

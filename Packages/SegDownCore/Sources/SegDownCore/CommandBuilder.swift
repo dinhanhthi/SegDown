@@ -84,6 +84,19 @@ public enum CommandBuilder {
         ]
     }
 
+    /// ffmpeg arguments that re-encode `input` into a smaller `output` mp4: H.264 CRF 28 and AAC 128k.
+    /// Even width/height (libx264 rejects odd ones) and 8-bit 4:2:0 so every player can open it.
+    public static func ffmpegCompress(input: URL, output: URL) -> [String] {
+        [
+            "-hide_banner", "-nostdin", "-y",
+            "-i", input.path,
+            "-c:v", "libx264", "-preset", "medium", "-crf", "28",
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+            output.path,
+        ]
+    }
+
     /// The `list.txt` text for parts 1...`partCount`: one `file 'part-NNN.mp4'` line each.
     /// Names come only from `partFileName`, never from external input; the concat demuxer
     /// resolves them relative to the list file's directory (the job's temp dir).

@@ -52,6 +52,8 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
                 switchRow(isOn: setting(\.autoFallback), title: "Auto fallback",
                           hint: "If yt-dlp fails, download the captured media instead.")
+                switchRow(isOn: setting(\.compress), title: "Compress after download",
+                          hint: "Re-encodes the files (H.264) to make them smaller; takes longer.")
             }
             Section("Limits") {
                 switchRow(isOn: sizeLimited, title: "Limit size", hint: nil)

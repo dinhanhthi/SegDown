@@ -1,9 +1,9 @@
-// The About page: logo, name, version, copyright and the link to the README, straight on the window's glass.
+// The About page: logo, name, version, license, the GitHub link and copyright, straight on the window's glass.
 import AppKit
 import SwiftUI
 
 struct AboutView: View {
-    private static let readme = URL(string: "https://github.com/dinhanhthi/SegDown#readme")!
+    private static let repository = URL(string: "https://github.com/dinhanhthi/SegDown")!
 
     var body: some View {
         VStack(spacing: 10) {
@@ -15,7 +15,9 @@ struct AboutView: View {
             Text("SegDown").font(.title2.weight(.semibold))
             Text("Version \(Self.version)")
                 .foregroundStyle(.secondary)
-            Link("Read me", destination: Self.readme)
+            Text("Licensed under MIT")
+                .foregroundStyle(.secondary)
+            Link("github.com/dinhanhthi/SegDown", destination: Self.repository)
             if let copyright = Self.copyright {
                 Text(copyright)
                     .font(.caption)

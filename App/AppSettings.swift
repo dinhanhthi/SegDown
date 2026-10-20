@@ -9,7 +9,7 @@ import SegDownCore
 struct AppSettings: Codable, Equatable, Sendable {
     /// Absolute path of the folder that receives one folder per job title.
     var outputFolder = AppSettings.home + "/Downloads/SegDown"
-    var mode: OutputMode = .separate
+    var mode: OutputMode = .merged
     /// Applies to every job; the extension no longer chooses it.
     var precision: Precision = .precise
     /// Fall back to the captured media when yt-dlp fails on a supported site.
@@ -20,6 +20,8 @@ struct AppSettings: Codable, Equatable, Sendable {
     var maxDuration: Double?
     /// Incognito when the extension does not say: no history entry for the job.
     var incognitoDefault = false
+    /// Re-encode each finished job's files to make them smaller.
+    var compress = false
 
     /// The user's real home from the password database, like `IPC.socketURL()`.
     static let home = getpwuid(getuid()).flatMap { $0.pointee.pw_dir.map { String(cString: $0) } }
@@ -40,12 +42,13 @@ struct AppSettings: Codable, Equatable, Sendable {
         return JobOptions(
             baseDirectory: URL(filePath: folder, directoryHint: .isDirectory).standardizedFileURL,
             maxBytes: maxBytes,
-            autoFallback: autoFallback
+            autoFallback: autoFallback,
+            compress: compress
         )
     }
 
     private enum CodingKeys: String, CodingKey {
-        case outputFolder, mode, precision, autoFallback, maxBytes, maxDuration, incognitoDefault
+        case outputFolder, mode, precision, autoFallback, maxBytes, maxDuration, incognitoDefault, compress
     }
 }
 
@@ -60,6 +63,7 @@ extension AppSettings {
         maxBytes = try c.decodeIfPresent(Int64.self, forKey: .maxBytes) ?? defaults.maxBytes
         maxDuration = try c.decodeIfPresent(Double.self, forKey: .maxDuration) ?? defaults.maxDuration
         incognitoDefault = try c.decodeIfPresent(Bool.self, forKey: .incognitoDefault) ?? defaults.incognitoDefault
+        compress = try c.decodeIfPresent(Bool.self, forKey: .compress) ?? defaults.compress
     }
 }
 
