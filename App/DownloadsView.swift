@@ -11,6 +11,8 @@ struct DownloadsView: View {
     @State private var selection: Set<String> = []
     @State private var anchor: String?
     @State private var confirmTrash = false
+    /// The jobs the Trash sheet is about: the selection, or every job for Move All to Trash.
+    @State private var trashIDs: Set<String> = []
     @State private var trashFailures: [JobStore.TrashFailure] = []
     /// Shown once the sheet is gone: a window shows one sheet or alert at a time.
     @State private var pendingFailures: [JobStore.TrashFailure] = []
@@ -40,9 +42,9 @@ struct DownloadsView: View {
             trashFailures = pendingFailures
             pendingFailures = []
         }) {
-            TrashSheet(count: selection.count, remove: {
-                pendingFailures = store.remove(ids: selection, trashFiles: true)
-                selection.removeAll()
+            TrashSheet(count: trashIDs.count, remove: {
+                pendingFailures = store.remove(ids: trashIDs, trashFiles: true)
+                selection.subtract(trashIDs)
                 confirmTrash = false
             }, cancel: { confirmTrash = false })
         }
@@ -99,6 +101,20 @@ struct DownloadsView: View {
             .fixedSize()
             .disabled(selection.isEmpty)
             .help("Remove the selected downloads from the list (⌫), or also move their files to the Trash")
+            Menu {
+                Button("Remove All from List", action: removeAllFromList)
+                Button("Move All to Trash…", action: askTrashAll)
+            } label: {
+                HStack(spacing: 4) {
+                    Text("Remove All")
+                    MenuChevron()
+                }
+            }
+            .menuStyle(.button)
+            .buttonStyle(RaisedButtonStyle(horizontalPadding: 10))
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Remove every download from the list, or also move their files to the Trash")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -118,6 +134,18 @@ struct DownloadsView: View {
 
     private func askTrash() {
         guard !selection.isEmpty else { return }
+        trashIDs = selection
+        confirmTrash = true
+    }
+
+    /// Running downloads are cancelled; files stay on disk.
+    private func removeAllFromList() {
+        store.remove(ids: Set(store.items.map(\.id)), trashFiles: false)
+        selection.removeAll()
+    }
+
+    private func askTrashAll() {
+        trashIDs = Set(store.items.map(\.id))
         confirmTrash = true
     }
 
