@@ -19,11 +19,19 @@ public actor JobRunner {
         "The site refused the download (HTTP 403/410). It may block yt-dlp; try `brew upgrade yt-dlp`."
     /// Time between SIGINT and SIGTERM when a job is cancelled.
     static let cancelGracePeriod: Duration = .seconds(3)
+    /// Time between two sums of a running job's temp dir (`JobStatus.bytes` and the size cap).
+    static let sizePollInterval: Duration = .milliseconds(500)
+    /// Files `merge` writes into the temp dir; `SizeEstimate.countedFileNames` skips them.
+    static let mergeListName = "list.txt"
+    static let mergeOutputName = "merged.mp4"
 
     private struct Entry {
         var task: Task<Void, Never>?
         var process: Process?
         var cancelled = false
+        /// Why the runner itself stopped the job (`JobError.sizeExceeded`); it then ends `failed`
+        /// with this error instead of `cancelled`.
+        var abortReason: JobError?
     }
 
     private let binaries: Binaries
@@ -38,7 +46,7 @@ public actor JobRunner {
 
     /// Starts `request` immediately. Jobs run concurrently; each has its own temp dir.
     /// The request is validated again here, so an invalid one ends as `failed`.
-    public func start(_ request: JobRequest) -> Job {
+    public func start(_ request: JobRequest, options: JobOptions = JobOptions()) -> Job {
         let id = UUID().uuidString
         let (updates, continuation) = AsyncStream.makeStream(
             of: JobStatus.self,
@@ -47,7 +55,7 @@ public actor JobRunner {
         continuation.yield(JobStatus(id: id, state: .queued, segmentCount: request.segments.count))
         jobs[id] = Entry()
         jobs[id]?.task = Task {
-            await self.execute(id: id, request: request, continuation: continuation)
+            await self.execute(id: id, request: request, options: options, continuation: continuation)
         }
         return Job(id: id, updates: updates)
     }
@@ -67,9 +75,18 @@ public actor JobRunner {
         }
     }
 
+    /// Stops job `id` through `cancel(id:)` for `reason`, unless it is already being cancelled.
+    private func abort(id: String, reason: JobError) {
+        guard let entry = jobs[id], !entry.cancelled else { return }
+        jobs[id]?.abortReason = reason
+        cancel(id: id)
+    }
+
     // MARK: - Job
 
-    private func execute(id: String, request: JobRequest, continuation: AsyncStream<JobStatus>.Continuation) async {
+    private func execute(
+        id: String, request: JobRequest, options: JobOptions, continuation: AsyncStream<JobStatus>.Continuation
+    ) async {
         let count = request.segments.count
         let tracker = ProgressTracker(id: id, segmentCount: count, continuation: continuation)
         let tempDirectory = FileManager.default.temporaryDirectory
@@ -79,14 +96,23 @@ public actor JobRunner {
         do {
             tracker.begin(index: 0, message: "Starting")
             let request = try Validation.validate(request)
+            if let maxBytes = options.maxBytes {
+                try await checkEstimate(id: id, request: request, maxBytes: maxBytes, tracker: tracker)
+            }
             try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
-            let outputs = try await run(id: id, request: request, tempDirectory: tempDirectory, tracker: tracker)
+            let outputs = try await run(
+                id: id, request: request, options: options, tempDirectory: tempDirectory, tracker: tracker
+            )
             final = JobStatus(
                 id: id, state: .done, segmentIndex: count - 1, segmentCount: count,
                 fraction: 1, outputs: outputs.map(\.path)
             )
         } catch {
-            if jobs[id]?.cancelled == true {
+            // Checked first: an abort goes through the cancel path, so `cancelled` is set too.
+            if let reason = jobs[id]?.abortReason {
+                final = JobStatus(id: id, state: .failed, segmentIndex: tracker.index, segmentCount: count,
+                                  message: Self.message(for: reason))
+            } else if jobs[id]?.cancelled == true {
                 final = JobStatus(id: id, state: .cancelled, segmentIndex: tracker.index, segmentCount: count,
                                   message: "Cancelled")
             } else {
@@ -95,6 +121,8 @@ public actor JobRunner {
             }
         }
         final.fraction = final.state == .done ? 1 : tracker.fraction
+        final.bytes = tracker.bytes
+        final.fallbackUsed = tracker.fallbackUsed ? true : nil
         try? FileManager.default.removeItem(at: tempDirectory)
         jobs[id] = nil
         continuation.yield(final)
@@ -102,27 +130,72 @@ public actor JobRunner {
     }
 
     /// Downloads every segment into `tempDirectory`, then writes the outputs. Returns their URLs.
-    private func run(id: String, request: JobRequest, tempDirectory: URL, tracker: ProgressTracker) async throws -> [URL] {
+    /// A page source with a media `fallback` runs yt-dlp without its generic extractor first, then
+    /// the captured media when `FallbackDecision` allows it. Each download attempt runs under
+    /// `watchingSize` (`JobStatus.bytes` and `options.maxBytes`).
+    private func run(
+        id: String, request: JobRequest, options: JobOptions, tempDirectory: URL, tracker: ProgressTracker
+    ) async throws -> [URL] {
         let ffmpeg = try binary(.ffmpeg)
+        let maxBytes = options.maxBytes
+        // The dir holding this attempt's parts; `merge` must use it too (concat names are relative).
+        var workDirectory = tempDirectory
         let parts: [URL]
         switch request.source {
         case let .media(url, kind, headers, variantURL, audioURL):
-            let (input, audio) = try await resolveMedia(
-                id: id, url: url, kind: kind, headers: headers, variantURL: variantURL, audioURL: audioURL,
-                tracker: tracker
-            )
-            parts = try await downloadMedia(
-                id: id, input: input, kind: kind, audio: audio, headers: headers, source: url,
-                request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory, tracker: tracker
-            )
+            parts = try await watchingSize(id: id, directory: tempDirectory, maxBytes: maxBytes, tracker: tracker) {
+                try await downloadMedia(
+                    id: id, url: url, kind: kind, headers: headers, variantURL: variantURL, audioURL: audioURL,
+                    request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory, tracker: tracker
+                )
+            }
         case let .page(url):
-            parts = try await downloadPage(
-                id: id, url: url, request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory, tracker: tracker
-            )
+            guard let fallback = request.fallback else {
+                parts = try await watchingSize(id: id, directory: tempDirectory, maxBytes: maxBytes, tracker: tracker) {
+                    try await downloadPage(
+                        id: id, url: url, request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory,
+                        tracker: tracker
+                    )
+                }
+                break
+            }
+            do {
+                parts = try await watchingSize(id: id, directory: tempDirectory, maxBytes: maxBytes, tracker: tracker) {
+                    try await downloadPage(
+                        id: id, url: url, request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory,
+                        tracker: tracker, siteOnly: true
+                    )
+                }
+            } catch {
+                // A cancel or a size-cap abort makes the attempt throw too: end the job instead.
+                try checkCancelled(id)
+                guard FallbackDecision.shouldFallback(error: error, autoFallback: options.autoFallback),
+                      case let .media(url, kind, headers, variantURL, audioURL) = fallback else { throw error }
+                // yt-dlp's ffmpeg can outlive the failed attempt and keep writing `part-NNN.*` into
+                // tempDirectory. A fresh subdirectory keeps such stale files out of this attempt's
+                // parts and byte count; removing tempDirectory at the end removes both.
+                try emptyDirectory(tempDirectory)
+                let fallbackDirectory = tempDirectory.appendingPathComponent("fallback", isDirectory: true)
+                try FileManager.default.createDirectory(at: fallbackDirectory, withIntermediateDirectories: true)
+                workDirectory = fallbackDirectory
+                tracker.reset()
+                tracker.markFallbackUsed()
+                tracker.begin(index: 0, message: "Switched to the captured media")
+                parts = try await watchingSize(
+                    id: id, directory: fallbackDirectory, maxBytes: maxBytes, tracker: tracker
+                ) {
+                    try await downloadMedia(
+                        id: id, url: url, kind: kind, headers: headers, variantURL: variantURL, audioURL: audioURL,
+                        request: request, ffmpeg: ffmpeg, tempDirectory: fallbackDirectory, tracker: tracker
+                    )
+                }
+            }
         }
         try checkCancelled(id)
 
-        let outputDirectory = try PathSanitizer.outputDirectory(title: request.title, base: baseDirectory)
+        let outputDirectory = try PathSanitizer.outputDirectory(
+            title: request.title, base: options.baseDirectory ?? baseDirectory
+        )
         // Use the component outputDirectory produced, so a fallback name has one timestamp.
         let title = outputDirectory.lastPathComponent
         switch request.mode {
@@ -130,7 +203,7 @@ public actor JobRunner {
             return try moveParts(parts, segments: request.segments, title: title, to: outputDirectory)
         case .merged:
             tracker.begin(index: request.segments.count - 1, message: "Merging")
-            let merged = try await merge(id: id, parts: parts, ffmpeg: ffmpeg, tempDirectory: tempDirectory)
+            let merged = try await merge(id: id, parts: parts, ffmpeg: ffmpeg, tempDirectory: workDirectory)
             try checkCancelled(id)
             try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
             // No await between picking the name and moving: the actor keeps concurrent jobs apart.
@@ -140,6 +213,57 @@ public actor JobRunner {
             try FileManager.default.moveItem(at: merged, to: destination)
             return [destination]
         }
+    }
+
+    /// Fails before anything is downloaded when `SizeEstimate` expects more than `maxBytes`. No
+    /// estimate (page source, failed request…) lets the job run; the runtime cap then guards it.
+    private func checkEstimate(
+        id: String, request: JobRequest, maxBytes: Int64, tracker: ProgressTracker
+    ) async throws {
+        guard case .media = request.source else { return }
+        tracker.begin(index: 0, message: "Estimating size")
+        let estimate = await SizeEstimate.estimate(request)
+        // A cancel makes the requests fail too: end the job instead of running it.
+        try checkCancelled(id)
+        guard let estimate, estimate > maxBytes else { return }
+        // Estimate rounded up, limit down: the two never print the same.
+        throw JobError.invalid(
+            "Estimated \(SizeEstimate.format(estimate, roundUp: true)) exceeds the max size (\(SizeEstimate.format(maxBytes, roundUp: false)))"
+        )
+    }
+
+    /// Runs one download `attempt` while a task sums the counted bytes of `directory` (see
+    /// `SizeEstimate.countedFileNames`) every `sizePollInterval` into `tracker`, and aborts the job
+    /// with `JobError.sizeExceeded` once the sum passes `maxBytes`. A last sum after the attempt
+    /// catches a file that grew past the cap between two polls, and is the job's final `bytes`.
+    private func watchingSize<T>(
+        id: String, directory: URL, maxBytes: Int64?, tracker: ProgressTracker,
+        _ attempt: () async throws -> T
+    ) async throws -> T {
+        let watch = Task.detached { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.sizePollInterval)
+                guard !Task.isCancelled else { return }
+                let bytes = SizeEstimate.countedBytes(in: directory)
+                tracker.setBytes(bytes)
+                if let maxBytes, bytes > maxBytes {
+                    await self?.abort(id: id, reason: .sizeExceeded(maxBytes))
+                    return
+                }
+            }
+        }
+        defer { watch.cancel() }
+        let result = try await attempt()
+        // Stopped before the last sum, so a late poll cannot publish a count of moved-out parts.
+        watch.cancel()
+        await watch.value
+        let bytes = SizeEstimate.countedBytes(in: directory)
+        tracker.setBytes(bytes)
+        if let maxBytes, bytes > maxBytes {
+            jobs[id]?.abortReason = .sizeExceeded(maxBytes)
+            throw JobError.sizeExceeded(maxBytes)
+        }
+        return result
     }
 
     /// The input (and separate audio) URLs for ffmpeg. For HLS without a chosen variant the
@@ -185,8 +309,23 @@ public actor JobRunner {
         return (variantURL, selection.audioURL)
     }
 
-    /// One ffmpeg run per segment into `<tmp>/part-NNN.mp4`.
+    /// Resolves the media source (`resolveMedia`), then downloads its segments (`downloadSegments`).
     private func downloadMedia(
+        id: String, url: URL, kind: MediaKind, headers: [String: String], variantURL: URL?, audioURL: URL?,
+        request: JobRequest, ffmpeg: URL, tempDirectory: URL, tracker: ProgressTracker
+    ) async throws -> [URL] {
+        let (input, audio) = try await resolveMedia(
+            id: id, url: url, kind: kind, headers: headers, variantURL: variantURL, audioURL: audioURL,
+            tracker: tracker
+        )
+        return try await downloadSegments(
+            id: id, input: input, kind: kind, audio: audio, headers: headers, source: url,
+            request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory, tracker: tracker
+        )
+    }
+
+    /// One ffmpeg run per segment into `<tmp>/part-NNN.mp4`.
+    private func downloadSegments(
         id: String, input: URL, kind: MediaKind, audio: URL?, headers: [String: String], source: URL,
         request: JobRequest, ffmpeg: URL, tempDirectory: URL, tracker: ProgressTracker
     ) async throws -> [URL] {
@@ -215,13 +354,16 @@ public actor JobRunner {
     }
 
     /// One yt-dlp run for all segments; it writes `<tmp>/part-NNN.<ext>` in segment order.
+    /// `siteOnly` turns the generic extractor off (see `CommandBuilder.ytDlp`).
     private func downloadPage(
-        id: String, url: URL, request: JobRequest, ffmpeg: URL, tempDirectory: URL, tracker: ProgressTracker
+        id: String, url: URL, request: JobRequest, ffmpeg: URL, tempDirectory: URL, tracker: ProgressTracker,
+        siteOnly: Bool = false
     ) async throws -> [URL] {
         let ytDlp = try binary(.ytDlp)
         let segments = request.segments
         let arguments = CommandBuilder.ytDlp(
-            url: url, segments: segments, precision: request.precision, ffmpeg: ffmpeg, tempDirectory: tempDirectory
+            url: url, segments: segments, precision: request.precision, ffmpeg: ffmpeg, tempDirectory: tempDirectory,
+            siteOnly: siteOnly
         )
         tracker.begin(index: 0, message: "Downloading segment 1 of \(segments.count)")
         try await runProcess(.ytDlp, executable: ytDlp, arguments: arguments, jobID: id) { _, line in
@@ -268,9 +410,9 @@ public actor JobRunner {
 
     /// Concats `parts` (named by `partFileName`) into `<tmp>/merged.mp4`.
     private func merge(id: String, parts: [URL], ffmpeg: URL, tempDirectory: URL) async throws -> URL {
-        let list = tempDirectory.appendingPathComponent("list.txt")
+        let list = tempDirectory.appendingPathComponent(Self.mergeListName)
         try CommandBuilder.concatList(partCount: parts.count).write(to: list, atomically: true, encoding: .utf8)
-        let output = tempDirectory.appendingPathComponent("merged.mp4")
+        let output = tempDirectory.appendingPathComponent(Self.mergeOutputName)
         try await runProcess(
             .ffmpeg, executable: ffmpeg, arguments: CommandBuilder.ffmpegMerge(list: list, output: output),
             jobID: id
@@ -296,6 +438,13 @@ public actor JobRunner {
         return outputs
     }
 
+    /// Removes everything inside `directory` (the job's temp dir) but keeps the dir itself.
+    private func emptyDirectory(_ directory: URL) throws {
+        for name in try FileManager.default.contentsOfDirectory(atPath: directory.path) {
+            try FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
+    }
+
     // MARK: - Processes
 
     private func binary(_ tool: Tool) throws -> URL {
@@ -303,7 +452,9 @@ public actor JobRunner {
         return url
     }
 
+    /// Throws the abort reason of a job the runner stopped (size cap), else `CancellationError`.
     private func checkCancelled(_ id: String) throws {
+        if let reason = jobs[id]?.abortReason { throw reason }
         if jobs[id]?.cancelled != false || Task.isCancelled { throw CancellationError() }
     }
 
@@ -333,6 +484,9 @@ public actor JobRunner {
         try checkCancelled(jobID)
 
         guard outcome.reason != .exit || outcome.status != 0 else { return }
+        if tool == .ytDlp, outcome.sawUnsupportedURL {
+            throw JobError.unsupportedSite
+        }
         if outcome.sawLinkExpired {
             throw tool == .ytDlp ? JobError.processFailed(Self.siteRefusedMessage) : JobError.linkExpired
         }
@@ -371,6 +525,11 @@ public actor JobRunner {
                 "403 forbidden", "410 gone"].contains { lower.contains($0) }
     }
 
+    /// True for the yt-dlp stderr line of a URL no extractor handles (generic extractor off).
+    static func reportsUnsupportedURL(_ line: String) -> Bool {
+        line.contains("No suitable extractor found")
+    }
+
     /// `NNN` from a `…/part-NNN.…` path in a yt-dlp line.
     static func partNumber(in line: String) -> Int? {
         guard let range = line.range(of: "part-", options: .backwards) else { return nil }
@@ -401,10 +560,48 @@ public actor JobRunner {
     }
 }
 
+/// Per-job settings from the app. The defaults reproduce a plain `start(_:)`.
+public struct JobOptions: Sendable {
+    /// Replaces the runner's base directory (one folder per title) when set.
+    public var baseDirectory: URL?
+    /// Size cap in bytes: a media job whose estimate exceeds it fails before starting, and a job
+    /// whose counted temp-dir bytes pass it is stopped and fails (`JobError.sizeExceeded`).
+    public var maxBytes: Int64?
+    /// Fall back to the captured media when yt-dlp fails on a supported site.
+    public var autoFallback: Bool
+
+    public init(baseDirectory: URL? = nil, maxBytes: Int64? = nil, autoFallback: Bool = true) {
+        self.baseDirectory = baseDirectory
+        self.maxBytes = maxBytes
+        self.autoFallback = autoFallback
+    }
+}
+
+/// Whether a failed page attempt (yt-dlp) moves on to the request's captured media fallback.
+enum FallbackDecision {
+    /// Unsupported site or yt-dlp missing → always; any other yt-dlp failure → only with
+    /// `autoFallback`. Everything else never falls back: cancellation, invalid input, a missing
+    /// ffmpeg, and a size-cap abort (`JobError.sizeExceeded`, kept distinct from `processFailed`).
+    static func shouldFallback(error: Error, autoFallback: Bool) -> Bool {
+        switch error as? JobError {
+        case .unsupportedSite:
+            return true
+        case let .missingDependency(tool) where tool == Tool.ytDlp.rawValue:
+            return true
+        case .processFailed:
+            return autoFallback
+        default:
+            return false
+        }
+    }
+}
+
 extension JobError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .linkExpired: return JobRunner.linkExpiredMessage
+        case .unsupportedSite: return "yt-dlp does not support this site"
+        case let .sizeExceeded(limit): return "Exceeds the max size (\(SizeEstimate.format(limit, roundUp: false)))"
         case let .missingDependency(tool): return "\(tool) is not installed. Install it with: brew install \(tool)"
         case let .processFailed(detail): return detail
         case let .invalid(detail): return detail
@@ -426,6 +623,8 @@ private final class ProgressTracker: @unchecked Sendable {
     private var currentFraction = 0.0
     private var message: String?
     private var lastSent = -1.0
+    private var currentBytes: Int64?
+    private var usedFallback = false
 
     init(id: String, segmentCount: Int, continuation: AsyncStream<JobStatus>.Continuation) {
         self.id = id
@@ -435,6 +634,32 @@ private final class ProgressTracker: @unchecked Sendable {
 
     var index: Int { lock.withLock { currentIndex } }
     var fraction: Double { lock.withLock { currentFraction } }
+    var bytes: Int64? { lock.withLock { currentBytes } }
+    var fallbackUsed: Bool { lock.withLock { usedFallback } }
+
+    /// Forgets all progress, for a new attempt from segment 0 (the media fallback). Publishes nothing.
+    func reset() {
+        lock.withLock {
+            currentIndex = 0
+            currentFraction = 0
+            lastSent = -1
+            currentBytes = nil
+        }
+    }
+
+    /// From now on every status says the job uses its media fallback. Publishes nothing.
+    func markFallbackUsed() {
+        lock.withLock { usedFallback = true }
+    }
+
+    /// The counted bytes of the temp dir; publishes a status when they changed.
+    func setBytes(_ bytes: Int64) {
+        lock.withLock {
+            guard bytes != currentBytes else { return }
+            currentBytes = bytes
+            update(segmentFraction: 0, force: true)
+        }
+    }
 
     /// Starts step `index` (0-based segment) with `message` and publishes it.
     func begin(index: Int, message: String) {
@@ -460,7 +685,8 @@ private final class ProgressTracker: @unchecked Sendable {
         lastSent = currentFraction
         continuation.yield(JobStatus(
             id: id, state: .running, segmentIndex: currentIndex, segmentCount: segmentCount,
-            fraction: currentFraction, message: message
+            fraction: currentFraction, message: message, bytes: currentBytes,
+            fallbackUsed: usedFallback ? true : nil
         ))
     }
 }
@@ -468,7 +694,8 @@ private final class ProgressTracker: @unchecked Sendable {
 // MARK: - Process I/O
 
 /// Drains a child's stdout and stderr concurrently (so neither pipe can fill up and block it),
-/// splits them into lines, keeps a bounded stderr tail and records HTTP 403/410 reports.
+/// splits them into lines, keeps a bounded stderr tail and records HTTP 403/410 and yt-dlp
+/// "No suitable extractor found" reports.
 /// `wait()` returns once the process has exited and both pipes reached EOF, or 2 s after the
 /// exit when a grandchild (yt-dlp's ffmpeg) still holds a pipe open.
 final class ProcessIO: @unchecked Sendable {
@@ -479,6 +706,7 @@ final class ProcessIO: @unchecked Sendable {
         var reason: Process.TerminationReason
         var stderrTail: Data
         var sawLinkExpired: Bool
+        var sawUnsupportedURL: Bool
     }
 
     private static let maxTailBytes = 4096
@@ -494,6 +722,7 @@ final class ProcessIO: @unchecked Sendable {
     private var exit: (status: Int32, reason: Process.TerminationReason)?
     private var stderrTail = Data()
     private var sawLinkExpired = false
+    private var sawUnsupportedURL = false
     private var outcome: Outcome?
     private var waiter: CheckedContinuation<Outcome, Never>?
 
@@ -559,6 +788,9 @@ final class ProcessIO: @unchecked Sendable {
         if stream == .stderr, lines.contains(where: JobRunner.reportsLinkExpired) {
             sawLinkExpired = true
         }
+        if stream == .stderr, lines.contains(where: JobRunner.reportsUnsupportedURL) {
+            sawUnsupportedURL = true
+        }
         lock.unlock()
 
         for line in lines { onLine(stream, line) }
@@ -580,7 +812,10 @@ final class ProcessIO: @unchecked Sendable {
             return
         }
         if force { detach() }
-        let result = Outcome(status: exit.status, reason: exit.reason, stderrTail: stderrTail, sawLinkExpired: sawLinkExpired)
+        let result = Outcome(
+            status: exit.status, reason: exit.reason, stderrTail: stderrTail,
+            sawLinkExpired: sawLinkExpired, sawUnsupportedURL: sawUnsupportedURL
+        )
         outcome = result
         let continuation = waiter
         waiter = nil

@@ -16,7 +16,10 @@
 //
 // Responses
 //
-//     {"type": "pong", "version": "1.0", "missing": ["yt-dlp", "deno"]}   // missing tools, may be []
+//     {"type": "pong", "version": "1.0", "missing": ["yt-dlp", "deno"],    // missing tools, may be []
+//      "protocol": 2,                                                    // absent → 1
+//      "settings": {"mode": "separate", "incognitoDefault": false,       // optional
+//                   "maxDuration": 600}}                                 // maxDuration optional
 //     {"type": "enqueued", "id": "…"}
 //     {"type": "status", "jobs": [{…JobStatus…}]}
 //     {"type": "cancelled", "id": "…"}
@@ -77,9 +80,25 @@ extension IPCRequest: Codable {
     }
 }
 
+/// The app settings an extension needs, sent in `pong` (protocol 2). `maxDuration` is the max total
+/// duration of a job's segments in seconds; `nil` means no limit.
+public struct ClientSettings: Codable, Sendable, Hashable {
+    public var mode: OutputMode
+    public var incognitoDefault: Bool
+    public var maxDuration: Double?
+
+    public init(mode: OutputMode, incognitoDefault: Bool, maxDuration: Double? = nil) {
+        self.mode = mode
+        self.incognitoDefault = incognitoDefault
+        self.maxDuration = maxDuration
+    }
+}
+
 public enum IPCResponse: Sendable, Hashable {
-    /// `missing` holds the raw values of `Binaries.missing()`.
-    case pong(version: String, missing: [String])
+    /// `missing` holds the raw values of `Binaries.missing()`. `protocol` is 1 (the default, and
+    /// what an older app's missing key decodes to) until a caller that honours the protocol-2 fields
+    /// passes `IPC.protocolVersion`; `settings` is optional on the wire.
+    case pong(version: String, missing: [String], protocol: Int = 1, settings: ClientSettings? = nil)
     case enqueued(id: String)
     case status([JobStatus])
     case cancelled(id: String)
@@ -99,7 +118,7 @@ public enum IPCResponse: Sendable, Hashable {
 
 extension IPCResponse: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, version, missing, id, jobs, variants, code, message
+        case type, version, missing, `protocol`, settings, id, jobs, variants, code, message
     }
 
     private enum ResponseType: String, Codable {
@@ -112,7 +131,9 @@ extension IPCResponse: Codable {
         case .pong:
             self = .pong(
                 version: try c.decode(String.self, forKey: .version),
-                missing: try c.decodeIfPresent([String].self, forKey: .missing) ?? []
+                missing: try c.decodeIfPresent([String].self, forKey: .missing) ?? [],
+                protocol: try c.decodeIfPresent(Int.self, forKey: .protocol) ?? 1,
+                settings: try c.decodeIfPresent(ClientSettings.self, forKey: .settings)
             )
         case .enqueued: self = .enqueued(id: try c.decode(String.self, forKey: .id))
         case .status: self = .status(try c.decode([JobStatus].self, forKey: .jobs))
@@ -129,10 +150,12 @@ extension IPCResponse: Codable {
     public func encode(to encoder: any Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case let .pong(version, missing):
+        case let .pong(version, missing, protocolVersion, settings):
             try c.encode(ResponseType.pong, forKey: .type)
             try c.encode(version, forKey: .version)
             try c.encode(missing, forKey: .missing)
+            try c.encode(protocolVersion, forKey: .protocol)
+            try c.encodeIfPresent(settings, forKey: .settings)
         case let .enqueued(id):
             try c.encode(ResponseType.enqueued, forKey: .type)
             try c.encode(id, forKey: .id)
@@ -187,6 +210,10 @@ extension IPCError: LocalizedError {
 }
 
 public enum IPC {
+    /// The wire protocol version the app sends in `pong`. 2 adds the optional `JobRequest` keys
+    /// (`incognito`, `fallback`, `mediaDuration`), `JobStatus.bytes`, `JobStatus.fallbackUsed` and
+    /// `pong.settings`.
+    public static let protocolVersion = 2
     /// Same cap as a native messaging frame.
     public static let maxLineBytes = 1024 * 1024
     public static let defaultTimeout: TimeInterval = 30

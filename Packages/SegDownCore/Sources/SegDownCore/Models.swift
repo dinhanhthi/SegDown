@@ -103,19 +103,54 @@ public enum Precision: String, Codable, Sendable, Hashable {
 }
 
 /// JSON: `{"source": {…}, "title": "…", "segments": [{"start": 10, "end": 20}], "mode": "separate", "precision": "precise"}`
+///
+/// Optional keys (protocol 2; absent from older extensions, omitted when `nil`):
+/// `"incognito": true`, `"fallback": {…Source…}` (media to try when the page source fails) and
+/// `"mediaDuration": 3600` (seconds, the whole video's duration, for the size estimate).
 public struct JobRequest: Codable, Sendable, Hashable {
     public var source: Source
     public var title: String
     public var segments: [Segment]
     public var mode: OutputMode
     public var precision: Precision
+    public var incognito: Bool?
+    public var fallback: Source?
+    public var mediaDuration: Double?
 
-    public init(source: Source, title: String, segments: [Segment], mode: OutputMode, precision: Precision) {
+    public init(
+        source: Source,
+        title: String,
+        segments: [Segment],
+        mode: OutputMode,
+        precision: Precision,
+        incognito: Bool? = nil,
+        fallback: Source? = nil,
+        mediaDuration: Double? = nil
+    ) {
         self.source = source
         self.title = title
         self.segments = segments
         self.mode = mode
         self.precision = precision
+        self.incognito = incognito
+        self.fallback = fallback
+        self.mediaDuration = mediaDuration
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case source, title, segments, mode, precision, incognito, fallback, mediaDuration
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        source = try c.decode(Source.self, forKey: .source)
+        title = try c.decode(String.self, forKey: .title)
+        segments = try c.decode([Segment].self, forKey: .segments)
+        mode = try c.decode(OutputMode.self, forKey: .mode)
+        precision = try c.decode(Precision.self, forKey: .precision)
+        incognito = try c.decodeIfPresent(Bool.self, forKey: .incognito)
+        fallback = try c.decodeIfPresent(Source.self, forKey: .fallback)
+        mediaDuration = try c.decodeIfPresent(Double.self, forKey: .mediaDuration)
     }
 }
 
@@ -128,9 +163,13 @@ public enum JobState: String, Codable, Sendable, Hashable {
 }
 
 /// JSON: `{"type": "linkExpired"}` or `{"type": "missingDependency", "detail": "ffmpeg"}`
-/// (same for `processFailed` and `invalid`).
+/// (same for `processFailed` and `invalid`); `{"type": "unsupportedSite"}` when yt-dlp has no
+/// extractor for the page (only with the generic extractor off); `{"type": "sizeExceeded",
+/// "detail": 500000000}` when the downloaded bytes passed the job's size cap (`detail` = the cap).
 public enum JobError: Error, Sendable, Hashable {
     case linkExpired
+    case unsupportedSite
+    case sizeExceeded(Int64)
     case missingDependency(String)
     case processFailed(String)
     case invalid(String)
@@ -142,13 +181,15 @@ extension JobError: Codable {
     }
 
     private enum ErrorType: String, Codable {
-        case linkExpired, missingDependency, processFailed, invalid
+        case linkExpired, unsupportedSite, sizeExceeded, missingDependency, processFailed, invalid
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(ErrorType.self, forKey: .type) {
         case .linkExpired: self = .linkExpired
+        case .unsupportedSite: self = .unsupportedSite
+        case .sizeExceeded: self = .sizeExceeded(try c.decode(Int64.self, forKey: .detail))
         case .missingDependency: self = .missingDependency(try c.decode(String.self, forKey: .detail))
         case .processFailed: self = .processFailed(try c.decode(String.self, forKey: .detail))
         case .invalid: self = .invalid(try c.decode(String.self, forKey: .detail))
@@ -160,6 +201,11 @@ extension JobError: Codable {
         switch self {
         case .linkExpired:
             try c.encode(ErrorType.linkExpired, forKey: .type)
+        case .unsupportedSite:
+            try c.encode(ErrorType.unsupportedSite, forKey: .type)
+        case let .sizeExceeded(limit):
+            try c.encode(ErrorType.sizeExceeded, forKey: .type)
+            try c.encode(limit, forKey: .detail)
         case let .missingDependency(detail):
             try c.encode(ErrorType.missingDependency, forKey: .type)
             try c.encode(detail, forKey: .detail)
@@ -174,7 +220,9 @@ extension JobError: Codable {
 }
 
 /// Progress of one job. `segmentIndex` is 0-based; `fraction` is overall progress in 0...1.
-/// `outputs` holds the absolute paths of the files written so far.
+/// `outputs` holds the absolute paths of the files written so far. `bytes` is the size downloaded
+/// so far; `fallbackUsed` is `true` once the job switched to its captured media fallback (both
+/// optional on the wire, omitted when `nil`; `fallbackUsed` is never sent as `false`).
 public struct JobStatus: Codable, Sendable, Hashable, Identifiable {
     public var id: String
     public var state: JobState
@@ -183,6 +231,8 @@ public struct JobStatus: Codable, Sendable, Hashable, Identifiable {
     public var fraction: Double
     public var message: String?
     public var outputs: [String]
+    public var bytes: Int64?
+    public var fallbackUsed: Bool?
 
     public init(
         id: String,
@@ -191,7 +241,9 @@ public struct JobStatus: Codable, Sendable, Hashable, Identifiable {
         segmentCount: Int,
         fraction: Double = 0,
         message: String? = nil,
-        outputs: [String] = []
+        outputs: [String] = [],
+        bytes: Int64? = nil,
+        fallbackUsed: Bool? = nil
     ) {
         self.id = id
         self.state = state
@@ -200,5 +252,7 @@ public struct JobStatus: Codable, Sendable, Hashable, Identifiable {
         self.fraction = fraction
         self.message = message
         self.outputs = outputs
+        self.bytes = bytes
+        self.fallbackUsed = fallbackUsed
     }
 }

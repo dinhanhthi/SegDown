@@ -49,6 +49,49 @@ struct ValidationTests {
         }
     }
 
+    @Test func checkRejectsTotalDurationOverMax() throws {
+        var request = hlsRequest(headers: [:])
+        request.segments = [Segment(start: 0, end: 10), Segment(start: 20, end: 40)]
+        try Validation.check(request, limits: JobLimits(maxDuration: 30))
+        #expect(throws: JobError.self) {
+            try Validation.check(request, limits: JobLimits(maxDuration: 29))
+        }
+    }
+
+    @Test func fallbackIsValidatedLikeASource() throws {
+        let page = Source.page(url: URL(string: "https://example.com/watch")!)
+        func media(_ url: String, headers: [String: String]) -> Source {
+            .media(url: URL(string: url)!, kind: .hls, headers: headers, variantURL: nil, audioURL: nil)
+        }
+        func request(source: Source, fallback: Source) -> JobRequest {
+            JobRequest(
+                source: source, title: "Clip", segments: [Segment(start: 10, end: 20)],
+                mode: .separate, precision: .precise, fallback: fallback
+            )
+        }
+
+        let validated = try Validation.validate(request(
+            source: page, fallback: media("https://cdn.example.com/master.m3u8", headers: ["referer": "https://example.com/"])
+        ))
+        guard case let .media(_, _, headers, _, _)? = validated.fallback else {
+            Issue.record("Expected a media fallback")
+            return
+        }
+        #expect(headers == ["Referer": "https://example.com/"])
+
+        let rejected = [
+            request(source: page, fallback: media("https://cdn.example.com/master.m3u8", headers: ["Authorization": "Bearer x"])),
+            request(source: page, fallback: media("file:///etc/passwd", headers: [:])),
+            request(source: page, fallback: page),
+            request(source: media("https://cdn.example.com/a.m3u8", headers: [:]), fallback: media("https://cdn.example.com/b.m3u8", headers: [:])),
+        ]
+        for request in rejected {
+            #expect(throws: JobError.self) {
+                try Validation.validate(request)
+            }
+        }
+    }
+
     @Test func traversalTitleStaysOneComponentUnderBase() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("SegDown", isDirectory: true)
         let directory = try PathSanitizer.outputDirectory(title: "../../etc/x", base: base)

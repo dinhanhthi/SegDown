@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "SegDownCore",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     products: [
         .library(name: "SegDownCore", targets: ["SegDownCore"]),
         .executable(name: "segdown-cli", targets: ["segdown-cli"]),

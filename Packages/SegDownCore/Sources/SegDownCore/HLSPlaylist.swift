@@ -258,8 +258,9 @@ public struct HLSPlaylist: Sendable, Hashable {
     }
 }
 
-/// Drops the captured `Cookie` when a playlist redirect leaves the original URL's origin (scheme,
-/// host or port); URLSession would otherwise forward it as is. `Referer` and `Origin` are kept:
+/// Drops the captured `Cookie` (and any `Authorization`) when a redirect of a playlist or size
+/// request leaves the original URL's origin (scheme, host or port); URLSession would otherwise
+/// forward them as is. `Referer` and `Origin` are kept:
 /// hotlink-protected CDNs need them, and ffmpeg sends them to every host anyway.
 /// Compares with the original URL, not the previous hop, so any off-origin chain fails closed.
 final class RedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
@@ -278,6 +279,7 @@ final class RedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
         guard let target = request.url, !Self.sameOrigin(target, original) else { return request }
         var stripped = request
         stripped.setValue(nil, forHTTPHeaderField: "Cookie")
+        stripped.setValue(nil, forHTTPHeaderField: "Authorization")
         return stripped
     }
 

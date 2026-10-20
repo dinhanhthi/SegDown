@@ -98,15 +98,23 @@ public enum CommandBuilder {
     /// The plan's `%(section_number)03d` is not used: yt-dlp only sets `section_number` for chapter
     /// sections, so time ranges all render as `part-NA.mp4` and collide. `autonumber` increments
     /// once per downloaded section, in `--download-sections` order, starting at 1.
+    ///
+    /// `siteOnly` turns off yt-dlp's generic extractor (`--use-extractors default,-generic`), so a
+    /// page without a site extractor fails fast with "No suitable extractor found".
     public static func ytDlp(
         url: URL,
         segments: [Segment],
         precision: Precision,
         ffmpeg: URL,
-        tempDirectory: URL
+        tempDirectory: URL,
+        siteOnly: Bool = false
     ) -> [String] {
-        var args = [
-            "--ignore-config", "--no-playlist", "--newline",
+        var args = ["--ignore-config"]
+        if siteOnly {
+            args += ["--use-extractors", "default,-generic"]
+        }
+        args += [
+            "--no-playlist", "--newline",
             "-f", "bv*+ba/b",
             "--merge-output-format", "mp4",
             "--ffmpeg-location", ffmpeg.path,
