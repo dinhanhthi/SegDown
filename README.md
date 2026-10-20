@@ -23,13 +23,19 @@
 
 ## Install
 
-Requires macOS 15 or later, Xcode with Swift 6, and:
+Requires macOS 15 or later, and:
 
 ```sh
-brew install yt-dlp ffmpeg deno xcodegen
+brew install yt-dlp ffmpeg deno
 ```
 
-Build the app:
+Download `SegDown-X.Y.Z.dmg` from the [latest release](https://github.com/dinhanhthi/SegDown/releases/latest), drag SegDown to `/Applications` and open it. It lives in the menu bar; its Dependencies page shows any missing tool.
+
+Updates: Check for Updates… in the menu bar menu or the app menu.
+
+## Build from source
+
+Requires Xcode with Swift 6 and `brew install xcodegen`.
 
 ```sh
 xcodegen generate
@@ -37,21 +43,22 @@ xcodebuild -project SegDown.xcodeproj -scheme SegDown -configuration Debug build
 xcodebuild -project SegDown.xcodeproj -scheme SegDown -configuration Debug -showBuildSettings | grep -m1 BUILT_PRODUCTS_DIR
 ```
 
-Copy `SegDown.app` from that folder to `/Applications` and open it. It lives in the menu bar; its Dependencies page shows any missing tool.
+Copy `SegDown.app` from that folder to `/Applications` and open it. Builds are signed with the maintainer's Developer ID: to build it yourself, change `DEVELOPMENT_TEAM` and `CODE_SIGN_IDENTITY` in `project.yml`.
 
 ## Connect a browser
 
 **Chrome, Chromium, Brave, Edge, Arc**
 
-1. Open the browser's extensions page (`chrome://extensions` in Chrome), turn on Developer mode, click Load unpacked and pick the `extension/` folder.
+1. Unzip `SegDown-extension-X.Y.Z.zip` from the [latest release](https://github.com/dinhanhthi/SegDown/releases/latest). Open the browser's extensions page (`chrome://extensions` in Chrome), turn on Developer mode, click Load unpacked and pick the `SegDown-extension/` folder (or `extension/` in a clone).
 2. In SegDown, open Browsers and click Install. Click Reinstall after moving the app.
 3. Reload the pages that were already open.
 
+After each update, replace the `SegDown-extension/` folder with the new release's and click reload on the extension.
+
 **Safari** (the extension ships inside `SegDown.app`)
 
-1. Safari Settings › Advanced: turn on "Show features for web developers".
-2. Settings › Developer: turn on "Allow unsigned extensions". Safari turns it off each time it quits.
-3. Settings › Extensions: tick SegDown, then "Always Allow on Every Website…".
+1. Open SegDown once.
+2. Safari Settings › Extensions: tick SegDown, then "Always Allow on Every Website…". If it is unticked after replacing the app, tick it again.
 
 ## Use
 
