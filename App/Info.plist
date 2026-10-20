@@ -17,14 +17,23 @@
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.2.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 Anh-Thi Dinh</string>
+	<!-- Sparkle: the updater stays off unless SUPublicEDKey is a base64 32-byte EdDSA key (see Updater.swift). -->
+	<key>SUFeedURL</key>
+	<string>https://dinhanhthi.github.io/SegDown/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>FKmP/qGwni8NNNA7jTURnq586qk5m8hf4gXUbcTJ5Es=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 </dict>
 </plist>

@@ -17,12 +17,13 @@ enum SegDownApp {
 
 /// Owns the stores, the status item and the one main window for the app lifetime.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     let settings: SettingsStore
     /// Created at launch (not on first window open) so the IPC server can use it right away.
     let store: JobStore
     /// The main window's selected page; kept across window closes, so "Open SegDown" reopens the last page.
     let navigation = Navigation()
+    let updater = Updater()
 
     private var statusItem: StatusItemController?
     private var window: NSWindow?
@@ -40,8 +41,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusItem = StatusItemController(
             onOpen: { [weak self] in self?.showMainWindow() },
             onSettings: { [weak self] in self?.showSettings() },
-            onAbout: { [weak self] in self?.showAbout() })
+            onAbout: { [weak self] in self?.showAbout() },
+            updater: updater)
         observeActiveCount()
+        // Also for `--background` launches, so scheduled checks run while only the menu bar item is shown.
+        updater.start()
         // `segdown-host` and the Safari appex launch the app hidden with `--background`: menu bar only, no Dock
         // icon. The argument does not reach the app from the sandboxed appex, so a hidden launch (`hides = true`,
         // `open -j`) counts too; `NSApp.isHidden` is already set here (`NSRunningApplication.current.isHidden` is not).
@@ -109,6 +113,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showMainWindow()
     }
 
+    @objc func checkForUpdates() {
+        updater.checkForUpdates()
+    }
+
+    /// "Check for Updates…" stays disabled while the updater is off (no `SUPublicEDKey` yet).
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action == #selector(checkForUpdates) ? updater.canCheck : true
+    }
+
     /// Shows the Dock icon and the window, then activates the app on the next turn (the `.regular` switch from
     /// LSUIElement is not effective before). On macOS 14+ a plain `activate()` is denied on a fresh launch from
     /// LSUIElement; the `ignoringOtherApps:` form is still honored. `unhide` undoes a hidden (`hides`) launch.
@@ -134,10 +147,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// App menu (About, Settings, Hide, Quit), Edit and Window menus, shown while the app has a Dock icon.
+    /// App menu (About, Check for Updates, Settings, Hide, Quit), Edit and Window menus, shown while the app has a
+    /// Dock icon.
     private func makeMainMenu() -> NSMenu {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About SegDown", action: #selector(showAbout), keyEquivalent: "").target = self
+        appMenu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "").target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",").target = self
         appMenu.addItem(.separator())

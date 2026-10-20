@@ -4,16 +4,23 @@ options:
   deploymentTarget:
     macOS: "15.0"
   createIntermediateGroups: true
+  xcodeVersion: "27.0"
 settings:
   base:
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "15.0"
-    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_IDENTITY: "Developer ID Application"
     CODE_SIGN_STYLE: Manual
-    DEVELOPMENT_TEAM: ""
+    DEVELOPMENT_TEAM: 86H6CNLN4C
+    MARKETING_VERSION: 0.2.0
+    CURRENT_PROJECT_VERSION: 1
 packages:
   SegDownCore:
     path: Packages/SegDownCore
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    # Sparkle 2.10.0, pinned by commit (git ls-remote ... refs/tags/2.10.0; lightweight tag, no ^{}).
+    revision: eef1a539a373c1f1a320624b1130fc5de7b2e100
 targets:
   SegDown:
     type: application
@@ -31,7 +38,8 @@ targets:
         INFOPLIST_FILE: App/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_APP_SANDBOX: NO
-        ENABLE_HARDENED_RUNTIME: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: App/SegDown.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: logo
     dependencies:
       - package: SegDownCore
@@ -42,6 +50,7 @@ targets:
           destination: executables
       - target: SegDownSafari
         embed: true
+      - package: Sparkle
   # Safari Web Extension, embedded at SegDown.app/Contents/PlugIns. Safari reads manifest.json at
   # the root of Contents/Resources, so the shared extension/ files land there with paths kept.
   SegDownSafari:
@@ -67,7 +76,7 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_ENTITLEMENTS: SafariExtension/SegDownSafari.entitlements
         ENABLE_APP_SANDBOX: YES
-        ENABLE_HARDENED_RUNTIME: NO
+        ENABLE_HARDENED_RUNTIME: YES
     dependencies:
       - package: SegDownCore
         product: SegDownCore
@@ -80,6 +89,8 @@ targets:
       base:
         PRODUCT_NAME: segdown-host
         PRODUCT_BUNDLE_IDENTIFIER: com.math2it.segdown.host
+        ENABLE_HARDENED_RUNTIME: YES
+        SKIP_INSTALL: YES
     dependencies:
       - package: SegDownCore
         product: SegDownCore

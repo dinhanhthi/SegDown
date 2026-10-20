@@ -5,3 +5,17 @@ DerivedData/
 xcuserdata/
 *.pem
 docs/
+release/
+
+# Secrets (safety net)
+sparkle_private_key*
+*_sparkle_private_key*
+*.p12
+*.key
+*.p8
+*.pfx
+*.cer
+*.mobileprovision
+*.keychain*
+.env*
+*private_key*
