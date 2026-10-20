@@ -41,6 +41,7 @@ func launch(_ app: URL) {
     let configuration = NSWorkspace.OpenConfiguration()
     configuration.activates = false
     configuration.hides = true
+    configuration.arguments = ["--background"] // tells the window app not to show a window
     let done = DispatchSemaphore(value: 0)
     NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, error in
         if let error { log("launch failed: \(error.localizedDescription)") }

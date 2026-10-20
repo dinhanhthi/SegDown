@@ -170,7 +170,17 @@ final class IPCServer: @unchecked Sendable {
             _ = close(fd)
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [self] in serve(fd) }
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            noteBrowser(fd)
+            serve(fd)
+        }
+    }
+
+    /// Records which browser connected, for display only: it never gates the connection.
+    private func noteBrowser(_ fd: Int32) {
+        guard let bundleID = BrowserIdentity.bundleID(forPeerOf: fd) else { return }
+        logger.debug("Connection from \(bundleID, privacy: .public)")
+        Task { @MainActor [store] in store.noteConnection(bundleID: bundleID) }
     }
 
     // MARK: - Connection

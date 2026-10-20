@@ -5,7 +5,7 @@ import SwiftUI
 
 struct MenuBarView: View {
     let store: JobStore
-    @AppStorage(JobStore.defaultPrecisionKey) private var precision: Precision = .precise
+    let settings: SettingsStore
     @State private var browsers: [HostManifestInstaller.Status] = []
     @State private var installError: String?
 
@@ -17,7 +17,10 @@ struct MenuBarView: View {
             Divider()
             jobs
             Divider()
-            Picker("Default precision", selection: $precision) {
+            Picker("Default precision", selection: Binding(
+                get: { settings.settings.precision },
+                set: { value in settings.update { $0.precision = value } }
+            )) {
                 Text("Precise").tag(Precision.precise)
                 Text("Fast").tag(Precision.fast)
             }
@@ -127,7 +130,7 @@ struct MenuBarView: View {
             HStack {
                 Text("Jobs").font(.headline)
                 Spacer()
-                Button("Clear finished") { store.clearFinished() }
+                Button("Clear finished") { store.clearHistory() }
                     .disabled(!store.items.contains { $0.status.state.isFinished })
             }
             if store.items.isEmpty {
@@ -170,6 +173,16 @@ private struct JobRow: View {
                         .font(.caption)
                         .monospacedDigit()
                 }
+            }
+            if let bytes = item.bytes {
+                Text(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if item.fallbackUsed {
+                Text("Switched to the captured media")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             if let message = status.message, !message.isEmpty {
                 Text(message)

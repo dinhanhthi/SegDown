@@ -4,12 +4,19 @@ import SwiftUI
 
 @main
 struct SegDownApp: App {
+    @State private var settings: SettingsStore
     /// Created at launch (not on first menu open) so the IPC server can use it right away.
-    @State private var store = JobStore()
+    @State private var store: JobStore
+
+    init() {
+        let settings = SettingsStore()
+        _settings = State(initialValue: settings)
+        _store = State(initialValue: JobStore(settings: settings))
+    }
 
     var body: some Scene {
         MenuBarExtra("SegDown", systemImage: "scissors") {
-            MenuBarView(store: store)
+            MenuBarView(store: store, settings: settings)
         }
         .menuBarExtraStyle(.window)
     }
