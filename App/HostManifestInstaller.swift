@@ -25,6 +25,8 @@ enum HostManifestInstaller {
     /// One supported browser and the state of its manifest.
     struct Status: Identifiable {
         let browser: String
+        /// The browser's bundle id, the key of `JobStore.lastConnected`.
+        let bundleID: String
         let manifestPath: String
         /// A manifest file exists in the browser's `NativeMessagingHosts` folder.
         let installed: Bool
@@ -35,13 +37,13 @@ enum HostManifestInstaller {
         var id: String { browser }
     }
 
-    /// Browser name and its `NativeMessagingHosts` folder, relative to `~/Library/Application Support`.
-    private static let browsers: [(name: String, hostsDir: String)] = [
-        ("Chrome", "Google/Chrome/NativeMessagingHosts"),
-        ("Chromium", "Chromium/NativeMessagingHosts"),
-        ("Brave", "BraveSoftware/Brave-Browser/NativeMessagingHosts"),
-        ("Edge", "Microsoft Edge/NativeMessagingHosts"),
-        ("Arc", "Arc/User Data/NativeMessagingHosts"),
+    /// Browser name, bundle id and its `NativeMessagingHosts` folder, relative to `~/Library/Application Support`.
+    private static let browsers: [(name: String, bundleID: String, hostsDir: String)] = [
+        ("Chrome", "com.google.Chrome", "Google/Chrome/NativeMessagingHosts"),
+        ("Chromium", "org.chromium.Chromium", "Chromium/NativeMessagingHosts"),
+        ("Brave", "com.brave.Browser", "BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+        ("Edge", "com.microsoft.edgemac", "Microsoft Edge/NativeMessagingHosts"),
+        ("Arc", "company.thebrowser.Browser", "Arc/User Data/NativeMessagingHosts"),
     ]
 
     /// Absolute path of the host executable inside the running bundle.
@@ -59,7 +61,7 @@ enum HostManifestInstaller {
         )
     }
 
-    /// Writes the manifest atomically for every browser whose folder exists. Returns the written paths.
+    /// Writes the manifest atomically for every browser whose folder exists. Returns those browsers' names.
     @discardableResult
     static func install() throws -> [String] {
         let encoder = JSONEncoder()
@@ -72,7 +74,7 @@ enum HostManifestInstaller {
             try FileManager.default.createDirectory(at: hostsDir, withIntermediateDirectories: true)
             let file = manifestURL(in: hostsDir)
             try data.write(to: file, options: .atomic)
-            written.append(file.path)
+            written.append(browser.name)
         }
         return written
     }
@@ -85,13 +87,15 @@ enum HostManifestInstaller {
                 in: supportDirectory.appendingPathComponent(browser.hostsDir, isDirectory: true)
             )
             guard let data = FileManager.default.contents(atPath: file.path) else {
-                return Status(browser: browser.name, manifestPath: file.path, installed: false, stale: false)
+                return Status(browser: browser.name, bundleID: browser.bundleID, manifestPath: file.path,
+                              installed: false, stale: false)
             }
             let manifest = try? JSONDecoder().decode(Manifest.self, from: data)
             let stale = manifest.map {
                 $0.path != expected.path || $0.allowedOrigins != expected.allowedOrigins
             } ?? true
-            return Status(browser: browser.name, manifestPath: file.path, installed: true, stale: stale)
+            return Status(browser: browser.name, bundleID: browser.bundleID, manifestPath: file.path,
+                          installed: true, stale: stale)
         }
     }
 

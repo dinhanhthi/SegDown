@@ -22,6 +22,8 @@ targets:
       - path: App
       - path: assets/logo.icon
         buildPhase: resources
+      - path: assets/logo_512.png
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.math2it.segdown
