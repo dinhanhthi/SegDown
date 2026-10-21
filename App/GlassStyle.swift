@@ -91,20 +91,25 @@ struct RaisedButtonStyle: ButtonStyle {
 }
 
 /// A small text button of a card row: a capsule of the input color, lighter on hover, darker while pressed.
+/// `formRow`: as tall as a compact `CapsuleTabs`, for a form row.
 struct RowTextButtonStyle: ButtonStyle {
+    var formRow = false
+
     func makeBody(configuration: Configuration) -> some View {
-        Highlight(configuration: configuration)
+        Highlight(configuration: configuration, formRow: formRow)
     }
 
     private struct Highlight: View {
         let configuration: ButtonStyleConfiguration
+        let formRow: Bool
         @State private var hovered = false
 
         var body: some View {
             configuration.label
-                .font(.caption.weight(.medium))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
+                .font(formRow ? .subheadline : .caption.weight(.medium))
+                .padding(.horizontal, formRow ? 10 : 8)
+                .padding(.vertical, formRow ? 0 : 3)
+                .frame(height: formRow ? 22 : nil)
                 .background(
                     Capsule()
                         .fill(Palette.inputSurface)
@@ -128,17 +133,19 @@ struct MenuChevron: View {
 
 /// Tabs for a toolbar item, as tall as its buttons' highlights, in the toolbar's capsule on macOS 26 (a surface capsule
 /// before): the selected tab is an accent capsule that slides between the tabs (no slide under Reduce Motion).
+/// `compact`: smaller, always on a surface capsule, for a form row.
 struct CapsuleTabs<Tab: Hashable>: View {
     @Binding var selection: Tab
     let tabs: [Tab]
     let title: (Tab) -> Text
+    var compact = false
     @Namespace private var namespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(tabs, id: \.self) { tab in
-                Item(tab: tab, title: title(tab), selected: tab == selection, namespace: namespace) {
+                Item(tab: tab, title: title(tab), selected: tab == selection, compact: compact, namespace: namespace) {
                     withAnimation(animation) { selection = tab }
                 }
             }
@@ -151,19 +158,21 @@ struct CapsuleTabs<Tab: Hashable>: View {
         }
         // Also animates a selection set from code (the menus).
         .animation(animation, value: selection)
-        .modifier(SurfaceTrack())
+        .modifier(SurfaceTrack(compact: compact))
     }
 
     private var animation: Animation? { reduceMotion ? nil : .snappy(duration: 0.25) }
 
-    /// Before macOS 26 the toolbar draws no capsule around its items.
+    /// Before macOS 26 the toolbar draws no capsule around its items; a form never does.
     private struct SurfaceTrack: ViewModifier {
+        let compact: Bool
+
         func body(content: Content) -> some View {
-            if #available(macOS 26, *), PlatformFeatures.liquidGlass {
+            if #available(macOS 26, *), PlatformFeatures.liquidGlass, !compact {
                 content
             } else {
                 content
-                    .padding(3)
+                    .padding(compact ? 2 : 3)
                     .background(Capsule().fill(Palette.surface))
                     .overlay(Capsule().strokeBorder(Palette.surfaceBorder, lineWidth: 1).allowsHitTesting(false))
             }
@@ -174,20 +183,21 @@ struct CapsuleTabs<Tab: Hashable>: View {
         let tab: Tab
         let title: Text
         let selected: Bool
+        let compact: Bool
         let namespace: Namespace.ID
         let action: () -> Void
         @State private var hovered = false
-        /// A toolbar button's highlight.
-        static var height: CGFloat { 28 }
+        /// A toolbar button's highlight; a form row's control when compact.
+        private var height: CGFloat { compact ? 22 : 28 }
 
         var body: some View {
             Button(action: action) {
                 title
-                    .font(.callout)
+                    .font(compact ? .subheadline : .callout)
                     .lineLimit(1)
                     .foregroundStyle(selected ? Color.white : Color.secondary)
-                    .padding(.horizontal, 12)
-                    .frame(height: Self.height)
+                    .padding(.horizontal, compact ? 10 : 12)
+                    .frame(height: height)
                     .background {
                         if hovered && !selected { Capsule().fill(Palette.hoverFill) }
                     }

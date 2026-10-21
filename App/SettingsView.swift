@@ -35,21 +35,22 @@ struct SettingsView: View {
                             .truncationMode(.middle)
                             .textSelection(.enabled)
                         Button("Choose…", action: chooseFolder)
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
                     }
                 }
-                Picker("Default output", selection: setting(\.mode)) {
-                    Text("Separate").tag(OutputMode.separate)
-                    Text("Merged").tag(OutputMode.merged)
+                LabeledContent("Default output") {
+                    CapsuleTabs(selection: setting(\.mode), tabs: [OutputMode.separate, .merged],
+                                title: { Text($0 == .separate ? "Separate" : "Merged") }, compact: true)
+                        .fixedSize()
                 }
-                .pickerStyle(.segmented)
-                Picker(selection: setting(\.precision)) {
-                    Text("Precise").tag(Precision.precise)
-                    Text("Fast").tag(Precision.fast)
+                LabeledContent {
+                    CapsuleTabs(selection: setting(\.precision), tabs: [Precision.precise, .fast],
+                                title: { Text($0 == .precise ? "Precise" : "Fast") }, compact: true)
+                        .fixedSize()
                 } label: {
                     Text("Default precision")
                     Text("Precise re-encodes for exact cuts; fast copies streams and cuts at keyframes.")
                 }
-                .pickerStyle(.segmented)
                 switchRow(isOn: setting(\.flattenOutput), title: "Flatten output folder",
                           hint: "Saves every file straight into the output folder, without a folder per video.")
                 switchRow(isOn: setting(\.snakeCaseNames), title: "Snake case names",
@@ -109,6 +110,7 @@ struct SettingsView: View {
             Section {
                 LabeledContent {
                     Button("Clear history…") { confirmClear = true }
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
                 } label: {
                     Text("History")
                     Text("Finished downloads in the list and in history. Files stay on disk.")
