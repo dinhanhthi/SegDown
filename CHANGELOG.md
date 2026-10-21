@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-21
+
 ### Added
 
 - Settings › Browser › Preferred resolution (360p, 480p, 720p, 1080p, 2K or 4K): the overlay's Quality starts on the tallest quality up to it, for yt-dlp downloads and HLS streams alike, and picking another one in the ▾ menu still wins for that video. Update the app and the extension together.
