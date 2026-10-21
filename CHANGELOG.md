@@ -7,10 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-21
+
 ### Added
 
 - Hovering a marked segment on the overlay timeline shows a × button that removes it, so a few segments can be dropped before Download without opening the menu.
 - Segments you downloaded turn green on the overlay timeline and get a ✓ in the menu, also after you reopen the page (not for incognito or Full clip downloads).
+- Download cards keep the page URL and have an Open Page button that opens the page the video came from.
+- Download sizes are colored by weight, and the fallback note has an info icon.
+
+### Changed
+
+- Settings uses capsule tabs and flat capsule buttons.
+- The page tabs are right-aligned in the window header.
+- The download state badges are as tall as the card buttons.
+- The app icon glyph is smaller.
 
 ## [0.3.0] - 2026-10-21
 
