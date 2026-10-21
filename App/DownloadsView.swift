@@ -334,8 +334,8 @@ struct DownloadsView: View {
     }
 }
 
-/// One job: title and state, then segment, duration, size, progress, the message and Cancel, then the buttons: Open
-/// Page, Reveal in Finder, Archive or Unarchive, and Remove. Selected adds an accent fill and stroke.
+/// One job: title and state, then segment, duration, size, progress, then the buttons: Open Page, Reveal in Finder,
+/// Archive or Unarchive, and Remove, with the message and Cancel on the right. Selected adds an accent fill and stroke.
 private struct DownloadCard: View {
     let item: JobStore.Item
     let store: JobStore
@@ -381,23 +381,6 @@ private struct DownloadCard: View {
                 Label("Switched to the captured media", systemImage: "info.circle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-            if status.message != nil || !status.state.isFinished {
-                HStack(spacing: 8) {
-                    if let message = status.message {
-                        Text(verbatim: message)
-                            .font(.caption)
-                            .foregroundStyle(status.state == .failed ? .red : .secondary)
-                            .lineLimit(3)
-                    }
-                    Spacer(minLength: 8)
-                    if !status.state.isFinished {
-                        Button("Cancel") { store.cancel(item.id) }
-                            .buttonStyle(RowTextButtonStyle())
-                            .fixedSize()
-                            .help("Cancel the download")
-                    }
-                }
             }
             HStack(spacing: 8) {
                 if let pageURL = item.pageURL {
@@ -447,7 +430,19 @@ private struct DownloadCard: View {
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("Remove the download from the list, or also move its files to the Trash")
-                Spacer()
+                Spacer(minLength: 8)
+                if let message = status.message {
+                    Text(verbatim: message)
+                        .font(.caption)
+                        .foregroundStyle(status.state == .failed ? .red : .secondary)
+                        .lineLimit(3)
+                }
+                if !status.state.isFinished {
+                    Button("Cancel") { store.cancel(item.id) }
+                        .buttonStyle(RowTextButtonStyle())
+                        .fixedSize()
+                        .help("Cancel the download")
+                }
             }
             .padding(.top, 6)
         }
