@@ -376,11 +376,14 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              toggleOverlay {open: true} to that frame. -> {ok, state}.
 //
 //   Segments. The hub owns the tab's segments: segs:<tabId> in storage.session,
-//   a list sorted by start (then end) of at most MAX_SEGMENTS {start, end}
-//   (finite, >= 0, end > start), written only by markEnd, removeSegment,
-//   clearSegments and the page load below; the pending start is
-//   hub:<tabId>.pendingStart. After every change the list is relayed to the
-//   selected video's frame as `segments` and saved (Segment persistence).
+//   a list sorted by start (then end) of at most MAX_SEGMENTS {start, end,
+//   done?: true} (finite, >= 0, end > start), written only by markEnd,
+//   removeSegment, clearSegments, the page load below and the status handler
+//   (Downloaded segments); the pending start is hub:<tabId>.pendingStart. done
+//   is set only by that status handler: markEnd creates segments without it,
+//   and removing or clearing a segment drops its flag with it. After every
+//   change the list is relayed to the selected video's frame as `segments` and
+//   saved (Segment persistence).
 //   removeSegment {index} [selected]: index into segs:<tabId> -> {ok, segments},
 //              or {ok: false, error: "unknown-segment"} when out of range.
 //   clearSegments [selected] -> {ok, segments: []}.
@@ -401,6 +404,21 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   not allowed stay in storage.session only. The load skips storage.local for a
 //   tab known to be incognito (segs:<tabId> starts as []); before the first pong
 //   a tab without an inc:<tabId> choice loads (reading leaves no trace).
+//
+//   Downloaded segments. When a status reply (Progress + cancel) shows a job
+//   "done" whose jobt entry has a page and no applied, the hub marks the entry
+//   applied (so it is applied once) and sets done: true on the segments whose
+//   start and end both equal one of page.ranges: in seg:<page.key>
+//   (storage.local) only when that record exists (never creates one), and in
+//   segs:<tabId> of every tab whose page:<tabId>.key is page.key; those tabs'
+//   selected frames get `segments`. No pong gate: the job was judged not
+//   incognito at enqueue and only an existing record changes. Failed and
+//   cancelled jobs flag nothing; full-clip and incognito jobs carry no page, so
+//   they never flag. `view` also asks the app when this page has a pending
+//   entry, so a page reloaded or reopened before its job finished is flagged on
+//   its next view. Known limit: "done" is learned only from a status call
+//   (`jobs` / `view`) made while the jobt entry exists (storage.session, lost
+//   when the browser quits).
 //
 //   Incognito. A tab is incognito when it belongs to a browser private window
 //   (sender.tab.incognito, or chrome.tabs.get(tabId).incognito where there is no
@@ -545,8 +563,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              Full clip from `view`; the app checks both).
 //              Then:
 //              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "enqueue", job:
-//              {source, title, segments: [{start, end}], mode, precision,
-//              fallback?, mediaDuration?, incognito?: true}}) ->
+//              {source, title, segments: [{start, end}] (never done), mode,
+//              precision, fallback?, mediaDuration?, incognito?: true}}) ->
 //                {type: "enqueued", id} -> {ok, jobId}; {jobId, title, ts} is
 //                  appended to jobs:<tabId> (for 4.4; {jobId, ts} for an
 //                  incognito job);
@@ -560,7 +578,10 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              overlay disables the button while a call is in flight; the hub
 //              does not dedupe (two clicks are two jobs). The id and title of a
 //              job that is not incognito also go into jobt (below), which
-//              survives the tab's navigation.
+//              survives the tab's navigation; a job that is not a full clip
+//              adds page: {key, ranges} (key: the page key of top:<tabId>, read
+//              with segs:<tabId> at the start of the download, never from the
+//              body; ranges: the job's segments) for Downloaded segments.
 //
 //   Progress + cancel (4.4).
 //   jobs [selected] -> {ok, jobs: [job], appError?}: this tab's jobs
@@ -636,8 +657,11 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //                job (this tab's newest job from `jobs`: {id, state,
 //                  segmentIndex, segmentCount, fraction, bytes, message,
 //                  fallbackUsed}, or null)}.
-//              Uses the deps cache and, when the tab has jobs, one status
-//              request; starts a probe run like getSource.
+//              Uses the deps cache and, when the tab has jobs or else when jobt
+//              holds an entry with page.key = page:<tabId>.key and no applied,
+//              one status request (a failure is ignored), made before segments
+//              are read so they carry its Downloaded segments flags; starts a
+//              probe run like getSource.
 //
 // Hub -> content: chrome.tabs.sendMessage(tabId, msg, {frameId}). agent.js and
 // the overlay share each frame, so every message names its receiver in `to`;
@@ -647,7 +671,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //     getTime {videoKey} -> {ok, currentTime, duration (null if unknown), paused}
 //     select {videoKey | null}: the frame's selected video (null: none there)
 //   to "overlay" (the selected video's frame):
-//     segments {segments: [{start, end}]}: after every change of segs:<tabId>
+//     segments {segments: [{start, end, done?}]}: after every change of segs:<tabId>
 //     mark {action, time, frameId, videoKey, start?, end?} | markError {action, error}
 //     toggleOverlay {open}: the toggle below or `openOverlay`; open = the new
 //     panelOpen.
@@ -689,7 +713,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   hub:<tabId>  -> {selected: {frameId, videoKey} | null, selectedBy: "auto" | "user",
 //                    panelOpen, pendingStart}   (= `state` above; panelOpen = overlay open)
 //   cand:<tabId> -> {<frameId>: [candidate, ...]}
-//   segs:<tabId> -> [{start, end}]   (the tab's segments, owned by the hub)
+//   segs:<tabId> -> [{start, end, done?}]   (the tab's segments, owned by the hub)
 //   page:<tabId> -> {key: "seg:<url>"}   (the page key the segments were loaded for)
 //   src:<tabId>  -> {url, selected}   (chooseSource: the entry's URL and the
 //                    selection it was made for; never sent to content scripts)
@@ -701,14 +725,15 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //                    chosen variant's URL, the selection; never sent to content scripts)
 //   jobs:<tabId> -> [{jobId, title?, ts}]   (4.3 enqueued jobs, oldest first, at most
 //                    MAX_JOBS_PER_TAB; title as sent to the app, absent for incognito jobs)
-//   jobt         -> {<jobId>: {title, ts}}   (4.4: every job this extension enqueued
-//                    that is not incognito; at most MAX_KNOWN_JOBS, oldest ts dropped;
-//                    not cleared with a tab)
+//   jobt         -> {<jobId>: {title, ts, page?: {key, ranges}, applied?}}   (4.4:
+//                    every job this extension enqueued that is not incognito; at most
+//                    MAX_KNOWN_JOBS, oldest ts dropped; not cleared with a tab; page
+//                    and applied: Downloaded segments)
 //   inc:<tabId>  -> boolean   (setIncognito: the tab's incognito choice; not cleared
 //                    on navigation, removed with the tab)
 // chrome.storage.local (persistent; only this worker reads or writes it, and its
 // access level is set to trusted contexts where the browser supports that):
-//   seg:<url>    -> {segments, ts}   (at most 200, newest ts kept; entries saved by
+//   seg:<url>    -> {segments (with done?), ts}   (at most 200, newest ts kept; entries saved by
 //                    older versions also carry mode and precision, ignored)
 //   ui           -> {fullClipButton, playerButton}   (the app's switches from the
 //                    last pong; absent -> both true; sent to content scripts only
@@ -870,7 +895,7 @@ function cleanSegments(list) {
   const out = [];
   for (const s of list) {
     if (!isObject(s) || !isTime(s.start) || !isTime(s.end) || !(s.end > s.start)) return null;
-    out.push({ start: s.start, end: s.end });
+    out.push(s.done === true ? { start: s.start, end: s.end, done: true } : { start: s.start, end: s.end });
   }
   return out;
 }
@@ -1752,7 +1777,13 @@ function appFailure(appError) {
 
 async function onDownload(tabId, from, body) {
   // A full clip never reads segs:<tabId>: its one segment comes from the plan below.
-  let segments = body.full ? null : await withTab(tabId, () => readSegments(tabId));
+  // The page key is read with the segments, so a later navigation cannot relink them.
+  let { segments, pageId } = body.full
+    ? { segments: null, pageId: null }
+    : await withTab(tabId, async () => ({
+        segments: await readSegments(tabId),
+        pageId: pageKeyOf((await chrome.storage.session.get(topKey(tabId)))[topKey(tabId)]),
+      }));
   if (segments && !segments.length) return { ok: false, error: "no-segments" };
   // Settings, protocol and the incognito default come from a pong: without one
   // the job cannot follow the user's incognito choice.
@@ -1789,7 +1820,7 @@ async function onDownload(tabId, from, body) {
       list.push(entry);
       await chrome.storage.session.set({ [key]: list.slice(-MAX_JOBS_PER_TAB) });
     });
-    if (!incognito) await rememberJob(result.jobId, title);
+    if (!incognito) await rememberJob(result.jobId, title, pageId ? { key: pageId, ranges: job.segments } : null);
   }
   return result;
 }
@@ -1799,14 +1830,89 @@ async function onDownload(tabId, from, body) {
 // jobt is shared by every tab, so it has its own queue.
 const TITLES_QUEUE = "jobt";
 
-function rememberJob(jobId, title) {
+// page: {key, ranges} of the segments the job carries, flagged once it is done.
+function rememberJob(jobId, title, page) {
   return withTab(TITLES_QUEUE, async () => {
     const got = (await chrome.storage.session.get(TITLES_KEY))[TITLES_KEY];
     const titles = isObject(got) ? got : {};
-    titles[jobId] = { title, ts: Date.now() };
+    titles[jobId] = page ? { title, ts: Date.now(), page } : { title, ts: Date.now() };
     const ids = Object.keys(titles).sort((a, b) => titles[a].ts - titles[b].ts);
     for (const old of ids.slice(0, Math.max(0, ids.length - MAX_KNOWN_JOBS))) delete titles[old];
     await chrome.storage.session.set({ [TITLES_KEY]: titles });
+  });
+}
+
+// Sets done on the segments matching a range exactly; true when one changed.
+function markDone(segments, ranges) {
+  let changed = false;
+  for (const s of segments) {
+    if (s.done !== true && ranges.some((r) => isObject(r) && r.start === s.start && r.end === s.end)) {
+      s.done = true;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+// Flags an existing seg:<key> record; never creates one.
+async function markRecordDone(key, ranges) {
+  const rec = (await chrome.storage.local.get(key))[key];
+  const segments = isObject(rec) && cleanSegments(rec.segments);
+  if (!segments || !markDone(segments, ranges)) return;
+  await chrome.storage.local.set({ [key]: { ...rec, segments, ts: Date.now() } });
+}
+
+// After a status reply: flags the segments of every jobt page whose job is done,
+// once (applied). Writes nothing when no entry is pending (runs on every poll).
+async function applyDownloaded(jobs) {
+  const doneIds = new Set(jobs.filter((j) => j.state === "done").map((j) => j.id));
+  const pages = await withTab(TITLES_QUEUE, async () => {
+    const titles = (await chrome.storage.session.get(TITLES_KEY))[TITLES_KEY];
+    if (!isObject(titles)) return [];
+    const ids = Object.keys(titles).filter((id) => {
+      const t = titles[id];
+      return isObject(t) && !t.applied && doneIds.has(id) && isObject(t.page) && typeof t.page.key === "string" && Array.isArray(t.page.ranges);
+    });
+    if (!ids.length) return [];
+    // Marked before the writes below: a storage error there loses these flags (accepted).
+    for (const id of ids) titles[id].applied = true;
+    await chrome.storage.session.set({ [TITLES_KEY]: titles });
+    return ids.map((id) => titles[id].page);
+  });
+  if (!pages.length) return;
+  const byKey = new Map();
+  for (const { key, ranges } of pages) byKey.set(key, [...(byKey.get(key) || []), ...ranges]);
+  const session = await chrome.storage.session.get(null);
+  for (const [key, ranges] of byKey) {
+    const tabIds = Object.keys(session)
+      .filter((k) => k.startsWith("page:") && isObject(session[k]) && session[k].key === key)
+      .map((k) => Number(k.slice(5)))
+      .filter(Number.isInteger);
+    if (!tabIds.length) await markRecordDone(key, ranges);
+    for (const tabId of tabIds) {
+      const result = await withTab(tabId, async () => {
+        // In the tab's turn: persistSegments writes seg:<key> in it too.
+        await markRecordDone(key, ranges);
+        const rec = await readPageRecord(tabId);
+        if (!rec || rec.key !== key) return null;
+        const segments = await readSegments(tabId);
+        if (!markDone(segments, ranges)) return null;
+        await chrome.storage.session.set({ [segsKey(tabId)]: segments });
+        return { segments, selected: (await readHub(tabId)).selected };
+      });
+      if (result) segmentsUpdated(tabId, result.selected, result.segments);
+    }
+  }
+  hubLog(`downloaded segments flagged pages=${byKey.size}`);
+}
+
+// True when jobt holds an unapplied entry for this tab's page (separate turns, never nested).
+async function pageJobPending(tabId) {
+  const rec = await withTab(tabId, () => readPageRecord(tabId));
+  if (!rec) return false;
+  return withTab(TITLES_QUEUE, async () => {
+    const titles = (await chrome.storage.session.get(TITLES_KEY))[TITLES_KEY];
+    return isObject(titles) && Object.values(titles).some((t) => isObject(t) && !t.applied && isObject(t.page) && t.page.key === rec.key && Array.isArray(t.page.ranges));
   });
 }
 
@@ -1943,6 +2049,7 @@ async function statusOnce() {
   }
   if (isObject(reply) && reply.type === "status" && Array.isArray(reply.jobs)) {
     lastJobs = reply.jobs.map(cleanJobStatus).filter(Boolean);
+    await applyDownloaded(lastJobs).catch(hubWarn);
     return { jobs: lastJobs };
   }
   if (isObject(reply) && reply.type === "error" && typeof reply.message === "string" && reply.message) {
@@ -2023,6 +2130,10 @@ function depsProblem(missing, plan) {
 async function onView(tabId, from) {
   const app = await fetchDeps();
   const settings = app.settings || cleanSettings(null);
+  // Before the segments are read: its status call may flag downloaded ones.
+  const newest = (await onJobs(tabId)).jobs[0];
+  // No tab jobs (e.g. reloaded before the job finished): ask the app for this page's pending one.
+  if (!newest && (await pageJobPending(tabId))) await fetchStatus();
   const { hub, segments, cands, entries, inc } = await withTab(tabId, async () => ({
     hub: await readHub(tabId),
     segments: await readSegments(tabId),
@@ -2039,7 +2150,6 @@ async function onView(tabId, from) {
   const videoIndex = pool.findIndex((c) => sameSelection(c, hub.selected));
   const total = segments.reduce((sum, s) => sum + (s.end - s.start), 0);
   const overLimit = settings.maxDuration !== null && total > settings.maxDuration;
-  const newest = (await onJobs(tabId)).jobs[0];
   const reply = {
     ok: true,
     segments,

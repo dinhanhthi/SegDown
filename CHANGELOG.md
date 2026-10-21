@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Hovering a marked segment on the overlay timeline shows a × button that removes it, so a few segments can be dropped before Download without opening the menu.
+- Segments you downloaded turn green on the overlay timeline and get a ✓ in the menu, also after you reopen the page (not for incognito or Full clip downloads).
 
 ## [0.3.0] - 2026-10-21
 

@@ -78,6 +78,7 @@
     .track { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255, 255, 255, 0.28); transition: height 0.1s; }
     .bar:hover .track { height: 8px; }
     .seg { position: absolute; top: 0; bottom: 0; min-width: 2px; background: rgba(10, 132, 255, 0.95); }
+    .seg.done { background: rgba(48, 209, 88, 0.95); }
     .seg .del {
       position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); display: none;
       padding: 0 5px; line-height: 16px; font-size: 11px; border-radius: 4px; background: rgba(28, 28, 30, 0.9); color: #f2f2f7;
@@ -606,7 +607,7 @@
       if (d !== null) {
         segments().forEach((s, index) => {
           if (!isTime(s.start) || !isTime(s.end)) return;
-          const seg = make("div", "seg");
+          const seg = make("div", s.done === true ? "seg done" : "seg");
           seg.style.left = pct(s.start, d);
           seg.style.width = pct(Math.min(s.end, d) - Math.min(s.start, d), d);
           const del = make("button", "del", "×");
@@ -638,7 +639,8 @@
     if (!text) {
       const list = segments();
       const ps = pendingStart();
-      text = `${plural(list.length, "segment")} · ${fmtTime(totalOf(list), true)}`;
+      const done = list.filter((s) => s.done === true).length;
+      text = `${plural(list.length, "segment")}${done ? ` · ${done} downloaded` : ""} · ${fmtTime(totalOf(list), true)}`;
       if (ps !== null) text += ` · start at ${fmtTime(ps, true)}`;
     }
     ui.statusLine.textContent = text;
@@ -746,11 +748,13 @@
     if (!list.length) muted("None yet.");
     list.forEach((s, index) => {
       const row = make("div", "segrow");
-      const text = `${index + 1}. ${fmtTime(s.start, true)} – ${fmtTime(s.end, true)}`;
+      const text = `${s.done === true ? "✓ " : ""}${index + 1}. ${fmtTime(s.start, true)} – ${fmtTime(s.end, true)}`;
       const del = make("button", null, "×");
       del.setAttribute("aria-label", `Delete segment ${index + 1}`);
       onClick(del, () => act({ type: "removeSegment", index }));
-      row.append(make("span", "text", text), del);
+      const label = make("span", "text", text);
+      if (s.done === true) label.title = "Downloaded";
+      row.append(label, del);
       ui.menu.append(row);
     });
     item("Clear all segments", null, () => act({ type: "clearSegments" }), !list.length);
