@@ -55,7 +55,9 @@ struct MainView: View {
                         .accessibilityLabel("SegDown")
                 }
                 .hiddenSharedBackground()
-                ToolbarItem(placement: .navigation) {
+                // A flexible space pushes the tabs to the toolbar's trailing edge, the logo alone at the leading edge.
+                ToolbarItem { Spacer() }
+                ToolbarItem {
                     CapsuleTabs(
                         selection: Binding(get: { navigation.page }, set: { navigation.page = $0 }),
                         tabs: Page.allCases, title: { Text($0.title) }
