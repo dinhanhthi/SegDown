@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-21
+
+### Changed
+
+- Searching keeps the "Downloads" title and its count on the left; the search field fills the rest of the header and is focused right away, so you can type at once.
+- The header's buttons and the search field are taller and easier to hit.
+
 ## [0.5.0] - 2026-10-21
 
 ### Added
