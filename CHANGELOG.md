@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-21
+
+### Added
+
+- The SegDown logo sits at the left of the window's toolbar, next to the page tabs.
+
+### Changed
+
+- The Downloads header is no longer a card: the title and a count badge sit straight on the window, so it does not read as one of the downloads.
+
 ## [0.2.0] - 2026-10-21
 
 ### Added
