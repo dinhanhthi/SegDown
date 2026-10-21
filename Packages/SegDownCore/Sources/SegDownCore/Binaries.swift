@@ -23,9 +23,19 @@ public struct Binaries: Sendable {
 
     /// The absolute URL of `tool`, or nil when it is not installed in any search directory.
     public func url(for tool: Tool) -> URL? {
+        executable(named: tool.rawValue)
+    }
+
+    /// The absolute URL of Homebrew's `brew`, or nil when it is not in any search directory.
+    public func brewURL() -> URL? {
+        executable(named: "brew")
+    }
+
+    /// The first executable file `name` in `searchDirectories`.
+    private func executable(named name: String) -> URL? {
         let fileManager = FileManager.default
         for directory in searchDirectories {
-            let path = (directory as NSString).appendingPathComponent(tool.rawValue)
+            let path = (directory as NSString).appendingPathComponent(name)
             var isDirectory: ObjCBool = false
             if fileManager.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue,
                fileManager.isExecutableFile(atPath: path) {

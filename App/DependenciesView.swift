@@ -1,5 +1,5 @@
-// The Dependencies page: each Homebrew tool SegDown runs, found (with its path) or missing, and the
-// `brew install …` line for the missing ones.
+// The Dependencies page: each Homebrew tool SegDown runs, found (with its path) or missing, its
+// outdated formulas with an Upgrade button, and the `brew install …` line for the missing ones.
 import SegDownCore
 import SwiftUI
 
@@ -37,6 +37,43 @@ struct DependenciesView: View {
                     Button("Re-check", action: recheck)
                 }
             }
+            Section {
+                if store.checkingUpdates {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text("Checking for updates…")
+                    }
+                } else if let error = store.updateError {
+                    Text(error)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                } else if store.outdated.isEmpty {
+                    Text("All up to date").foregroundStyle(.secondary)
+                }
+                ForEach(store.outdated, id: \.name) { item in
+                    LabeledContent {
+                        if item.pinned {
+                            Text("Pinned").foregroundStyle(.secondary)
+                        } else if store.upgrading == item.name {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button("Upgrade") {
+                                Task { await store.upgrade(item.name) }
+                            }
+                            .disabled(store.hasActiveJobs || store.upgrading != nil || store.checkingUpdates)
+                        }
+                    } label: {
+                        Text(item.name)
+                        Text("\(item.installedVersions.last ?? "?") → \(item.currentVersion)")
+                    }
+                }
+            } header: {
+                Text("Updates")
+            } footer: {
+                if store.hasActiveJobs && !store.outdated.isEmpty {
+                    Text("Wait for downloads to finish to upgrade.")
+                }
+            }
             if let hint = brewHint {
                 Section("Install the missing tools") {
                     Text(hint)
@@ -46,6 +83,7 @@ struct DependenciesView: View {
             }
         }
         .formStyle(.grouped)
+        .task { await store.checkForUpdates(force: false) }
         .scrollContentBackground(.hidden)
         .contentMargins(.top, 12, for: .scrollContent)
     }
@@ -53,6 +91,7 @@ struct DependenciesView: View {
     private func recheck() {
         store.recheckDependencies()
         paths = Self.lookup()
+        Task { await store.checkForUpdates(force: true) }
     }
 
     /// The path of every tool found.

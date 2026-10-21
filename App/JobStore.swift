@@ -60,6 +60,14 @@ final class JobStore {
     private(set) var missing: [Tool] = []
     /// Last connection time per browser bundle id (display only, never used for authorization).
     private(set) var lastConnected: [String: Date] = [:]
+    /// Outdated `Brew.formulas`, refreshed by `checkForUpdates(force:)`.
+    private(set) var outdated: [Brew.Outdated] = []
+    /// `true` while `brew outdated` runs.
+    private(set) var checkingUpdates = false
+    /// The formula `brew upgrade` is running for.
+    private(set) var upgrading: String?
+    /// The last check's or upgrade's error, shown on the Dependencies page.
+    private(set) var updateError: String?
 
     let settings: SettingsStore
     private let binaries = Binaries()
@@ -82,6 +90,50 @@ final class JobStore {
 
     func recheckDependencies() {
         missing = binaries.missing()
+    }
+
+    // MARK: - Updates
+
+    /// `true` while any job is queued or running; upgrades wait for them.
+    var hasActiveJobs: Bool {
+        items.contains { !$0.status.state.isFinished }
+    }
+
+    /// Refreshes `outdated`; `force` makes brew update itself first. Skipped while a check or an
+    /// upgrade runs, so only one brew process runs at a time.
+    func checkForUpdates(force: Bool) async {
+        guard !checkingUpdates, upgrading == nil else { return }
+        guard let brew = binaries.brewURL() else {
+            outdated = []
+            updateError = "Homebrew not found in /opt/homebrew/bin or /usr/local/bin"
+            return
+        }
+        checkingUpdates = true
+        defer { checkingUpdates = false }
+        do {
+            outdated = try await Brew.outdated(brew: brew, forceUpdate: force)
+            updateError = nil
+        } catch {
+            updateError = error.localizedDescription
+        }
+    }
+
+    /// Runs `brew upgrade formula`, then re-checks the tools and the updates. Skipped while a job
+    /// is active, a check runs or another upgrade runs. A failed upgrade's error outlasts the check.
+    func upgrade(_ formula: String) async {
+        guard !hasActiveJobs, !checkingUpdates, upgrading == nil, let brew = binaries.brewURL() else { return }
+        upgrading = formula
+        updateError = nil
+        var failure: String?
+        do {
+            try await Brew.upgrade(formula, brew: brew)
+        } catch {
+            failure = error.localizedDescription
+        }
+        upgrading = nil
+        recheckDependencies()
+        await checkForUpdates(force: false)
+        if let failure { updateError = failure }
     }
 
     // MARK: - IPC

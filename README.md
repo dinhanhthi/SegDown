@@ -31,7 +31,7 @@ brew install yt-dlp ffmpeg deno
 
 ffmpeg must be 7.1 or later.
 
-Download `SegDown-X.Y.Z.dmg` from the [latest release](https://github.com/dinhanhthi/SegDown/releases/latest), drag SegDown to `/Applications` and open it. It lives in the menu bar; its Dependencies page shows any missing tool.
+Download `SegDown-X.Y.Z.dmg` from the [latest release](https://github.com/dinhanhthi/SegDown/releases/latest), drag SegDown to `/Applications` and open it. It lives in the menu bar; its Dependencies page shows any missing tool and upgrades an outdated yt-dlp, deno or ffmpeg in one click.
 
 Updates: Check for Updates… in the menu bar menu or the app menu.
 
@@ -76,7 +76,7 @@ Settings › Browser turns off the Full clip button and the icon on videos. A ch
 
 ## Not supported
 
-DRM-protected video (Widevine, FairPlay), live streams and DASH (`.mpd`). If a site blocks `yt-dlp`, run `brew upgrade yt-dlp`.
+DRM-protected video (Widevine, FairPlay), live streams and DASH (`.mpd`). If a site blocks `yt-dlp`, upgrade it from the Dependencies page (or run `brew upgrade yt-dlp`).
 
 ## License
 
