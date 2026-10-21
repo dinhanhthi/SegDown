@@ -78,6 +78,12 @@
     .track { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255, 255, 255, 0.28); transition: height 0.1s; }
     .bar:hover .track { height: 8px; }
     .seg { position: absolute; top: 0; bottom: 0; min-width: 2px; background: rgba(10, 132, 255, 0.95); }
+    .seg .del {
+      position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); display: none;
+      padding: 0 5px; line-height: 16px; font-size: 11px; border-radius: 4px; background: rgba(28, 28, 30, 0.9); color: #f2f2f7;
+    }
+    .seg:hover .del { display: block; }
+    .seg .del:hover { background: #ff453a; }
     .pending { position: absolute; bottom: 0; width: 2px; height: 12px; margin-left: -1px; background: #30d158; }
     .head { position: absolute; bottom: 0; width: 2px; height: 12px; margin-left: -1px; background: #fff; }
     .panel {
@@ -132,6 +138,7 @@
   let placeTimer = null;
   let hideTimer = null;
   let placeFrame = 0;
+  let segsKey = ""; // the drawn segments (renderBar)
 
   // --- helpers ---
 
@@ -254,6 +261,7 @@
     cancelAnimationFrame(placeFrame);
     placeTimer = pollTimer = refreshTimer = hideTimer = null;
     placeFrame = 0;
+    segsKey = "";
   }
 
   // (Re-)enters the top layer last, so it sits above a new fullscreen element.
@@ -590,14 +598,27 @@
   function renderBar() {
     const d = durationOf(video);
     ui.bar.classList.toggle("live", d === null);
-    ui.segs.replaceChildren();
-    if (d !== null) {
-      for (const s of segments()) {
-        if (!isTime(s.start) || !isTime(s.end)) continue;
-        const seg = make("div", "seg");
-        seg.style.left = pct(s.start, d);
-        seg.style.width = pct(Math.min(s.end, d) - Math.min(s.start, d), d);
-        ui.segs.append(seg);
+    // Rebuilt only on change: a new node would drop :hover and its × button.
+    const key = d === null ? "" : JSON.stringify([d, segments()]);
+    if (key !== segsKey) {
+      segsKey = key;
+      ui.segs.replaceChildren();
+      if (d !== null) {
+        segments().forEach((s, index) => {
+          if (!isTime(s.start) || !isTime(s.end)) return;
+          const seg = make("div", "seg");
+          seg.style.left = pct(s.start, d);
+          seg.style.width = pct(Math.min(s.end, d) - Math.min(s.start, d), d);
+          const del = make("button", "del", "×");
+          del.setAttribute("aria-label", `Delete segment ${index + 1}`);
+          del.title = "Remove this segment";
+          onClick(del, (e) => {
+            e.stopPropagation(); // else onBarClick seeks the video
+            act({ type: "removeSegment", index });
+          });
+          seg.append(del);
+          ui.segs.append(seg);
+        });
       }
     }
     const ps = pendingStart();

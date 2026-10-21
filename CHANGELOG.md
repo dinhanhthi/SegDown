@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Hovering a marked segment on the overlay timeline shows a × button that removes it, so a few segments can be dropped before Download without opening the menu.
+
 ## [0.3.0] - 2026-10-21
 
 ### Added
