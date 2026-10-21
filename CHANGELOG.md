@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
 ### Added
 
 - A Full clip button on the overlay downloads the whole video as one file and leaves the marked ranges as they are. It is disabled for live video and for video longer than the Max total duration. Turn it off in Settings › Browser.
@@ -14,8 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settings › Output › Flatten output folder saves every file straight into the output folder instead of one folder per video. Off by default.
 - Settings › Output › Snake case names names files and folders like `my_video_title_merged.mp4`, with accents removed (`Học` → `hoc`). Off by default.
 
+### Changed
+
+- Each download card has its own Remove menu. The trash button in the Downloads header now shows only when several downloads are selected.
+
 ### Fixed
 
+- A browser connected after you changed the app's settings now gets them on its first page load, instead of only after the overlay was opened once.
 - HLS streams whose segments have a non-media file name (such as `file-0000.png`) now download instead of failing with "Invalid data found when processing input". This needs ffmpeg 7.1 or later.
 - Pages whose tab title is only the site name (such as Facebook reels) now get the video's real title from yt-dlp for the folder and file names.
 
