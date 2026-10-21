@@ -66,6 +66,7 @@ struct BrowsersView: View {
                 } label: {
                     Text("Extension folder")
                     Text("Load unpacked this folder once on your browser's extensions page, with Developer mode on. "
+                        + "Library is hidden in the folder picker: press ⌘⇧G there and paste the path (Copy Path). "
                         + "SegDown keeps it up to date with the app.")
                 }
             } header: {

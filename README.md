@@ -37,7 +37,7 @@ Needs macOS 15 or later. SegDown updates itself; its Dependencies page shows a m
 **Chrome, Brave, Edge, Arc** (once)
 
 1. In SegDown, open **Browsers** and click **Install**. Then click **Show in Finder** next to **Extension folder**.
-2. In your browser, open the extensions page (`chrome://extensions`), turn on **Developer mode**, click **Load unpacked** and choose that folder.
+2. In your browser, open the extensions page (`chrome://extensions`), turn on **Developer mode**, click **Load unpacked** and choose that folder. `~/Library` is hidden in the folder picker: press **⌘⇧G** there and paste the path from **Copy Path**, or drag the folder in from Finder.
 3. Reload the pages that were already open.
 
 The extension comes with the app: each SegDown update also updates the extension. Just reload the pages that were open. The `SegDown-extension-X.Y.Z.zip` on the release page is only a spare copy; you don't need it.
