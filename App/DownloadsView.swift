@@ -8,7 +8,7 @@ import SwiftUI
 /// The jobs as cards. Click selects one, ⌘-click toggles, ⇧-click extends from the last clicked card; ⌘A (the Edit
 /// menu's Select All) and ⌫ (remove from the list) work while the page has focus, which a click on a card gives it.
 /// The list shows either the downloads or, with the Archived button on, the archived ones; the header, selection and
-/// Remove All act on the list shown. Search grows into a field across the header and fuzzy-filters that list by title,
+/// Remove All act on the list shown. Search grows into a field beside the title and fuzzy-filters that list by title,
 /// best match first; X or Escape closes it and shows the whole list again.
 struct DownloadsView: View {
     let store: JobStore
@@ -23,7 +23,7 @@ struct DownloadsView: View {
     /// Shown once the sheet is gone: a window shows one sheet or alert at a time.
     @State private var pendingFailures: [JobStore.TrashFailure] = []
     @FocusState private var focused: Bool
-    /// The search field in place of the header; `expanded` grows it from the Search button's place to the full row.
+    /// The search field in place of the header; `expanded` grows it from the Search button's place to the rest of the row.
     @State private var searching = false
     @State private var expanded = false
     @State private var query = ""
@@ -129,8 +129,18 @@ struct DownloadsView: View {
         }
     }
 
+    /// The title and count stay while searching; the search field takes the rest of the row.
     private var header: some View {
-        Group {
+        HStack(spacing: 12) {
+            Text(showArchived ? "Archived" : "Downloads")
+                .font(.title2.weight(.semibold))
+            Text(verbatim: String(shown.count))
+                .font(.callout.weight(.semibold))
+                .monospacedDigit()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Palette.inputSurface))
+                .accessibilityLabel(shown.count == 1 ? "1 download" : "\(shown.count) downloads")
             if searching {
                 searchBar
             } else {
@@ -144,15 +154,6 @@ struct DownloadsView: View {
 
     private var buttons: some View {
         HStack(spacing: 12) {
-            Text(showArchived ? "Archived" : "Downloads")
-                .font(.title2.weight(.semibold))
-            Text(verbatim: String(shown.count))
-                .font(.callout.weight(.semibold))
-                .monospacedDigit()
-                .padding(.horizontal, 8)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(Palette.inputSurface))
-                .accessibilityLabel(shown.count == 1 ? "1 download" : "\(shown.count) downloads")
             if !selection.isEmpty {
                 Text("\(selection.count) selected")
                     .font(.callout)
@@ -172,7 +173,7 @@ struct DownloadsView: View {
                     }
                 }
                 .menuStyle(.button)
-                .buttonStyle(RaisedButtonStyle(horizontalPadding: 10))
+                .buttonStyle(RaisedButtonStyle(height: Self.controlHeight, horizontalPadding: 10))
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("Remove the selected downloads from the list (⌫), or also move their files to the Trash")
@@ -186,7 +187,7 @@ struct DownloadsView: View {
                         .labelStyle(.iconOnly)
                         .foregroundStyle(showArchived ? Color.accentColor : .primary)
                 }
-                .buttonStyle(RaisedButtonStyle())
+                .buttonStyle(RaisedButtonStyle(height: Self.controlHeight))
                 .help(showArchived ? "Show downloads" : "Show archived downloads")
             }
             Menu {
@@ -199,7 +200,7 @@ struct DownloadsView: View {
                 }
             }
             .menuStyle(.button)
-            .buttonStyle(RaisedButtonStyle(horizontalPadding: 10))
+            .buttonStyle(RaisedButtonStyle(height: Self.controlHeight, horizontalPadding: 10))
             .menuIndicator(.hidden)
             .fixedSize()
             .disabled(shown.isEmpty)
@@ -210,17 +211,17 @@ struct DownloadsView: View {
                 Label("Search", systemImage: "magnifyingglass")
                     .labelStyle(.iconOnly)
             }
-            .buttonStyle(RaisedButtonStyle())
+            .buttonStyle(RaisedButtonStyle(height: Self.controlHeight))
             .help("Search downloads")
         }
     }
 
-    /// A capsule as wide as the Search button at its place, at the trailing edge, that grows to the row's width once
+    /// A capsule as wide as the Search button at its place, at the trailing edge, that grows to the rest of the row once
     /// shown; closing shrinks it back before the buttons return.
     private var searchBar: some View {
         HStack(spacing: 0) {
             Image(systemName: "magnifyingglass")
-                .frame(width: 28, height: 28)
+                .frame(width: Self.controlHeight, height: Self.controlHeight)
             TextField("Search downloads", text: $query)
                 .textFieldStyle(.plain)
                 .focused($searchFocused)
@@ -228,23 +229,27 @@ struct DownloadsView: View {
                 .opacity(expanded ? 1 : 0)
             Button(action: closeSearch) {
                 Image(systemName: "xmark")
-                    .frame(width: 28, height: 28)
+                    .frame(width: Self.controlHeight, height: Self.controlHeight)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Close search (Esc)")
             .opacity(expanded ? 1 : 0)
         }
-        .frame(width: expanded ? nil : 28, height: 28, alignment: .leading)
+        .frame(width: expanded ? nil : Self.controlHeight, height: Self.controlHeight, alignment: .leading)
         .clipped()
         .background(Capsule().fill(Palette.inputSurface))
         .overlay(Capsule().strokeBorder(Palette.surfaceBorder, lineWidth: 1).allowsHitTesting(false))
         .frame(maxWidth: .infinity, alignment: .trailing)
         .onAppear {
             withAnimation(reduceMotion ? nil : Self.searchAnimation) { expanded = true }
-            searchFocused = true
+            // On the next pass: the field is not in the window yet, so the page would keep the keys.
+            DispatchQueue.main.async { searchFocused = true }
         }
     }
+
+    /// The header's buttons and search bar, a little taller than the cards' buttons.
+    private static let controlHeight: CGFloat = 32
 
     /// The search bar growing and shrinking.
     private static let searchAnimation = Animation.snappy(duration: 0.3)
