@@ -1,4 +1,6 @@
 import AppKit
+import os
+import SegDownCore
 import SwiftUI
 
 /// AppKit entry point: no SwiftUI `App`, so SwiftUI is only loaded inside the window.
@@ -32,6 +34,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Card titles truncate; their `.help()` full text shows after 150 ms instead of the default ~1 s.
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 150])
         settings = SettingsStore()
+        // Before JobStore starts the IPC server: the first pong already reports this version, and the extension
+        // reloads from this folder when its own version differs.
+        Self.syncChromeExtension()
         store = JobStore(settings: settings)
         super.init()
     }
@@ -88,6 +93,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.window = window
         }
         bringToFront()
+    }
+
+    /// Refreshes the Chromium extension's folder from the bundle (`ExtensionFolder`); a few small files, so it
+    /// runs inline.
+    private static func syncChromeExtension() {
+        guard let source = Bundle.main.resourceURL?.appending(path: "ChromeExtension", directoryHint: .isDirectory)
+        else { return }
+        let logger = Logger(subsystem: "com.math2it.segdown", category: "extension")
+        do {
+            if try ExtensionFolder.sync(from: source, to: ExtensionFolder.chromeURL()) {
+                logger.info("Chrome extension folder updated")
+            }
+        } catch {
+            logger.error("Chrome extension folder not updated (code \((error as NSError).code, privacy: .public))")
+        }
     }
 
     /// Shows the queued and running downloads in the Dock icon's red badge and in the menu bar menu; again after

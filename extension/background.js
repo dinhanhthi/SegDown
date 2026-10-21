@@ -793,6 +793,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   ui           -> {fullClipButton, playerButton}   (the app's switches from the
 //                    last pong; absent -> both true; sent to content scripts only
 //                    through getState and the `ui` broadcast)
+//   reload       -> "<own version>><app version>"   (the last version pair that
+//                    reloaded this extension; see reloadIfOutdated)
 // ---------------------------------------------------------------------------
 
 const MAX_CANDIDATES_PER_FRAME = 20;
@@ -824,6 +826,7 @@ const PORT_IDLE_MS = 5 * 1000;
 const STATUS_TIMEOUT_MS = 20 * 1000;
 const TITLES_KEY = "jobt";
 const UI_KEY = "ui"; // storage.local: the app's switches from the last pong
+const RELOAD_KEY = "reload"; // storage.local: the version pair of the last self-reload
 const DEPS_TTL_MS = 10 * 1000; // ping answers (missing tools, settings) are reused this long
 const TOOLS = new Set(["yt-dlp", "ffmpeg", "ffprobe", "deno"]); // SegDownCore Tool raw values
 const INCOGNITO_NEEDS_UPDATE = "Update the SegDown app to download incognito";
@@ -1598,9 +1601,24 @@ async function updateUI(settings) {
   }
 }
 
+// The app updates the folder a Chromium browser loads this extension from (its
+// Browsers page), so an app version other than this one means newer files on disk:
+// reload to run them. Once per version pair, so a copy loaded from elsewhere (an
+// older release zip) or Safari's appex never loops.
+async function reloadIfOutdated(appVersion) {
+  const own = chrome.runtime.getManifest().version;
+  if (typeof appVersion !== "string" || appVersion === own || typeof chrome.runtime.reload !== "function") return;
+  const pair = `${own}>${appVersion}`;
+  if ((await chrome.storage.local.get(RELOAD_KEY))[RELOAD_KEY] === pair) return;
+  await chrome.storage.local.set({ [RELOAD_KEY]: pair });
+  hubLog(`reload: extension ${own}, app ${appVersion}`);
+  chrome.runtime.reload();
+}
+
 // -> {missing: [tool], protocol, settings} or {missing: [], appError}. Never
 // throws. Every pong sets the persistence gate (incognitoDefault) and the
-// storage.local ui switches (updateUI).
+// storage.local ui switches (updateUI); an app version other than this one
+// reloads the extension (reloadIfOutdated).
 async function pingNative() {
   let reply;
   try {
@@ -1615,6 +1633,7 @@ async function pingNative() {
     incognitoDefault = settings.incognitoDefault;
     if (opened) persistHeldSegments().catch(hubWarn);
     updateUI(settings).catch(hubWarn);
+    reloadIfOutdated(reply.version).catch(hubWarn);
     const missing = [...new Set(reply.missing.filter((t) => typeof t === "string" && TOOLS.has(t)))];
     return { missing, protocol, settings };
   }

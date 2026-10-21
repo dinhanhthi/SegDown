@@ -31,6 +31,30 @@ targets:
         buildPhase: resources
       - path: assets/logo_512.png
         buildPhase: resources
+      # The Chromium extension at Contents/Resources/ChromeExtension; the app copies it to the folder
+      # the user loads once (ExtensionFolder), so an app update also updates the extension.
+      - path: extension/manifest.json
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: ChromeExtension
+      - path: extension/background.js
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: ChromeExtension
+      - path: extension/content
+        type: folder
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: ChromeExtension
+      - path: extension/icons
+        type: folder
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: ChromeExtension
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.math2it.segdown

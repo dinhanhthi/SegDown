@@ -1,6 +1,8 @@
 // The Browsers page: the native messaging host manifest of each Chromium browser (install or reinstall),
-// the state of the Safari extension, and when each browser last reached the app.
+// the folder Chromium browsers load the extension from, the state of the Safari extension, and when each
+// browser last reached the app.
 import SafariServices
+import SegDownCore
 import SwiftUI
 
 struct BrowsersView: View {
@@ -42,6 +44,23 @@ struct BrowsersView: View {
                 } label: {
                     Text("Browser integration")
                     Text("Installs the native messaging host for every Chromium browser found.")
+                }
+                LabeledContent {
+                    HStack {
+                        Text((ExtensionFolder.chromeURL().path(percentEncoded: false) as NSString).abbreviatingWithTildeInPath)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Button("Show in Finder", action: showExtensionFolder)
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
+                        Button("Copy Path", action: copyExtensionPath)
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
+                    }
+                } label: {
+                    Text("Extension folder")
+                    Text("Load unpacked this folder once on your browser's extensions page, with Developer mode on. "
+                        + "SegDown keeps it up to date with the app.")
                 }
                 if let message {
                     Text(message.text)
@@ -99,6 +118,21 @@ struct BrowsersView: View {
     private func lastConnected(_ bundleID: String) -> String {
         store.lastConnected[bundleID].map { "Last connected \($0.formatted(.relative(presentation: .named)))" }
             ?? "Not connected yet"
+    }
+
+    /// Selects the folder in Finder; beeps until the app has written it.
+    private func showExtensionFolder() {
+        let url = ExtensionFolder.chromeURL()
+        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else {
+            NSSound.beep()
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func copyExtensionPath() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(ExtensionFolder.chromeURL().path(percentEncoded: false), forType: .string)
     }
 
     private func refresh() {

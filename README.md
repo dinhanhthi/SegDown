@@ -13,73 +13,64 @@
 
 </div>
 
-## Features
+## What it does
 
-- A browser extension (Chrome, Chromium, Brave, Edge, Arc and Safari) puts a segment bar on the page's video: mark ranges with Mark start / Mark end or `[` / `]`, or take the whole video with Full clip.
-- The SegDown app on your Mac downloads only those ranges: direct mp4 and HLS (including clear-key AES-128) with `ffmpeg`, and pages that `yt-dlp` supports with `yt-dlp`.
-- One file per range, or all ranges merged into one mp4.
-- Precise cuts (re-encoded, exact times) or Fast cuts (no re-encoding, nearest keyframes).
-- Pick the quality per video, or set a preferred resolution (360p to 4K) once in Settings.
-- Optional compression, size and duration limits, and incognito downloads that stay out of the history.
+- Mark the parts of a video you want, right on the page. SegDown downloads only those parts.
+- Works in Chrome, Brave, Edge, Arc and Safari, on YouTube and most video sites.
+- One file per part, or all parts merged into one file.
+- Pick the quality per video, or set a preferred resolution once.
 
 ## Install
 
-Requires macOS 15 or later, and:
+1. Install the tools SegDown uses, with [Homebrew](https://brew.sh):
 
-```sh
-brew install yt-dlp ffmpeg deno
-```
+   ```sh
+   brew install yt-dlp ffmpeg deno
+   ```
 
-ffmpeg must be 7.1 or later.
+2. Download `SegDown-X.Y.Z.dmg` from the [latest release](https://github.com/dinhanhthi/SegDown/releases/latest), drag SegDown to Applications and open it. It lives in the menu bar.
 
-Download `SegDown-X.Y.Z.dmg` from the [latest release](https://github.com/dinhanhthi/SegDown/releases/latest), drag SegDown to `/Applications` and open it. It lives in the menu bar; its Dependencies page shows any missing tool and upgrades an outdated yt-dlp, deno or ffmpeg in one click.
+Needs macOS 15 or later. SegDown updates itself; its Dependencies page shows a missing or outdated tool and updates it in one click.
 
-Updates: Check for Updates… in the menu bar menu or the app menu.
+## Add it to your browser
+
+**Chrome, Brave, Edge, Arc** (once)
+
+1. In SegDown, open **Browsers** and click **Install**. Then click **Show in Finder** next to **Extension folder**.
+2. In your browser, open the extensions page (`chrome://extensions`), turn on **Developer mode**, click **Load unpacked** and choose that folder.
+3. Reload the pages that were already open.
+
+The extension comes with the app: each SegDown update also updates the extension. Just reload the pages that were open. The `SegDown-extension-X.Y.Z.zip` on the release page is only a spare copy; you don't need it.
+
+**Safari**
+
+Open SegDown once. In Safari › Settings › Extensions, tick SegDown and allow it on every website.
+
+## Use
+
+1. Play the video.
+2. Click the SegDown icon on the video, the SegDown toolbar button, or press Alt+Shift+S.
+3. Mark the parts with **Mark start** and **Mark end** (or the `[` and `]` keys).
+4. Click **Download**. The ▾ menu has more choices: separate or merged files, quality, incognito. **Full clip** downloads the whole video.
+
+If the buttons hide the player's controls, drag them by their ⋮⋮ handle.
+
+Files go to `Downloads/SegDown/`. Change this and more in SegDown's Settings.
+
+## Not supported
+
+Protected video (DRM, such as Netflix), live streams and DASH. If a site stops working, update yt-dlp on SegDown's Dependencies page.
 
 ## Build from source
 
-Requires Xcode with Swift 6 and `brew install xcodegen`.
+Needs Xcode with Swift 6 and `brew install xcodegen`:
 
 ```sh
 xcodegen generate
 xcodebuild -project SegDown.xcodeproj -scheme SegDown -configuration Debug build
-xcodebuild -project SegDown.xcodeproj -scheme SegDown -configuration Debug -showBuildSettings | grep -m1 BUILT_PRODUCTS_DIR
 ```
 
-Copy `SegDown.app` from that folder to `/Applications` and open it. Builds are signed with the maintainer's Developer ID: to build it yourself, change `DEVELOPMENT_TEAM` and `CODE_SIGN_IDENTITY` in `project.yml`.
-
-## Connect a browser
-
-**Chrome, Chromium, Brave, Edge, Arc**
-
-1. Unzip `SegDown-extension-X.Y.Z.zip` from the [latest release](https://github.com/dinhanhthi/SegDown/releases/latest). Open the browser's extensions page (`chrome://extensions` in Chrome), turn on Developer mode, click Load unpacked and pick the `SegDown-extension/` folder (or `extension/` in a clone).
-2. In SegDown, open Browsers and click Install. Click Reinstall after moving the app.
-3. Reload the pages that were already open.
-
-After each update, replace the `SegDown-extension/` folder with the new release's and click reload on the extension.
-
-**Safari** (the extension ships inside `SegDown.app`)
-
-1. Open SegDown once.
-2. Safari Settings › Extensions: tick SegDown, then "Always Allow on Every Website…". If it is unticked after replacing the app, tick it again.
-
-## Use
-
-1. Play the video, so the extension sees its media.
-2. Click the SegDown icon at the top-left of the video (it shows while the pointer is over it), click the SegDown toolbar button, or press Alt+Shift+S.
-3. Mark the ranges: Mark start / Mark end, or `[` / `]`.
-4. Click Download. The ▾ menu picks separate or merged files, incognito, quality, source or video. Quality sets the resolution: for yt-dlp downloads (YouTube and the like), Best or the tallest format up to a height such as 720p; for an HLS stream with several variants, one of them. It starts on the Preferred resolution from Settings when one is set. Full clip downloads the whole video instead and leaves the ranges as they are (not for live video, or video longer than the Max total duration).
-
-   If the buttons cover the player's own controls, drag them by their ⋮⋮ grip anywhere on the video (the spot is kept until the page reloads).
-5. Follow the progress on the overlay or in the app's Downloads page.
-
-Files land in `~/Downloads/SegDown/<page title>/` (change it in Settings). Settings › Output can also save every file straight into that folder (Flatten output folder), name files in snake_case (`my_video_title_merged.mp4`) and fall back to the captured media when yt-dlp fails (Auto fallback).
-
-Settings › Browser turns off the Full clip button and the icon on videos, and sets a Preferred resolution (360p, 480p, 720p, 1080p, 2K or 4K): when you pick no quality, the extension takes the tallest one up to it, or the smallest one when all are taller. A change reaches the browser the next time you open the overlay. A browser connected after the change gets the settings on its first page load once the extension can reach the app.
-
-## Not supported
-
-DRM-protected video (Widevine, FairPlay), live streams and DASH (`.mpd`). If a site blocks `yt-dlp`, upgrade it from the Dependencies page (or run `brew upgrade yt-dlp`).
+To sign with your own team, change `DEVELOPMENT_TEAM` and `CODE_SIGN_IDENTITY` in `project.yml`. While developing the extension, load `extension/` from the clone instead.
 
 ## License
 

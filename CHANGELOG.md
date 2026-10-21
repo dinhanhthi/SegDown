@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- SegDown now carries its Chrome extension. Load the folder from Browsers › Extension folder (Show in Finder) once; after that, every app update also updates the extension, which reloads itself. The extension zip on the release page is no longer needed.
+
 ## [0.6.1] - 2026-10-21
 
 ### Added
