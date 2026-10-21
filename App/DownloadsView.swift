@@ -323,7 +323,7 @@ private struct DownloadCard: View {
     }
 }
 
-/// The job's state as a small colored capsule.
+/// The job's state as a colored capsule, as tall as the card's buttons.
 private struct StateBadge: View {
     let state: JobState
 
@@ -337,11 +337,11 @@ private struct StateBadge: View {
         }
         let solid = state == .running
         Text(title)
-            .font(.caption.weight(.semibold))
+            .font(.callout.weight(.semibold))
             // Running is solid accent with white text: the accent on its own tint was hard to read.
             .foregroundStyle(solid ? Color.white : color)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 2)
+            .padding(.horizontal, 10)
+            .frame(height: 26)
             .background(Capsule().fill(solid ? color : color.opacity(0.15)))
     }
 }
