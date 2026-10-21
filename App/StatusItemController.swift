@@ -19,7 +19,6 @@ final class StatusItemController: NSObject, NSMenuItemValidation {
         self.updater = updater
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
-        statusItem.button?.image = Self.logo
         statusItem.button?.setAccessibilityLabel("SegDown")
         let menu = NSMenu()
         // No action: shown disabled, as information.
@@ -36,8 +35,9 @@ final class StatusItemController: NSObject, NSMenuItemValidation {
         setActiveCount(0)
     }
 
-    /// Queued and running downloads.
+    /// Queued and running downloads; any of them puts a red dot on the logo.
     func setActiveCount(_ count: Int) {
+        statusItem.button?.image = count == 0 ? Self.logo : Self.logoWithDot
         activeItem.title = switch count {
         case 0: "No active downloads"
         case 1: "1 active download"
@@ -46,14 +46,22 @@ final class StatusItemController: NSObject, NSMenuItemValidation {
     }
 
     /// The full-colour logo at 18×18 pt, not a template image.
-    private static let logo: NSImage? = {
+    private static let logo = makeLogo(dot: false)
+    private static let logoWithDot = makeLogo(dot: true)
+
+    /// `dot` adds a small red dot in the bottom-right corner.
+    private static func makeLogo(dot: Bool) -> NSImage? {
         guard let url = Bundle.main.url(forResource: "logo_512", withExtension: "png"),
               let image = NSImage(contentsOf: url) else { return nil }
         return NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
             image.draw(in: rect)
+            if dot {
+                NSColor.systemRed.setFill()
+                NSBezierPath(ovalIn: NSRect(x: rect.maxX - 6, y: rect.minY, width: 6, height: 6)).fill()
+            }
             return true
         }
-    }()
+    }
 
     /// The menu auto-enables its items: "Check for Updates…" is disabled while the updater is off (no
     /// `SUPublicEDKey` yet) and takes `Updater.menuTitle` (e.g. "Update Available…" once a background check found one).
