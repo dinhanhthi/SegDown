@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SegDown",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Mark segments on a web video and download them with the SegDown app.",
   "permissions": [
     "nativeMessaging",

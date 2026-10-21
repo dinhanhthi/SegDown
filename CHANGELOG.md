@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-22
+
+### Added
+
+- Finished downloads have a Play button on their card that opens the video or audio files in your default player. Other file types are never opened.
+
 ## [0.6.2] - 2026-10-21
 
 ### Added
