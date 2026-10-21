@@ -387,6 +387,13 @@ private struct DownloadCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            // An error gets its own row above the buttons; other messages sit beside them.
+            if status.state == .failed, let message = status.message {
+                Text(verbatim: message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+            }
             HStack(spacing: 8) {
                 if let pageURL = item.pageURL {
                     Button { NSWorkspace.shared.open(pageURL) } label: {
@@ -436,10 +443,10 @@ private struct DownloadCard: View {
                 .fixedSize()
                 .help("Remove the download from the list, or also move its files to the Trash")
                 Spacer(minLength: 8)
-                if let message = status.message {
+                if status.state != .failed, let message = status.message {
                     Text(verbatim: message)
                         .font(.caption)
-                        .foregroundStyle(status.state == .failed ? .red : .secondary)
+                        .foregroundStyle(.secondary)
                         .lineLimit(3)
                 }
                 if !status.state.isFinished {
