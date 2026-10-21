@@ -726,6 +726,17 @@
         muted(String(src.probe.message || "Qualities unavailable."));
       }
     }
+    // yt-dlp heights: the hub sets them only when the HLS Quality section above is not shown.
+    if (src && Array.isArray(src.heights) && src.heights.length > 1) {
+      heading("Quality");
+      item("Best", src.height === 0, () => act({ type: "chooseHeight", index: 0 }));
+      src.heights.forEach((h, i) => {
+        item(`${Number(h)}p`, src.height === i + 1, () => act({ type: "chooseHeight", index: i + 1 }));
+      });
+    } else if (src && src.heightProbe && src.heightProbe.state === "pending") {
+      heading("Quality");
+      muted("Checking the qualities…");
+    }
 
     if (Array.isArray(view.sources) && view.sources.length > 1) {
       heading("Source");

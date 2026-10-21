@@ -30,6 +30,20 @@ struct WireCompatibilityTests {
         #expect(job.fallback == nil)
         #expect(job.mediaDuration == nil)
         #expect(job.pageURL == nil)
+        #expect(job.maxHeight == nil)
+    }
+
+    @Test func enqueueWithMaxHeightDecodesAndReencodesTheKey() throws {
+        let line = #"{"type":"enqueue","job":{"source":{"type":"page","url":"https://example.com/watch"},"title":"T","segments":[{"start":1,"end":2}],"mode":"separate","precision":"precise","maxHeight":720}}"#
+
+        let request = try IPC.decodeLine(IPCRequest.self, from: Data(line.utf8))
+
+        guard case let .enqueue(job) = request else {
+            Issue.record("expected .enqueue, got \(request)")
+            return
+        }
+        #expect(job.maxHeight == 720)
+        #expect(String(decoding: try IPC.encodeLine(request), as: UTF8.self).contains(#""maxHeight":720"#))
     }
 
     @Test func pongFromProtocol1AppDecodesAsProtocol1WithoutSettings() throws {
@@ -40,7 +54,7 @@ struct WireCompatibilityTests {
         #expect(response == .pong(version: "0.1.0", missing: [], protocol: 1, settings: nil))
     }
 
-    @Test func protocol2PongWithSettingsRoundTripsAndSendsProtocol2() throws {
+    @Test func pongWithSettingsRoundTripsAndSendsTheCurrentProtocol() throws {
         let pong = IPCResponse.pong(
             version: "1.0",
             missing: ["deno"],
@@ -56,7 +70,7 @@ struct WireCompatibilityTests {
 
         let line = try IPC.encodeLine(pong)
 
-        #expect(String(decoding: line, as: UTF8.self).contains(#""protocol":2"#))
+        #expect(String(decoding: line, as: UTF8.self).contains(#""protocol":\#(IPC.protocolVersion)"#))
         #expect(try IPC.decodeLine(IPCResponse.self, from: line) == pong)
     }
 
@@ -73,6 +87,15 @@ struct WireCompatibilityTests {
         #expect(decoded.fullClipButton)
         #expect(decoded.playerButton)
         #expect(decoded.maxDuration == nil)
+    }
+
+    @Test func formatsRoundTripsWithItsType() throws {
+        let formats = IPCResponse.formats(heights: [1080, 720])
+
+        let line = try IPC.encodeLine(formats)
+
+        #expect(String(decoding: line, as: UTF8.self).contains(#""type":"formats""#))
+        #expect(try IPC.decodeLine(IPCResponse.self, from: line) == formats)
     }
 
     @Test func statusWithoutBytesAndFallbackUsedDecodesAndNilKeysAreOmitted() throws {

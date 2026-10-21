@@ -92,6 +92,24 @@ struct ValidationTests {
         }
     }
 
+    @Test func maxHeightNeedsAPageSourceAndARange() throws {
+        let page = JobRequest(
+            source: .page(url: URL(string: "https://example.com/watch")!), title: "Clip",
+            segments: [Segment(start: 10, end: 20)], mode: .separate, precision: .precise, maxHeight: 720
+        )
+        #expect(try Validation.validate(page).maxHeight == 720)
+
+        var zero = page
+        zero.maxHeight = 0
+        var media = hlsRequest(headers: [:])
+        media.maxHeight = 720
+        for request in [zero, media] {
+            #expect(throws: JobError.self) {
+                try Validation.validate(request)
+            }
+        }
+    }
+
     @Test func traversalTitleStaysOneComponentUnderBase() throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent("SegDown", isDirectory: true)
         let directory = try PathSanitizer.outputDirectory(title: "../../etc/x", base: base)

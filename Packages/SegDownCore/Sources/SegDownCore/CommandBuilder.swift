@@ -119,13 +119,18 @@ public enum CommandBuilder {
     ///
     /// `siteOnly` turns off yt-dlp's generic extractor (`--use-extractors default,-generic`), so a
     /// page without a site extractor fails fast with "No suitable extractor found".
+    ///
+    /// `maxHeight` sorts formats by `-S height:<h>`, so yt-dlp picks the largest height no taller
+    /// than `h`, or the smallest one when none is. Not `res`: yt-dlp reads it as the smaller of
+    /// height and width, which would cap a portrait video's width instead.
     public static func ytDlp(
         url: URL,
         segments: [Segment],
         precision: Precision,
         ffmpeg: URL,
         tempDirectory: URL,
-        siteOnly: Bool = false
+        siteOnly: Bool = false,
+        maxHeight: Int? = nil
     ) -> [String] {
         var args = ["--ignore-config"]
         if siteOnly {
@@ -134,6 +139,11 @@ public enum CommandBuilder {
         args += [
             "--no-playlist", "--newline",
             "-f", "bv*+ba/b",
+        ]
+        if let maxHeight {
+            args += ["-S", "height:\(maxHeight)"]
+        }
+        args += [
             "--merge-output-format", "mp4",
             "--ffmpeg-location", ffmpeg.path,
         ]
@@ -154,6 +164,16 @@ public enum CommandBuilder {
         [
             "--ignore-config", "--use-extractors", "default,-generic",
             "--skip-download", "--no-playlist", "--print", "title",
+            "--", url.absoluteString,
+        ]
+    }
+
+    /// yt-dlp arguments that print the formats of the page `url` as one JSON array line
+    /// (height, vcodec and protocol of each), without downloading. Site extractors only, like `ytDlpTitle`.
+    public static func ytDlpFormats(url: URL) -> [String] {
+        [
+            "--ignore-config", "--use-extractors", "default,-generic",
+            "--skip-download", "--no-playlist", "--print", "%(formats.:.{height,vcodec,protocol})j",
             "--", url.absoluteString,
         ]
     }

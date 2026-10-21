@@ -146,7 +146,8 @@ final class JobStore {
     /// - `cancel(id)` → `cancelled(id)` for any listed job (a finished one is left as is);
     ///   unknown id → `error("notFound")`.
     /// - `probe(source)` → validates, then the variants of an HLS master playlist (`[]` for a media
-    ///   playlist, an mp4 or a page); fetch failures → `error("unavailable")` or `error("invalid")`.
+    ///   playlist or an mp4); fetch failures → `error("unavailable")` or `error("invalid")`. A page
+    ///   → `formats(heights)` from yt-dlp (`[]` on any failure).
     func handle(_ request: IPCRequest) async -> IPCResponse {
         switch request {
         case .ping:
@@ -341,6 +342,12 @@ final class JobStore {
             validated = try Validation.validate(source)
         } catch {
             return .error(code: IPCResponse.ErrorCode.invalid, message: Self.message(for: error))
+        }
+        // Every page probe failure (yt-dlp missing, unsupported site, timeout) answers `[]` on
+        // purpose: the extension caches it, while an error would be retried and respawn yt-dlp.
+        if case let .page(url) = validated {
+            guard let ytDlp = binaries.url(for: .ytDlp) else { return .formats(heights: []) }
+            return .formats(heights: await YtDlpFormats.heights(ytDlp: ytDlp, url: url))
         }
         guard case let .media(url, .hls, headers, _, _) = validated else { return .variants([]) }
         do {

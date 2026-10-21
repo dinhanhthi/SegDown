@@ -13,11 +13,12 @@
 //     {"type": "status", "ids": ["…", "…"]}           // only these jobs
 //     {"type": "cancel", "id": "…"}
 //     {"type": "probe", "source": {…Source…}}
+//     {"type": "probe", "source": {"type": "page", "url": "…"}}   // protocol 3
 //
 // Responses
 //
 //     {"type": "pong", "version": "1.0", "missing": ["yt-dlp", "deno"],    // missing tools, may be []
-//      "protocol": 2,                                                    // absent → 1
+//      "protocol": 3,                                                    // absent → 1
 //      "settings": {"mode": "separate", "incognitoDefault": false,       // optional
 //                   "maxDuration": 600,                                  // maxDuration optional
 //                   "fullClipButton": true, "playerButton": true}}       // absent → true
@@ -25,6 +26,7 @@
 //     {"type": "status", "jobs": [{…JobStatus…}]}
 //     {"type": "cancelled", "id": "…"}
 //     {"type": "variants", "variants": [{…HLSVariant…}]}   // [] for a media playlist or an mp4
+//     {"type": "formats", "heights": [1080, 720]}           // page probe; [] when unknown
 //     {"type": "error", "code": "invalid", "message": "…"}
 //
 // Error codes: "invalid" (bad request), "notFound" (unknown job id), "unavailable" (cannot serve
@@ -130,6 +132,8 @@ public enum IPCResponse: Sendable, Hashable {
     case cancelled(id: String)
     /// Master playlist variants; empty for a media playlist or an mp4.
     case variants([HLSVariant])
+    /// Video heights yt-dlp lists for a page probe, tallest first; empty when unknown.
+    case formats(heights: [Int])
     /// `code` is one of `IPCResponse.ErrorCode`.
     case error(code: String, message: String)
 
@@ -144,11 +148,11 @@ public enum IPCResponse: Sendable, Hashable {
 
 extension IPCResponse: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, version, missing, `protocol`, settings, id, jobs, variants, code, message
+        case type, version, missing, `protocol`, settings, id, jobs, variants, heights, code, message
     }
 
     private enum ResponseType: String, Codable {
-        case pong, enqueued, status, cancelled, variants, error
+        case pong, enqueued, status, cancelled, variants, formats, error
     }
 
     public init(from decoder: any Decoder) throws {
@@ -165,6 +169,7 @@ extension IPCResponse: Codable {
         case .status: self = .status(try c.decode([JobStatus].self, forKey: .jobs))
         case .cancelled: self = .cancelled(id: try c.decode(String.self, forKey: .id))
         case .variants: self = .variants(try c.decode([HLSVariant].self, forKey: .variants))
+        case .formats: self = .formats(heights: try c.decode([Int].self, forKey: .heights))
         case .error:
             self = .error(
                 code: try c.decode(String.self, forKey: .code),
@@ -194,6 +199,9 @@ extension IPCResponse: Codable {
         case let .variants(variants):
             try c.encode(ResponseType.variants, forKey: .type)
             try c.encode(variants, forKey: .variants)
+        case let .formats(heights):
+            try c.encode(ResponseType.formats, forKey: .type)
+            try c.encode(heights, forKey: .heights)
         case let .error(code, message):
             try c.encode(ResponseType.error, forKey: .type)
             try c.encode(code, forKey: .code)
@@ -239,7 +247,8 @@ public enum IPC {
     /// The wire protocol version the app sends in `pong`. 2 adds the optional `JobRequest` keys
     /// (`incognito`, `fallback`, `mediaDuration`), `JobStatus.bytes`, `JobStatus.fallbackUsed` and
     /// `pong.settings`. The optional `JobRequest.pageURL` came later without a bump: older apps ignore it.
-    public static let protocolVersion = 2
+    /// 3 adds `JobRequest.maxHeight` and the page probe's `formats` reply.
+    public static let protocolVersion = 3
     /// Same cap as a native messaging frame.
     public static let maxLineBytes = 1024 * 1024
     public static let defaultTimeout: TimeInterval = 30

@@ -422,7 +422,7 @@ public actor JobRunner {
         let segments = request.segments
         let arguments = CommandBuilder.ytDlp(
             url: url, segments: segments, precision: request.precision, ffmpeg: ffmpeg, tempDirectory: tempDirectory,
-            siteOnly: siteOnly
+            siteOnly: siteOnly, maxHeight: request.maxHeight
         )
         tracker.begin(index: 0, message: "Downloading segment 1 of \(segments.count)")
         try await runProcess(.ytDlp, executable: ytDlp, arguments: arguments, jobID: id) { _, line in

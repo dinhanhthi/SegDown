@@ -67,7 +67,7 @@ After each update, replace the `SegDown-extension/` folder with the new release'
 1. Play the video, so the extension sees its media.
 2. Click the SegDown icon at the top-left of the video (it shows while the pointer is over it), click the SegDown toolbar button, or press Alt+Shift+S.
 3. Mark the ranges: Mark start / Mark end, or `[` / `]`.
-4. Click Download. The ▾ menu picks separate or merged files, incognito, quality, source or video. Full clip downloads the whole video instead and leaves the ranges as they are (not for live video, or video longer than the Max total duration).
+4. Click Download. The ▾ menu picks separate or merged files, incognito, quality, source or video. For yt-dlp downloads (YouTube and the like), Quality sets the resolution: Best, or the tallest format up to a height such as 720p. Full clip downloads the whole video instead and leaves the ranges as they are (not for live video, or video longer than the Max total duration).
 5. Follow the progress on the overlay or in the app's Downloads page.
 
 Files land in `~/Downloads/SegDown/<page title>/` (change it in Settings). Settings › Output can also save every file straight into that folder (Flatten output folder) and name files in snake_case (`my_video_title_merged.mp4`).

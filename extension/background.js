@@ -1,8 +1,9 @@
 // SegDown background service worker (classic script, no modules).
 // Sections: config, media capture (3.2), hub + frame routing (3.3, auto-pick 3.4,
 // overlay toggle 3.5, marking 3.6, hub-owned segments and their persistence,
-// selected-frame gating, source correlation 4.1, HLS variant picker 4.2, send the
-// job 4.3, progress + cancel 4.4, app settings, incognito and the overlay view 5.2).
+// selected-frame gating, source correlation 4.1, HLS variant picker 4.2, page
+// resolution picker, send the job 4.3, progress + cancel 4.4, app settings,
+// incognito and the overlay view 5.2).
 
 "use strict";
 
@@ -93,7 +94,7 @@ function classify(pathname, ctype) {
 //       act:<tabId> -> {<frameId>: {lastChunkUrl, count, ts}}
 //       top:<tabId> -> the top frame's http(s) URL, from webNavigation (never from a content script)
 //       hub:<tabId>, cand:<tabId>, segs:<tabId>, page:<tabId>, src:<tabId>, probe:<tabId>, var:<tabId>,
-//       jobs:<tabId> and inc:<tabId> belong to the hub (see the hub section).
+//       res:<tabId>, jobs:<tabId> and inc:<tabId> belong to the hub (see the hub section).
 // isMaster comes from the app's probe (4.2): set on every entry with the probed URL,
 // and on entries captured later from the probe:<tabId> cache.
 // At most MAX_ENTRIES_PER_FRAME entries per frame (that frame's oldest mp4 goes
@@ -114,6 +115,7 @@ const srcKey = (tabId) => `src:${tabId}`;
 const topKey = (tabId) => `top:${tabId}`;
 const probeKey = (tabId) => `probe:${tabId}`;
 const varKey = (tabId) => `var:${tabId}`;
+const resKey = (tabId) => `res:${tabId}`;
 const jobsKey = (tabId) => `jobs:${tabId}`;
 const incKey = (tabId) => `inc:${tabId}`;
 
@@ -198,6 +200,7 @@ function clearTab(tabId) {
       topKey(tabId),
       probeKey(tabId),
       varKey(tabId),
+      resKey(tabId),
       jobsKey(tabId),
     ])
   );
@@ -469,8 +472,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //     5. the page URL for yt-dlp, from top:<tabId> (via "page"); for a Facebook
 //        top URL and a selected frame-0 candidate with videoId, https://<top
 //        host>/watch/?v=<videoId> instead. A page source {type: "page", url}
-//        has no headers (yt-dlp fetches the page itself), no probe and no
-//        variants.
+//        has no headers (yt-dlp fetches the page itself), no HLS probe and no
+//        variants (its heights: Page resolution picker).
 //
 //   HLS variant picker (4.2). Only this worker talks to the app:
 //   chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "probe", source:
@@ -505,6 +508,31 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   rendition; with it the app uses that playlist as is (a separate audio
 //   rendition is not added). audioURL is never set.
 //
+//   Page resolution picker. Only when the pong's protocol >= 3 (an older app
+//   answers a page probe with variants [] and ignores maxHeight) and the job
+//   runs yt-dlp (Send the job: a page source, or page first), and while the
+//   HLS Quality section (below) does not show: `view` asks the app, while the
+//   overlay is open (one run per tab at a time, in the background),
+//   chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "probe",
+//   source: {type: "page", url: the job's page URL}}) -> {type: "formats",
+//   heights: [integer]} (tallest first, [] when yt-dlp is missing or cannot
+//   read the page; takes seconds) or {type: "error", code, message}. The hub
+//   keeps integers 1...8640, deduped, tallest first, at most MAX_HEIGHTS. A
+//   formats reply ([] included) is cached for that page URL until the tab is
+//   cleared, a failure is retried after PROBE_RETRY_MS; a stored result sends
+//   `sourceChanged` to the selected video's frame. When the HLS Quality section
+//   does not show (an hls source with more than one variant, or its probe
+//   pending or failed), `view`'s source adds (numbers only, never URLs):
+//     heightProbe {state: "pending"} (not probed yet), else heights [integer]
+//       (the cached list, [] after a failure) and height: the chosen index, 0 =
+//       Best (no maxHeight), i = heights[i - 1].
+//   chooseHeight {index} [selected]: 0 removes the choice, i in
+//              1...heights.length picks heights[i - 1]. -> {ok}, or {ok: false,
+//              error: "unknown-height"} when out of range or the job would not
+//              run yt-dlp. The choice (res:<tabId>) holds for that page URL and
+//              selected video, while the height is in the cached list, until
+//              either changes or the page changes.
+//
 //   deps [selected] -> {ok, missing: [tool], appError?}: the tools the app
 //              reports missing, each one of "yt-dlp" | "ffmpeg" | "ffprobe" |
 //              "deno" (others dropped). The hub asks the app
@@ -513,7 +541,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              {mode, incognitoDefault, maxDuration?, fullClipButton?,
 //              playerButton?}}, at most once per DEPS_TTL_MS (10 s; one cached
 //              answer for every tab, also for the settings; concurrent callers
-//              share one request). protocol: an integer >= 1, absent -> 1.
+//              share one request). protocol: an integer >= 1, absent -> 1 (2:
+//              incognito and fallback, 3: maxHeight and the page probe).
 //              settings are checked field by field: mode "separate" | "merged"
 //              (else "separate"), incognitoDefault (true only when true, so an
 //              app without settings gives false), maxDuration (seconds, finite >
@@ -553,6 +582,9 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              omitted (the window's card opens it; older apps ignore it); for
 //              a Facebook top URL and a selected frame-0 candidate with videoId,
 //              https://<top host>/watch/?v=<videoId> instead (page source too).
+//              maxHeight: protocol >= 3 and a page source only (never for the
+//              fallback): the chooseHeight choice that still applies to the
+//              job's page URL, else omitted (Best).
 //              full: true ignores the marked segments (segs:<tabId> is neither
 //              read nor written) and sends one segment {start: 0, end: that
 //              duration}; without one -> {ok: false, error: "no-duration"} (live
@@ -572,7 +604,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              Then:
 //              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "enqueue", job:
 //              {source, title, segments: [{start, end}] (never done), mode,
-//              precision, fallback?, mediaDuration?, pageURL?, incognito?: true}}) ->
+//              precision, fallback?, mediaDuration?, pageURL?, maxHeight?,
+//              incognito?: true}}) ->
 //                {type: "enqueued", id} -> {ok, jobId}; {jobId, title, ts} is
 //                  appended to jobs:<tabId> (for 4.4; {jobId, ts} for an
 //                  incognito job);
@@ -641,7 +674,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //                segments (segs:<tabId>), pendingStart (number | null),
 //                duration (the selected video's, null when unknown or live),
 //                source (getSource's summary of the resolved source, or null;
-//                  hls variants also carry label "WxH · N.N Mbps"),
+//                  hls variants also carry label "WxH · N.N Mbps"; heights,
+//                  height and heightProbe: Page resolution picker),
 //                pageFirst (Download sends the page with this source as its
 //                  fallback, see Send the job),
 //                sources [{kind, host, file}] (chooseSource's list, same order)
@@ -669,7 +703,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              holds an entry with page.key = page:<tabId>.key and no applied,
 //              one status request (a failure is ignored), made before segments
 //              are read so they carry its Downloaded segments flags; starts a
-//              probe run like getSource.
+//              probe run like getSource, and the page probe.
 //
 // Hub -> content: chrome.tabs.sendMessage(tabId, msg, {frameId}). agent.js and
 // the overlay share each frame, so every message names its receiver in `to`;
@@ -702,11 +736,12 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //
 // Same-document URL changes (webNavigation.onHistoryStateUpdated, frame 0) update
 // top:<tabId>. When the URL, without its hash, differs from the key in
-// page:<tabId>, the hub also clears pendingStart and the source and variant
-// choices src:<tabId> / var:<tabId> (captures and probe results stay; the next
-// video's requests add to them), loads the new page's segments (Segment
-// persistence), relays them to the selected video's frame and sends `state` to
-// "all". The selection stays until the agents report other videos.
+// page:<tabId>, the hub also clears pendingStart and the source, variant and
+// height choices src:<tabId> / var:<tabId> / res:<tabId> (captures and probe
+// results stay; the next video's requests add to them), loads the new page's
+// segments (Segment persistence), relays them to the selected video's frame and
+// sends `state` to "all". The selection stays until the agents report other
+// videos.
 //
 // Main-video auto-pick (3.4): whenever any frame's candidates change and
 // selectedBy is "auto", the hub selects the top score across all frames (ties:
@@ -727,10 +762,13 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //                    selection it was made for; never sent to content scripts)
 //   probe:<tabId> -> {<playlist url>: {ts, variants: [{url, bandwidth, width,
 //                    height, audio (has an AUDIO group)}]} | {ts, error: {code,
-//                    message}}}   (4.2 probe results, no headers; at most
+//                    message}}, <page url>: {ts, heights: [integer]} | {ts, error}}
+//                    (4.2 and page probe results, no headers; at most
 //                    MAX_PROBE_CACHE URLs, oldest ts dropped)
 //   var:<tabId>  -> {source, url, selected}   (chooseVariant: the master's URL, the
 //                    chosen variant's URL, the selection; never sent to content scripts)
+//   res:<tabId>  -> {page, height, selected}   (chooseHeight: the page URL, the chosen
+//                    height, the selection; never sent to content scripts)
 //   jobs:<tabId> -> [{jobId, title?, ts}]   (4.3 enqueued jobs, oldest first, at most
 //                    MAX_JOBS_PER_TAB; title as sent to the app, absent for incognito jobs)
 //   jobt         -> {<jobId>: {title, ts, page?: {key, ranges}, applied?}}   (4.4:
@@ -764,6 +802,8 @@ const PROBE_RETRY_MS = 30 * 1000; // a failed probe of a URL is not repeated soo
 const MAX_PROBES_PER_RUN = 6;
 const MAX_PROBE_CACHE = 50; // probed URLs kept per tab
 const MAX_VARIANTS = 100; // variants kept per master
+const MAX_HEIGHTS = 32; // heights kept per page probe
+const MAX_HEIGHT = 8640; // Validation.maxHeightLimit
 const MAX_MESSAGE_CHARS = 300;
 const MAX_TITLE_CHARS = 300; // Validation.maxTitleLength
 const MAX_JOBS_PER_TAB = 20;
@@ -854,6 +894,7 @@ const HUB_VALIDATORS = new Map([
   ["getSource", () => ({})],
   ["chooseSource", (m) => (isIndex(m.index, MAX_ENTRIES_PER_TAB) ? { index: m.index } : null)],
   ["chooseVariant", (m) => (isIndex(m.index, MAX_VARIANTS) ? { index: m.index } : null)],
+  ["chooseHeight", (m) => (isIndex(m.index, MAX_HEIGHTS + 1) ? { index: m.index } : null)],
   [
     "download",
     (m) =>
@@ -883,6 +924,7 @@ const SELECTED_FRAME_TYPES = new Set([
   "getSource",
   "chooseSource",
   "chooseVariant",
+  "chooseHeight",
   "download",
   "jobs",
   "cancel",
@@ -1344,7 +1386,7 @@ async function onPageChanged(tabId, url) {
     const h = await readHub(tabId);
     h.pendingStart = null; // a start belongs to the page it was marked on
     await writeHub(tabId, h);
-    await chrome.storage.session.remove([srcKey(tabId), varKey(tabId)]);
+    await chrome.storage.session.remove([srcKey(tabId), varKey(tabId), resKey(tabId)]);
     return { hub: h, segments: await loadSegments(tabId) };
   });
   if (!result) return;
@@ -1618,7 +1660,7 @@ function cleanVariant(v) {
   return { url: v.url, bandwidth: v.bandwidth, width, height, audio };
 }
 
-// -> {variants} or {error: {code, message}}. Never throws.
+// -> {variants}, {heights} (a page probe) or {error: {code, message}}. Never throws.
 async function probeNative(source) {
   let reply;
   try {
@@ -1630,6 +1672,10 @@ async function probeNative(source) {
   if (isObject(reply) && reply.type === "variants" && Array.isArray(reply.variants)) {
     return { variants: reply.variants.slice(0, MAX_VARIANTS).map(cleanVariant).filter(Boolean) };
   }
+  if (isObject(reply) && reply.type === "formats" && Array.isArray(reply.heights)) {
+    const heights = reply.heights.filter((h) => Number.isInteger(h) && h >= 1 && h <= MAX_HEIGHT);
+    return { heights: [...new Set(heights)].sort((a, b) => b - a).slice(0, MAX_HEIGHTS) };
+  }
   if (isObject(reply) && reply.type === "error" && typeof reply.code === "string") {
     const text = typeof reply.message === "string" ? reply.message.slice(0, MAX_MESSAGE_CHARS) : "";
     return { error: { code: reply.code.slice(0, 32), message: text || "SegDown could not read the playlist." } };
@@ -1638,7 +1684,8 @@ async function probeNative(source) {
 }
 
 // A cached result that makes a new probe unnecessary.
-const isFresh = (rec, now) => isObject(rec) && (Array.isArray(rec.variants) || now - rec.ts < PROBE_RETRY_MS);
+const isFresh = (rec, now) =>
+  isObject(rec) && (Array.isArray(rec.variants) || Array.isArray(rec.heights) || now - rec.ts < PROBE_RETRY_MS);
 
 // The next Source to probe for resolved source r, or null (rules in the protocol).
 function nextProbe(tabId, r) {
@@ -1755,6 +1802,69 @@ async function onChooseVariant(tabId, { index }) {
   return { ok: true, source: await describeSource(tabId, await correlate(tabId)) };
 }
 
+// --- page resolution picker (rules under "Page resolution picker" in the protocol) ---
+
+// The page URL yt-dlp gets for plan (page source or page first), or null when the
+// job would not run yt-dlp or the app is older than protocol 3.
+const heightsPage = (plan, protocol) => (plan && protocol >= 3 && plan.source.type === "page" ? plan.source.url : null);
+
+// The cached heights for pageURL and the height choice that still applies to it
+// (a choice for another page, video or a vanished height is dropped here).
+function readHeights(tabId, pageURL) {
+  return withTab(tabId, async () => {
+    const got = await chrome.storage.session.get([probeKey(tabId), resKey(tabId)]);
+    const rec = isObject(got[probeKey(tabId)]) ? got[probeKey(tabId)][pageURL] : undefined;
+    const list = isObject(rec) && Array.isArray(rec.heights) ? rec.heights : [];
+    let choice = isObject(got[resKey(tabId)]) ? got[resKey(tabId)] : null;
+    if (choice) {
+      const { selected } = await readHub(tabId);
+      if (choice.page !== pageURL || !sameSelection(choice.selected || null, selected) || !list.includes(choice.height)) {
+        await chrome.storage.session.remove(resKey(tabId));
+        choice = null;
+      }
+    }
+    return { rec: isObject(rec) ? rec : null, list, choice };
+  });
+}
+
+async function runPageProbe(tabId, pageURL) {
+  const gen = tabGen(tabId);
+  if (isFresh((await readHeights(tabId, pageURL)).rec, Date.now())) return;
+  const result = await probeNative({ type: "page", url: pageURL });
+  if (!(await storeProbe(tabId, gen, pageURL, result))) return;
+  hubLog(`probe tab=${tabId} ${result.error ? `error=${result.error.code}` : `heights=${(result.heights || []).length}`}`);
+  const { selected } = await withTab(tabId, () => readHub(tabId));
+  if (selected) notifyOverlay(tabId, selected.frameId, { type: "sourceChanged" });
+}
+
+// One page probe per tab at a time; later calls share it.
+const pageProbeRuns = new Map();
+
+function startPageProbe(tabId, pageURL) {
+  if (pageProbeRuns.has(tabId)) return pageProbeRuns.get(tabId);
+  const run = runPageProbe(tabId, pageURL)
+    .catch(hubWarn)
+    .finally(() => pageProbeRuns.delete(tabId));
+  pageProbeRuns.set(tabId, run);
+  return run;
+}
+
+async function onChooseHeight(tabId, { index }) {
+  const app = await fetchDeps();
+  const protocol = app.appError ? null : app.protocol;
+  const page = heightsPage(await planSource(tabId, protocol), protocol);
+  if (!page) return { ok: false, error: "unknown-height" };
+  const { list } = await readHeights(tabId, page);
+  if (index > list.length) return { ok: false, error: "unknown-height" };
+  await withTab(tabId, async () => {
+    if (index === 0) return chrome.storage.session.remove(resKey(tabId));
+    const { selected } = await readHub(tabId);
+    return chrome.storage.session.set({ [resKey(tabId)]: { page, height: list[index - 1], selected } });
+  });
+  hubLog(`chooseHeight tab=${tabId} index=${index}`);
+  return { ok: true };
+}
+
 // --- send the job (4.3; rules under "Send the job" in the protocol) ---
 
 // The app's reply mapped to the frame's (never the job or its source).
@@ -1826,12 +1936,17 @@ async function onDownload(tabId, from, body) {
   // precision is required on the wire, but the app replaces it with its own setting.
   const job = { source: plan.source, title, segments: segments.map(({ start, end }) => ({ start, end })), mode, precision: "precise" };
   if (plan.fallback) job.fallback = plan.fallback;
+  const page = heightsPage(plan, app.protocol); // the page attempt only, never the fallback
+  if (page) {
+    const { choice } = await readHeights(tabId, page);
+    if (choice) job.maxHeight = choice.height;
+  }
   if (plan.r.duration !== null) job.mediaDuration = plan.r.duration;
   if (plan.r.pageURL) job.pageURL = plan.r.pageURL;
   if (incognito) job.incognito = true;
   const result = await enqueueNative(job);
   const kind = (s) => (s.type === "page" ? "page" : s.kind);
-  hubLog(`download tab=${tabId} kind=${kind(plan.source)}${plan.fallback ? `+${kind(plan.fallback)}` : ""} segments=${segments.length} ${result.ok ? "enqueued" : `error=${result.code || result.error}`}`);
+  hubLog(`download tab=${tabId} kind=${kind(plan.source)}${plan.fallback ? `+${kind(plan.fallback)}` : ""} segments=${segments.length}${job.maxHeight ? ` maxHeight=${job.maxHeight}` : ""} ${result.ok ? "enqueued" : `error=${result.code || result.error}`}`);
   if (result.ok) {
     // Incognito jobs: id and timestamp only, nothing in jobt.
     const entry = incognito ? { jobId: result.jobId, ts: Date.now() } : { jobId: result.jobId, title, ts: Date.now() };
@@ -2163,9 +2278,23 @@ async function onView(tabId, from) {
     entries: (await chrome.storage.session.get({ [capKey(tabId)]: [] }))[capKey(tabId)],
     inc: await tabIncognito(tabId, from),
   }));
-  const plan = await planSource(tabId, app.appError ? null : app.protocol);
+  const protocol = app.appError ? null : app.protocol;
+  const plan = await planSource(tabId, protocol);
   const source = plan ? await describeSource(tabId, plan.r) : null;
   if (source && source.variants) source.variants = source.variants.map((v) => ({ ...v, label: variantLabel(v) }));
+  // The overlay's HLS Quality section wins; else the page's heights (Page resolution picker).
+  const hlsQuality =
+    source &&
+    source.kind === "hls" &&
+    ((Array.isArray(source.variants) && source.variants.length > 1) ||
+      (source.probe && (source.probe.state === "pending" || source.probe.state === "error")));
+  const page = heightsPage(plan, protocol);
+  if (source && page && !hlsQuality) {
+    if (hub.panelOpen) startPageProbe(tabId, page);
+    const { rec, list, choice } = await readHeights(tabId, page);
+    if (!rec) source.heightProbe = { state: "pending" };
+    else Object.assign(source, { heights: list, height: choice ? 1 + list.indexOf(choice.height) : 0 });
+  }
   const list = sourceList(Array.isArray(entries) ? entries : []);
   const sourceIndex = plan && plan.r.source.type === "media" ? list.findIndex((e) => e.url === plan.r.source.url) : -1;
   const pool = mergeCandidates(cands).filter((c) => c.excluded === null || sameSelection(c, hub.selected));
@@ -2242,6 +2371,8 @@ function route(tabId, frameId, type, body, from) {
       return onChooseSource(tabId, body);
     case "chooseVariant":
       return onChooseVariant(tabId, body);
+    case "chooseHeight":
+      return onChooseHeight(tabId, body);
     case "download":
       return onDownload(tabId, from, body);
     case "jobs":

@@ -21,6 +21,8 @@ public enum Validation {
     public static let maxTitleLength = 300
     /// Latest allowed segment end, in seconds (7 days).
     public static let maxSegmentEnd: Double = 7 * 86_400
+    /// Tallest `maxHeight` a job may ask yt-dlp for (8K).
+    public static let maxHeightLimit = 8640
 
     /// Validates a job before it is enqueued. Returns the request with normalized header names.
     public static func validate(_ request: JobRequest) throws -> JobRequest {
@@ -47,6 +49,14 @@ public enum Validation {
             }
         }
         if let pageURL = request.pageURL { try checkScheme(pageURL, field: "pageURL") }
+        if let maxHeight = request.maxHeight {
+            guard (1...maxHeightLimit).contains(maxHeight) else {
+                throw JobError.invalid("maxHeight must be 1 to \(maxHeightLimit)")
+            }
+            guard case .page = request.source else {
+                throw JobError.invalid("maxHeight is only allowed with a page source")
+            }
+        }
         var validated = request
         validated.source = try validate(request.source)
         if let fallback = request.fallback {

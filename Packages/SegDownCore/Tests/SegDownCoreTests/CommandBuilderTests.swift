@@ -114,6 +114,25 @@ struct CommandBuilderTests {
         #expect(Array(args.suffix(2)) == ["--", url.absoluteString])
     }
 
+    @Test func ytDlpSortsByMaxHeightOnlyWhenSet() throws {
+        let url = URL(string: "https://www.youtube.com/watch?v=aqz-KE-bpKQ")!
+        func args(maxHeight: Int?) -> [String] {
+            CommandBuilder.ytDlp(
+                url: url,
+                segments: [Segment(start: 1, end: 2)],
+                precision: .fast,
+                ffmpeg: URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg"),
+                tempDirectory: URL(fileURLWithPath: "/tmp/job"),
+                maxHeight: maxHeight
+            )
+        }
+        let capped = args(maxHeight: 720)
+        let sort = try #require(capped.firstIndex(of: "-S"))
+        #expect(capped[sort + 1] == "height:720")
+        #expect(sort < (capped.firstIndex(of: "--") ?? -1))
+        #expect(!args(maxHeight: nil).contains("-S"))
+    }
+
     @Test func timestampsUseDotUnderGermanLocale() {
         // A locale-dependent formatter would produce a comma here; the builder must not.
         #expect(String(format: "%.3f", locale: Locale(identifier: "de_DE"), 1.5) == "1,500")

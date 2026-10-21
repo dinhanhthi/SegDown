@@ -108,6 +108,7 @@ public enum Precision: String, Codable, Sendable, Hashable {
 /// `"incognito": true`, `"fallback": {…Source…}` (media to try when the page source fails) and
 /// `"mediaDuration": 3600` (seconds, the whole video's duration, for the size estimate).
 /// `"pageURL": "https://…"` (the tab's page, which the window's card opens) is optional too; older apps ignore it.
+/// `"maxHeight": 1080` (protocol 3, page source only: the tallest video yt-dlp may pick).
 public struct JobRequest: Codable, Sendable, Hashable {
     public var source: Source
     public var title: String
@@ -118,6 +119,7 @@ public struct JobRequest: Codable, Sendable, Hashable {
     public var fallback: Source?
     public var mediaDuration: Double?
     public var pageURL: URL?
+    public var maxHeight: Int?
 
     public init(
         source: Source,
@@ -128,7 +130,8 @@ public struct JobRequest: Codable, Sendable, Hashable {
         incognito: Bool? = nil,
         fallback: Source? = nil,
         mediaDuration: Double? = nil,
-        pageURL: URL? = nil
+        pageURL: URL? = nil,
+        maxHeight: Int? = nil
     ) {
         self.source = source
         self.title = title
@@ -139,10 +142,11 @@ public struct JobRequest: Codable, Sendable, Hashable {
         self.fallback = fallback
         self.mediaDuration = mediaDuration
         self.pageURL = pageURL
+        self.maxHeight = maxHeight
     }
 
     private enum CodingKeys: String, CodingKey {
-        case source, title, segments, mode, precision, incognito, fallback, mediaDuration, pageURL
+        case source, title, segments, mode, precision, incognito, fallback, mediaDuration, pageURL, maxHeight
     }
 
     public init(from decoder: any Decoder) throws {
@@ -156,6 +160,7 @@ public struct JobRequest: Codable, Sendable, Hashable {
         fallback = try c.decodeIfPresent(Source.self, forKey: .fallback)
         mediaDuration = try c.decodeIfPresent(Double.self, forKey: .mediaDuration)
         pageURL = try c.decodeIfPresent(URL.self, forKey: .pageURL)
+        maxHeight = try c.decodeIfPresent(Int.self, forKey: .maxHeight)
     }
 }
 
