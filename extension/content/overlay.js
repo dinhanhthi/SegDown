@@ -3,7 +3,8 @@
 // bar on the video's bottom edge plus Mark start / Mark end / Full clip / Download
 // buttons (Full clip only while the app's switch is on), in a closed shadow root
 // shown in the top layer (popover="manual", spike 1.2), so it stays above the page
-// and every kind of fullscreen.
+// and every kind of fullscreen. The buttons' panel moves by its grip, inside the
+// video (the spot is kept until the page reloads).
 // Talks to the hub in background.js (the protocol is documented there) and reads
 // the video through agent.js (globalThis.segdownAgent, same isolated world).
 // Page data is untrusted: the DOM is built with textContent only, handlers act on
@@ -88,11 +89,14 @@
     .pending { position: absolute; bottom: 0; width: 2px; height: 12px; margin-left: -1px; background: #30d158; }
     .head { position: absolute; bottom: 0; width: 2px; height: 12px; margin-left: -1px; background: #fff; }
     .panel {
-      position: absolute; right: 12px; bottom: 60px; max-width: calc(100% - 24px);
+      position: absolute; right: 12px; bottom: 60px; width: max-content; max-width: calc(100% - 24px);
       display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
     }
     .box { background: rgba(28, 28, 30, 0.9); border: 1px solid #3a3a3c; border-radius: 9px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4); }
     .row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; padding: 4px; pointer-events: auto; }
+    .grip { display: flex; align-items: center; padding: 0 3px; color: #8e8e93; cursor: grab; touch-action: none; }
+    .grip:hover { color: #f2f2f7; }
+    .grip.dragging { cursor: grabbing; }
     button {
       all: unset; box-sizing: border-box; padding: 4px 9px; border-radius: 6px; background: #2c2c2e;
       color: inherit; font: inherit; white-space: nowrap; cursor: pointer;
@@ -132,6 +136,8 @@
   let note = ""; // the last action's error
   let busy = false; // a download call is in flight
   let menuOpen = false;
+  let panelPos = null; // {right, bottom} px in the host once the panel was dragged; null = the CSS spot
+  let drag = null; // {x, y, right, bottom} at the grip's pointerdown while dragging
   let lastMove = 0;
   let viewSeq = 0;
   let refreshTimer = null;
@@ -246,7 +252,7 @@
       // not open, or no popover support
     }
     host.remove();
-    host = ui = rect = view = job = null;
+    host = ui = rect = view = job = drag = null;
     menuOpen = false;
     note = "";
     detach();
@@ -308,6 +314,48 @@
     s.setProperty("height", `${Math.max(0, height)}px`, "important");
     s.setProperty("visibility", visible ? "visible" : "hidden", "important");
     ui.menu.style.maxHeight = `${Math.max(80, height - 110)}px`;
+    placePanel();
+  }
+
+  // Puts the dragged panel at panelPos, clamped inside the host (the panel grows
+  // with the menu; panelPos stays as dragged).
+  function placePanel() {
+    if (!ui || !panelPos) return;
+    const p = ui.panel;
+    const maxRight = Math.max(0, host.clientWidth - p.offsetWidth);
+    const maxBottom = Math.max(0, host.clientHeight - p.offsetHeight);
+    p.style.right = `${Math.max(0, Math.min(panelPos.right, maxRight))}px`;
+    p.style.bottom = `${Math.max(0, Math.min(panelPos.bottom, maxBottom))}px`;
+  }
+
+  // --- panel drag ---
+
+  // The pointer is captured, so the drag goes on outside the grip and the host.
+  function onGripDown(e) {
+    if (!e.isTrusted || e.button !== 0) return;
+    const p = ui.panel;
+    const right = host.clientWidth - p.offsetLeft - p.offsetWidth;
+    const bottom = host.clientHeight - p.offsetTop - p.offsetHeight;
+    drag = { x: e.clientX, y: e.clientY, right, bottom };
+    ui.grip.setPointerCapture(e.pointerId);
+    ui.grip.classList.add("dragging");
+  }
+
+  function onGripMove(e) {
+    if (!e.isTrusted || !drag) return;
+    panelPos = { right: drag.right - (e.clientX - drag.x), bottom: drag.bottom - (e.clientY - drag.y) };
+    placePanel();
+    lastMove = Date.now();
+  }
+
+  // Keeps the clamped spot, so the next drag starts where the panel is.
+  function onGripUp(e) {
+    if (!drag) return;
+    drag = null;
+    ui.grip.classList.remove("dragging");
+    if (ui.grip.hasPointerCapture(e.pointerId)) ui.grip.releasePointerCapture(e.pointerId);
+    if (panelPos) panelPos = { right: parseFloat(ui.panel.style.right), bottom: parseFloat(ui.panel.style.bottom) };
+    updateHide();
   }
 
   function schedulePlace() {
@@ -348,6 +396,7 @@
       pendingStart() !== null ||
       menuOpen ||
       busy ||
+      drag !== null ||
       Boolean(job && ACTIVE.has(job.state)) ||
       ui.bar.matches(":hover") ||
       ui.panel.matches(":hover")
@@ -559,8 +608,14 @@
     const close = make("button", "close", "×");
     close.setAttribute("aria-label", "Close SegDown");
     onClick(close, () => act({ type: "setPanelOpen", open: false }));
+    const grip = make("div", "grip", "⋮⋮");
+    grip.title = "Drag to move";
+    grip.addEventListener("pointerdown", onGripDown);
+    grip.addEventListener("pointermove", onGripMove);
+    grip.addEventListener("pointerup", onGripUp);
+    grip.addEventListener("pointercancel", onGripUp);
     const row = make("div", "box row");
-    row.append(start, end, full, split, close);
+    row.append(grip, start, end, full, split, close);
 
     const menu = make("div", "box menu");
     menu.setAttribute("role", "menu");
@@ -576,7 +631,7 @@
     uiBox.append(bar, panel);
     wrap.append(uiBox);
     root.append(make("style", null, CSS), wrap);
-    return { wrap, bar, segs, pending, head, start, end, full, main, more, menu, panel, lines, jobLine, statusLine };
+    return { wrap, bar, segs, pending, head, start, end, full, main, more, menu, panel, grip, lines, jobLine, statusLine };
   }
 
   function onBarClick(e) {
@@ -665,6 +720,7 @@
     renderLines(block);
     ui.menu.hidden = !menuOpen;
     if (menuOpen) renderMenu();
+    placePanel();
     updateHide();
   }
 

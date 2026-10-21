@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Drag the overlay's buttons by their ⋮⋮ grip to move them anywhere on the video, so they no longer cover the player's own controls. The spot is kept until the page reloads.
+
 ## [0.6.0] - 2026-10-21
 
 ### Added
