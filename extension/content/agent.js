@@ -20,6 +20,8 @@
   const AD_CLASS_TOKEN = /(^|[-_])ad-container$|preroll/i;
   const MAX_WALK_ELEMENTS = 10000; // per rescan, across the document and open shadow roots
   const MAX_SHADOW_DEPTH = 4;
+  const ON_FACEBOOK = location.hostname === "facebook.com" || location.hostname.endsWith(".facebook.com");
+  const FB_VIDEO_ID = /^\d{1,25}$/;
 
   const keyOf = new WeakMap(); // video -> videoKey
   const videos = new Map(); // videoKey -> video (pruned on rescan)
@@ -91,6 +93,12 @@
     };
     const src = v.currentSrc;
     if (/^https?:/i.test(src) && src.length <= 8192) out.currentSrc = src;
+    // Facebook plays MSE (no http currentSrc); the container's data-video-id names the clip.
+    const box = ON_FACEBOOK && v.closest("[data-video-id]");
+    if (box && box.querySelectorAll("video").length === 1) {
+      const id = box.getAttribute("data-video-id");
+      if (FB_VIDEO_ID.test(id)) out.videoId = id;
+    }
     return out;
   }
 
@@ -163,7 +171,7 @@
   // not re-send either.
   function signature(list) {
     const bucket = (score) => (score > 0 ? Math.round(Math.log2(score) * 4) : -1);
-    const rows = list.map((c) => [c.videoKey, c.duration, c.live, c.excluded, c.currentSrc, c.width, c.height, bucket(c.score)]);
+    const rows = list.map((c) => [c.videoKey, c.duration, c.live, c.excluded, c.currentSrc, c.videoId, c.width, c.height, bucket(c.score)]);
     const order = [...list].sort((a, b) => b.score - a.score || b.area - a.area).map((c) => c.videoKey);
     return JSON.stringify([rows, order]);
   }

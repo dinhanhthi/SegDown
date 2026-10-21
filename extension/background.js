@@ -310,7 +310,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //
 //   Agent (every frame, owns that frame's <video> elements):
 //   candidates {videos: [{videoKey, area, duration, live, paused, excluded, score,
-//              currentSrc?}]}
+//              currentSrc?, videoId?}]}
 //              The frame's full list (replaces the previous one, [] clears it).
 //              videoKey: [A-Za-z0-9_-]{1,64}, stable per element for the frame's
 //              lifetime. area: finite >= 0, the part of the video inside the
@@ -321,11 +321,13 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              width * height < 200x112, on-screen or not), first match in that
 //              order. score: area * min(duration, 3 h), 0 when excluded or
 //              duration is null. currentSrc: only if http(s), max 8192 chars,
-//              else omitted. width, height (optional): the video's intrinsic
-//              size, integers 1...100000, kept only as a pair (labels in
-//              `view`). At most 20 videos (the top scores when a frame has
-//              more). Agents re-send only when a field the hub uses changes
-//              (the score in coarse buckets, so scrolling rarely re-sends), and
+//              else omitted. videoId: digits only (1-25), Facebook's
+//              data-video-id of the video's container, else omitted. width,
+//              height (optional): the video's intrinsic size, integers
+//              1...100000, kept only as a pair (labels in `view`). At most 20
+//              videos (the top scores when a frame has more). Agents re-send
+//              only when a field the hub uses changes (the score in coarse
+//              buckets, so scrolling rarely re-sends), and
 //              send [] on pagehide (a removed iframe takes its videos with it).
 //              -> {ok}. The hub re-runs the auto-pick (below).
 //   key        {action: "markStart" | "markEnd"} from any frame (3.6 keyboard:
@@ -464,9 +466,11 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //        with active .ts/.m4s chunks (act:<tabId>) first, then hls before mp4,
 //        then a probed master (4.2), then the newest (via "capture", with the
 //        capture's own frameId; chooseSource picks another one);
-//     5. the page URL for yt-dlp, from top:<tabId> (via "page"). A page source
-//        {type: "page", url} has no headers (yt-dlp fetches the page itself),
-//        no probe and no variants.
+//     5. the page URL for yt-dlp, from top:<tabId> (via "page"); for a Facebook
+//        top URL and a selected frame-0 candidate with videoId, https://<top
+//        host>/watch/?v=<videoId> instead. A page source {type: "page", url}
+//        has no headers (yt-dlp fetches the page itself), no probe and no
+//        variants.
 //
 //   HLS variant picker (4.2). Only this worker talks to the app:
 //   chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "probe", source:
@@ -541,12 +545,14 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              null -> {ok: false, error: "no-source"}): when it is media, the user
 //              pinned neither the source (chooseSource) nor a non-default
 //              variant (chooseVariant), protocol >= 2 and top:<tabId> holds an
-//              http(s) URL, the job gets source = {type: "page", url: top URL}
+//              http(s) URL, the job gets source = {type: "page", url: page URL}
 //              and fallback = that media (the app tries yt-dlp first); otherwise
 //              source = the resolved source and no fallback. mediaDuration: the
 //              selected candidate's duration when finite > 0, else omitted.
 //              pageURL: the top URL (top:<tabId>) when it is http(s), else
-//              omitted (the window's card opens it; older apps ignore it).
+//              omitted (the window's card opens it; older apps ignore it); for
+//              a Facebook top URL and a selected frame-0 candidate with videoId,
+//              https://<top host>/watch/?v=<videoId> instead (page source too).
 //              full: true ignores the marked segments (segs:<tabId> is neither
 //              read nor written) and sends one segment {start: 0, end: that
 //              duration}; without one -> {ok: false, error: "no-duration"} (live
@@ -809,6 +815,10 @@ function cleanCandidate(v) {
   if (v.currentSrc !== undefined) {
     if (typeof v.currentSrc !== "string") return null;
     if (v.currentSrc.length <= MAX_URL_LENGTH && httpURL(v.currentSrc)) out.currentSrc = v.currentSrc;
+  }
+  if (v.videoId !== undefined) {
+    if (typeof v.videoId !== "string") return null;
+    if (/^\d{1,25}$/.test(v.videoId)) out.videoId = v.videoId;
   }
   const isSide = (n) => Number.isInteger(n) && n > 0 && n <= MAX_VIDEO_SIDE;
   if (isSide(v.width) && isSide(v.height)) [out.width, out.height] = [v.width, v.height];
@@ -1355,6 +1365,14 @@ function entrySource(e, via) {
   return { source: { type: "media", url: e.url, kind: e.kind, headers }, frameId: e.frameId, via };
 }
 
+// Pure: the selected Facebook video's own page (frame 0, with videoId), else topURL.
+function videoPageURL(topURL, selected, cand) {
+  const u = topURL ? httpURL(topURL) : null;
+  if (!u || !(selected && selected.frameId === 0) || !(cand && cand.videoId)) return topURL;
+  if (u.hostname !== "facebook.com" && !u.hostname.endsWith(".facebook.com")) return topURL;
+  return `${u.origin}/watch/?v=${cand.videoId}`;
+}
+
 // Pure: {source, frameId, via} or null. `media` holds hls/mp4 entries, oldest first.
 function pickSource({ selected, currentSrc, choice, media, active, topURL }) {
   if (choice) {
@@ -1401,21 +1419,22 @@ function correlate(tabId) {
     }
     const top = got[topKey(tabId)];
     const topURL = typeof top === "string" && httpURL(top) ? top : null;
+    const pageURL = videoPageURL(topURL, sel, cand);
     const r = pickSource({
       selected: sel,
       currentSrc: cand && cand.currentSrc ? cand.currentSrc : null,
       choice,
       media: (got[capKey(tabId)] || []).filter(isMediaEntry),
       active: isObject(got[actKey(tabId)]) ? got[actKey(tabId)] : {},
-      topURL,
+      topURL: pageURL,
     });
-    // For the job (5.2): the top URL (page-first) and the selected video's duration.
-    if (r) Object.assign(r, { topURL, duration: cand && isFiniteNum(cand.duration) && cand.duration > 0 ? cand.duration : null });
+    // For the job (5.2): the page URL (page-first) and the selected video's duration.
+    if (r) Object.assign(r, { pageURL, duration: cand && isFiniteNum(cand.duration) && cand.duration > 0 ? cand.duration : null });
     return r;
   });
 }
 
-// For the job builder (4.3): {source, frameId, via, topURL, duration} with the
+// For the job builder (4.3): {source, frameId, via, pageURL, duration} with the
 // full Source (captured headers), or null. Service-worker only; never send it to
 // a content script. Reads the probe cache only (no native call); variantURL only
 // for a non-default choice.
@@ -1438,8 +1457,8 @@ async function planSource(tabId, protocol) {
   const r = await resolveSource(tabId);
   if (!r) return null;
   const pinned = r.via === "user" || Boolean(r.source.variantURL);
-  if (r.source.type === "media" && !pinned && protocol >= 2 && r.topURL) {
-    return { r, source: { type: "page", url: r.topURL }, fallback: r.source };
+  if (r.source.type === "media" && !pinned && protocol >= 2 && r.pageURL) {
+    return { r, source: { type: "page", url: r.pageURL }, fallback: r.source };
   }
   return { r, source: r.source, fallback: null };
 }
@@ -1808,7 +1827,7 @@ async function onDownload(tabId, from, body) {
   const job = { source: plan.source, title, segments: segments.map(({ start, end }) => ({ start, end })), mode, precision: "precise" };
   if (plan.fallback) job.fallback = plan.fallback;
   if (plan.r.duration !== null) job.mediaDuration = plan.r.duration;
-  if (plan.r.topURL) job.pageURL = plan.r.topURL;
+  if (plan.r.pageURL) job.pageURL = plan.r.pageURL;
   if (incognito) job.incognito = true;
   const result = await enqueueNative(job);
   const kind = (s) => (s.type === "page" ? "page" : s.kind);
