@@ -545,6 +545,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              and fallback = that media (the app tries yt-dlp first); otherwise
 //              source = the resolved source and no fallback. mediaDuration: the
 //              selected candidate's duration when finite > 0, else omitted.
+//              pageURL: the top URL (top:<tabId>) when it is http(s), else
+//              omitted (the window's card opens it; older apps ignore it).
 //              full: true ignores the marked segments (segs:<tabId> is neither
 //              read nor written) and sends one segment {start: 0, end: that
 //              duration}; without one -> {ok: false, error: "no-duration"} (live
@@ -564,7 +566,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              Then:
 //              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "enqueue", job:
 //              {source, title, segments: [{start, end}] (never done), mode,
-//              precision, fallback?, mediaDuration?, incognito?: true}}) ->
+//              precision, fallback?, mediaDuration?, pageURL?, incognito?: true}}) ->
 //                {type: "enqueued", id} -> {ok, jobId}; {jobId, title, ts} is
 //                  appended to jobs:<tabId> (for 4.4; {jobId, ts} for an
 //                  incognito job);
@@ -1806,6 +1808,7 @@ async function onDownload(tabId, from, body) {
   const job = { source: plan.source, title, segments: segments.map(({ start, end }) => ({ start, end })), mode, precision: "precise" };
   if (plan.fallback) job.fallback = plan.fallback;
   if (plan.r.duration !== null) job.mediaDuration = plan.r.duration;
+  if (plan.r.topURL) job.pageURL = plan.r.topURL;
   if (incognito) job.incognito = true;
   const result = await enqueueNative(job);
   const kind = (s) => (s.type === "page" ? "page" : s.kind);

@@ -107,6 +107,7 @@ public enum Precision: String, Codable, Sendable, Hashable {
 /// Optional keys (protocol 2; absent from older extensions, omitted when `nil`):
 /// `"incognito": true`, `"fallback": {…Source…}` (media to try when the page source fails) and
 /// `"mediaDuration": 3600` (seconds, the whole video's duration, for the size estimate).
+/// `"pageURL": "https://…"` (the tab's page, which the window's card opens) is optional too; older apps ignore it.
 public struct JobRequest: Codable, Sendable, Hashable {
     public var source: Source
     public var title: String
@@ -116,6 +117,7 @@ public struct JobRequest: Codable, Sendable, Hashable {
     public var incognito: Bool?
     public var fallback: Source?
     public var mediaDuration: Double?
+    public var pageURL: URL?
 
     public init(
         source: Source,
@@ -125,7 +127,8 @@ public struct JobRequest: Codable, Sendable, Hashable {
         precision: Precision,
         incognito: Bool? = nil,
         fallback: Source? = nil,
-        mediaDuration: Double? = nil
+        mediaDuration: Double? = nil,
+        pageURL: URL? = nil
     ) {
         self.source = source
         self.title = title
@@ -135,10 +138,11 @@ public struct JobRequest: Codable, Sendable, Hashable {
         self.incognito = incognito
         self.fallback = fallback
         self.mediaDuration = mediaDuration
+        self.pageURL = pageURL
     }
 
     private enum CodingKeys: String, CodingKey {
-        case source, title, segments, mode, precision, incognito, fallback, mediaDuration
+        case source, title, segments, mode, precision, incognito, fallback, mediaDuration, pageURL
     }
 
     public init(from decoder: any Decoder) throws {
@@ -151,6 +155,7 @@ public struct JobRequest: Codable, Sendable, Hashable {
         incognito = try c.decodeIfPresent(Bool.self, forKey: .incognito)
         fallback = try c.decodeIfPresent(Source.self, forKey: .fallback)
         mediaDuration = try c.decodeIfPresent(Double.self, forKey: .mediaDuration)
+        pageURL = try c.decodeIfPresent(URL.self, forKey: .pageURL)
     }
 }
 

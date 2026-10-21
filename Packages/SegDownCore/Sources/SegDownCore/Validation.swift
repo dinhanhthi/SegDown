@@ -46,6 +46,7 @@ public enum Validation {
                 throw JobError.invalid("mediaDuration must be finite, > 0 and within the 7-day limit")
             }
         }
+        if let pageURL = request.pageURL { try checkScheme(pageURL, field: "pageURL") }
         var validated = request
         validated.source = try validate(request.source)
         if let fallback = request.fallback {

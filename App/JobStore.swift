@@ -26,6 +26,8 @@ final class JobStore {
         let sourceKind: SourceKind?
         /// `true` once any status reported the switch to the captured media.
         var fallbackUsed: Bool
+        /// The tab's page; `nil` when the request had none (a media source from an older extension).
+        let pageURL: URL?
         let incognito: Bool
         let createdAt: Date
         /// Set when the job ends (done, failed or cancelled).
@@ -178,8 +180,11 @@ final class JobStore {
         let incognito = validated.incognito ?? current.incognitoDefault
         let job = await runner.start(validated, options: current.jobOptions)
         let sourceKind: Item.SourceKind
+        var pageURL = validated.pageURL
         switch validated.source {
-        case .page: sourceKind = .page
+        case let .page(url):
+            sourceKind = .page
+            pageURL = pageURL ?? url
         case .media: sourceKind = .media
         }
         // Listed before returning, so a `status` request right after `enqueued` finds it.
@@ -188,7 +193,7 @@ final class JobStore {
                  status: JobStatus(id: job.id, state: .queued, segmentCount: validated.segments.count),
                  segmentCount: validated.segments.count,
                  totalDuration: validated.segments.reduce(0) { $0 + ($1.end - $1.start) },
-                 sourceKind: sourceKind, fallbackUsed: false, incognito: incognito,
+                 sourceKind: sourceKind, fallbackUsed: false, pageURL: pageURL, incognito: incognito,
                  createdAt: Date()),
             at: 0
         )
@@ -230,7 +235,7 @@ final class JobStore {
             createdAt: item.createdAt, finishedAt: item.finishedAt ?? Date(),
             segmentCount: item.segmentCount, totalDuration: item.totalDuration,
             bytes: item.bytes, outputs: item.status.outputs, message: item.status.message,
-            fallbackUsed: item.fallbackUsed ? true : nil
+            fallbackUsed: item.fallbackUsed ? true : nil, pageURL: item.pageURL
         )
     }
 
@@ -247,7 +252,7 @@ final class JobStore {
             id: record.id, title: record.title, status: status,
             segmentCount: record.segmentCount, totalDuration: record.totalDuration,
             bytes: record.bytes, sourceKind: nil, fallbackUsed: record.fallbackUsed == true,
-            incognito: false, createdAt: record.createdAt, finishedAt: record.finishedAt
+            pageURL: record.pageURL, incognito: false, createdAt: record.createdAt, finishedAt: record.finishedAt
         )
     }
 

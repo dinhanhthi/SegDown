@@ -29,6 +29,7 @@ struct WireCompatibilityTests {
         #expect(job.incognito == nil)
         #expect(job.fallback == nil)
         #expect(job.mediaDuration == nil)
+        #expect(job.pageURL == nil)
     }
 
     @Test func pongFromProtocol1AppDecodesAsProtocol1WithoutSettings() throws {

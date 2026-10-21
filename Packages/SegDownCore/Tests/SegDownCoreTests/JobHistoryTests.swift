@@ -33,7 +33,7 @@ struct JobHistoryTests {
         #expect(reloaded.records.map(\.id) == ["kept"])
     }
 
-    @Test func savedRecordHasNoSourceOrURLs() throws {
+    @Test func savedRecordWithoutPageURLHasNoSourceOrURLs() throws {
         let url = try tempFileURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         var history = JobHistory(fileURL: url)

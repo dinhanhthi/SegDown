@@ -200,7 +200,7 @@ struct DownloadsView: View {
     }
 }
 
-/// One job: title, Reveal in Finder, Remove and state, segment, duration, size, progress, then the message and Cancel.
+/// One job: title, Open Page, Reveal in Finder, Remove and state, segment, duration, size, progress, then the message and Cancel.
 /// Selected adds an accent fill and stroke.
 private struct DownloadCard: View {
     let item: JobStore.Item
@@ -227,6 +227,16 @@ private struct DownloadCard: View {
                     .truncationMode(.tail)
                     .help(item.title)
                 Spacer(minLength: 8)
+                if let pageURL = item.pageURL {
+                    Button { NSWorkspace.shared.open(pageURL) } label: {
+                        Label("Open Page", systemImage: "safari")
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(RaisedButtonStyle(height: 26))
+                    // Page URLs are untrusted: shown as plain text only.
+                    .help(Text(verbatim: pageURL.absoluteString))
+                }
                 if !status.outputs.isEmpty {
                     Button(action: showInFinder) {
                         Label("Reveal in Finder", systemImage: "folder")

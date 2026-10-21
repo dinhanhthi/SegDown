@@ -1,6 +1,7 @@
 // Finished jobs, persisted as JSON so the window can list them across launches. Privacy: a
-// record never holds the request, its source, URLs or headers, and the stored message has every
-// URL replaced by `<link>`. Incognito jobs are never stored.
+// record never holds the request, its source, media URLs or headers, only the tab's page URL (the
+// card's Open Page button), removed with the record; the stored message has every URL replaced by
+// `<link>`. Incognito jobs are never stored.
 import Foundation
 
 /// One finished job as stored in the history. `outputs` holds absolute file paths.
@@ -16,6 +17,7 @@ public struct JobRecord: Codable, Sendable, Hashable, Identifiable {
     public var outputs: [String]
     public var message: String?
     public var fallbackUsed: Bool?
+    public var pageURL: URL?
 
     public init(
         id: String,
@@ -28,7 +30,8 @@ public struct JobRecord: Codable, Sendable, Hashable, Identifiable {
         bytes: Int64? = nil,
         outputs: [String] = [],
         message: String? = nil,
-        fallbackUsed: Bool? = nil
+        fallbackUsed: Bool? = nil,
+        pageURL: URL? = nil
     ) {
         self.id = id
         self.title = title
@@ -41,6 +44,7 @@ public struct JobRecord: Codable, Sendable, Hashable, Identifiable {
         self.outputs = outputs
         self.message = message
         self.fallbackUsed = fallbackUsed
+        self.pageURL = pageURL
     }
 }
 

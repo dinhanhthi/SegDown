@@ -238,7 +238,7 @@ extension IPCError: LocalizedError {
 public enum IPC {
     /// The wire protocol version the app sends in `pong`. 2 adds the optional `JobRequest` keys
     /// (`incognito`, `fallback`, `mediaDuration`), `JobStatus.bytes`, `JobStatus.fallbackUsed` and
-    /// `pong.settings`.
+    /// `pong.settings`. The optional `JobRequest.pageURL` came later without a bump: older apps ignore it.
     public static let protocolVersion = 2
     /// Same cap as a native messaging frame.
     public static let maxLineBytes = 1024 * 1024
