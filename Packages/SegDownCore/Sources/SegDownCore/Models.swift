@@ -221,8 +221,10 @@ extension JobError: Codable {
 
 /// Progress of one job. `segmentIndex` is 0-based; `fraction` is overall progress in 0...1.
 /// `outputs` holds the absolute paths of the files written so far. `bytes` is the size downloaded
-/// so far; `fallbackUsed` is `true` once the job switched to its captured media fallback (both
-/// optional on the wire, omitted when `nil`; `fallbackUsed` is never sent as `false`).
+/// so far; `fallbackUsed` is `true` once the job switched to its captured media fallback; `title`,
+/// in the final status only, is the job's new title (the video's real title read by yt-dlp in
+/// place of a generic tab title) when it differs from the request's. All three
+/// are optional on the wire and omitted when `nil`; `fallbackUsed` is never sent as `false`.
 public struct JobStatus: Codable, Sendable, Hashable, Identifiable {
     public var id: String
     public var state: JobState
@@ -233,6 +235,7 @@ public struct JobStatus: Codable, Sendable, Hashable, Identifiable {
     public var outputs: [String]
     public var bytes: Int64?
     public var fallbackUsed: Bool?
+    public var title: String?
 
     public init(
         id: String,
@@ -243,7 +246,8 @@ public struct JobStatus: Codable, Sendable, Hashable, Identifiable {
         message: String? = nil,
         outputs: [String] = [],
         bytes: Int64? = nil,
-        fallbackUsed: Bool? = nil
+        fallbackUsed: Bool? = nil,
+        title: String? = nil
     ) {
         self.id = id
         self.state = state
@@ -254,5 +258,6 @@ public struct JobStatus: Codable, Sendable, Hashable, Identifiable {
         self.outputs = outputs
         self.bytes = bytes
         self.fallbackUsed = fallbackUsed
+        self.title = title
     }
 }

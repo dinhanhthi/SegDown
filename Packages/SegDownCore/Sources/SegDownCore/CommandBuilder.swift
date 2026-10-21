@@ -148,6 +148,16 @@ public enum CommandBuilder {
         return args
     }
 
+    /// yt-dlp arguments that print only the title of the page `url`, without downloading.
+    /// Site extractors only: the generic one would return the same page `<title>` as the tab.
+    public static func ytDlpTitle(url: URL) -> [String] {
+        [
+            "--ignore-config", "--use-extractors", "default,-generic",
+            "--skip-download", "--no-playlist", "--print", "title",
+            "--", url.absoluteString,
+        ]
+    }
+
     // MARK: - Helpers
 
     /// Per-input options followed by `-ss S -i URL`.

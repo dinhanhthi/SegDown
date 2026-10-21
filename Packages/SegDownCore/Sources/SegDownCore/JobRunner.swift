@@ -19,6 +19,8 @@ public actor JobRunner {
         "The site refused the download (HTTP 403/410). It may block yt-dlp; try `brew upgrade yt-dlp`."
     /// Time between SIGINT and SIGTERM when a job is cancelled.
     static let cancelGracePeriod: Duration = .seconds(3)
+    /// Time the title lookup (`lookUpTitle`) may run before its yt-dlp is terminated.
+    static let titleLookupTimeout: Duration = .seconds(20)
     /// Time between two sums of a running job's temp dir (`JobStatus.bytes` and the size cap).
     static let sizePollInterval: Duration = .milliseconds(500)
     /// Files `merge` writes into the temp dir; `SizeEstimate.countedFileNames` skips them.
@@ -95,12 +97,17 @@ public actor JobRunner {
             .appendingPathComponent("SegDown-\(id)", isDirectory: true)
 
         var final: JobStatus
+        // The looked-up title when it replaced the request's; reported in the final status.
+        var newTitle: String?
         do {
             tracker.begin(index: 0, message: "Starting")
-            let request = try Validation.validate(request)
+            var request = try Validation.validate(request)
             if let maxBytes = options.maxBytes {
                 try await checkEstimate(id: id, request: request, maxBytes: maxBytes, tracker: tracker)
             }
+            newTitle = try await lookUpTitle(id: id, request: request, tracker: tracker)
+            // `PageTitle.clean` caps it at `Validation.maxTitleLength`, so the request stays valid.
+            if let newTitle { request.title = newTitle }
             try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
             let outputs = try await run(
                 id: id, request: request, options: options, tempDirectory: tempDirectory, tracker: tracker
@@ -127,6 +134,7 @@ public actor JobRunner {
         final.fraction = final.state == .done ? 1 : tracker.fraction
         final.bytes = tracker.bytes
         final.fallbackUsed = tracker.fallbackUsed ? true : nil
+        final.title = newTitle
         try? FileManager.default.removeItem(at: tempDirectory)
         jobs[id] = nil
         continuation.yield(final)
@@ -231,6 +239,33 @@ public actor JobRunner {
             try FileManager.default.moveItem(at: merged, to: destination)
             return [destination]
         }
+    }
+
+    /// The video's real title for a page source whose `request.title` is only the site name
+    /// (`PageTitle.isGeneric`): the first stdout line of `CommandBuilder.ytDlpTitle`, cleaned by
+    /// `PageTitle.clean`. Nil keeps the request's title: other sources and titles, no yt-dlp, any
+    /// failure, `titleLookupTimeout` reached, nothing left after cleaning or no change. A cancel throws.
+    private func lookUpTitle(id: String, request: JobRequest, tracker: ProgressTracker) async throws -> String? {
+        guard case let .page(url) = request.source, PageTitle.isGeneric(request.title, pageURL: url),
+              let ytDlp = binaries.url(for: .ytDlp) else { return nil }
+        tracker.begin(index: 0, message: "Reading the title")
+        let firstLine = FirstLine()
+        do {
+            try await runProcess(
+                .ytDlp, executable: ytDlp, arguments: CommandBuilder.ytDlpTitle(url: url), jobID: id,
+                timeout: Self.titleLookupTimeout
+            ) { stream, line in
+                if stream == .stdout { firstLine.offer(line) }
+            }
+        } catch {
+            // A cancel makes the lookup fail too: end the job instead of keeping the title.
+            try checkCancelled(id)
+            return nil
+        }
+        guard let line = firstLine.value, let title = PageTitle.clean(line), title != request.title else {
+            return nil
+        }
+        return title
     }
 
     /// Fails before anything is downloaded when `SizeEstimate` expects more than `maxBytes`. No
@@ -506,8 +541,9 @@ public actor JobRunner {
 
     /// Runs `executable` to completion, draining both pipes, and throws unless it exits with 0.
     /// `onLine` sees every stdout/stderr line (split on `\n` and `\r`) on a background thread.
+    /// With a `timeout`, the process is terminated once it passes (it then fails, without cancelling the job).
     private func runProcess(
-        _ tool: Tool, executable: URL, arguments: [String], jobID: String,
+        _ tool: Tool, executable: URL, arguments: [String], jobID: String, timeout: Duration? = nil,
         onLine: @escaping @Sendable (ProcessIO.Stream, String) -> Void
     ) async throws {
         try checkCancelled(jobID)
@@ -525,7 +561,15 @@ public actor JobRunner {
             throw JobError.missingDependency(tool.rawValue)
         }
         jobs[jobID]?.process = process
+        let deadline = timeout.map { timeout in
+            let pid = process.processIdentifier
+            return Task {
+                try await Task.sleep(for: timeout)
+                self.terminate(id: jobID, pid: pid)
+            }
+        }
         let outcome = await io.wait()
+        deadline?.cancel()
         jobs[jobID]?.process = nil
         try checkCancelled(jobID)
 
@@ -541,7 +585,8 @@ public actor JobRunner {
         throw JobError.processFailed("\(tool.rawValue) failed (\(how))" + (detail.isEmpty ? "" : ": \(detail)"))
     }
 
-    /// Second step of `cancel`: SIGTERM when the same process is still running.
+    /// Second step of `cancel` (and end of a `runProcess` timeout): SIGTERM when the same process
+    /// is still running.
     private func terminate(id: String, pid: Int32) {
         guard let process = jobs[id]?.process, process.processIdentifier == pid, process.isRunning else { return }
         process.terminate()
@@ -741,6 +786,22 @@ private final class ProgressTracker: @unchecked Sendable {
 }
 
 // MARK: - Process I/O
+
+/// The first non-blank line a process printed, shared with the pipe reader threads.
+private final class FirstLine: @unchecked Sendable {
+    private let lock = NSLock()
+    private var line: String?
+
+    var value: String? { lock.withLock { line } }
+
+    /// Keeps `line` unless a line was kept already or it is blank.
+    func offer(_ line: String) {
+        guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        lock.withLock {
+            if self.line == nil { self.line = line }
+        }
+    }
+}
 
 /// Drains a child's stdout and stderr concurrently (so neither pipe can fill up and block it),
 /// splits them into lines, keeps a bounded stderr tail and records HTTP 403/410 and yt-dlp

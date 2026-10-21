@@ -9,13 +9,13 @@ import SegDownCore
 
 @MainActor @Observable
 final class JobStore {
-    /// One job in the list. `JobStatus` has no title, so the store keeps it alongside, with the
-    /// metadata the window cards show.
+    /// One job in the list. `JobStatus` carries a title only when the runner replaced the tab's,
+    /// so the store keeps it alongside, with the metadata the window cards show.
     struct Item: Identifiable {
         enum SourceKind { case page, media }
 
         let id: String
-        let title: String
+        var title: String
         var status: JobStatus
         let segmentCount: Int
         /// Sum of the segments' `end - start`, in seconds.
@@ -206,6 +206,7 @@ final class JobStore {
     private func apply(_ status: JobStatus) {
         guard let index = items.firstIndex(where: { $0.id == status.id }) else { return }
         items[index].status = status
+        if let title = status.title { items[index].title = title }
         if let bytes = status.bytes { items[index].bytes = bytes }
         if status.fallbackUsed == true { items[index].fallbackUsed = true }
         guard status.state.isFinished, items[index].finishedAt == nil else { return }

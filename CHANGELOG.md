@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - HLS streams whose segments have a non-media file name (such as `file-0000.png`) now download instead of failing with "Invalid data found when processing input". This needs ffmpeg 7.1 or later.
+- Pages whose tab title is only the site name (such as Facebook reels) now get the video's real title from yt-dlp for the folder and file names.
 
 ## [0.2.1] - 2026-10-21
 
