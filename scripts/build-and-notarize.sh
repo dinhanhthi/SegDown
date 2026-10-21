@@ -17,7 +17,7 @@
 #
 # Prereqs (one-time - see docs/RELEASING.md):
 #   - "Developer ID Application" cert in the login Keychain
-#   - notarytool credential profile (default "echodiar-notary")
+#   - notarytool credential profile (default "apple-notary")
 #   - Sparkle EdDSA public key pasted into SUPublicEDKey (App/Info.plist)
 #   - Xcode 27+ selected - REQUIRED to compile the Icon Composer .icon icon (blank-icon guard below)
 #   - xcodegen (brew install xcodegen)
@@ -41,7 +41,7 @@ EXPORT_DIR="release/export"
 APP="$EXPORT_DIR/SegDown.app"
 APPEX="$APP/Contents/PlugIns/SegDownSafari.appex"
 MIN_MACOS="15.0"   # SegDown's hard minimum (project.yml) - guarded below
-PROFILE="${SEGDOWN_NOTARY_PROFILE:-echodiar-notary}"
+PROFILE="${SEGDOWN_NOTARY_PROFILE:-apple-notary}"
 SIGN_ID="Developer ID Application"
 TEAM_ID="86H6CNLN4C"
 # The only update feed the app may use. If the feed ever moves, change it here AND in

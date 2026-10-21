@@ -57,7 +57,7 @@ security find-identity -v -p codesigning | grep -q "Developer ID Application"
 G=$(find ~/Library/Developer/Xcode/DerivedData/SegDown-*/SourcePackages/artifacts -name generate_keys -type f 2>/dev/null | head -1); "$G" --account SegDown -p
 
 # 4. Notary profile
-xcrun notarytool history --keychain-profile "${SEGDOWN_NOTARY_PROFILE:-echodiar-notary}"
+xcrun notarytool history --keychain-profile "${SEGDOWN_NOTARY_PROFILE:-apple-notary}"
 
 # 5. GitHub CLI and Pages source
 gh auth status
@@ -98,7 +98,8 @@ gh repo view dinhanhthi/SegDown --json visibility --jq .visibility
   `build-and-notarize.sh` in `App/Info.plist` and in the built app). If `generate_keys` is not found,
   build once first (`xcodegen generate && xcodebuild -project SegDown.xcodeproj -scheme SegDown -configuration Debug build`),
   then rerun the check.
-- Check 4: the default profile `echodiar-notary` is shared with EchoDiar (same Apple team); any
+- Check 4: the default profile `apple-notary` is not tied to an app (it holds the Apple ID,
+  app-specific password and team `86H6CNLN4C`), so other apps of the same team share it; any
   existing profile of the same Apple team works. Shell state does not persist between agent
   commands, so an override must be on the same command line as every script call that uses it,
   e.g. `SEGDOWN_NOTARY_PROFILE=<name> scripts/ship.sh` (a separate `export` is lost). Check such

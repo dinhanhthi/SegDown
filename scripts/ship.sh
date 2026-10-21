@@ -12,7 +12,7 @@
 #
 # Prereqs (one-time - docs/RELEASING.md):
 #   - "Developer ID Application" cert in the login Keychain
-#   - notarytool credential profile (default "echodiar-notary")
+#   - notarytool credential profile (default "apple-notary")
 #   - Sparkle EdDSA key (generate_keys --account SegDown) + SUPublicEDKey in Info.plist
 #   - Xcode 27+ selected (required for the Icon Composer .icon) and xcodegen installed
 #   - gh CLI authenticated
