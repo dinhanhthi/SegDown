@@ -4,6 +4,7 @@
 import AppKit
 import SegDownCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The jobs as cards. Click selects one, ⌘-click toggles, ⇧-click extends from the last clicked card; ⌘A (the Edit
 /// menu's Select All) and ⌫ (remove from the list) work while the page has focus, which a click on a card gives it.
@@ -515,9 +516,12 @@ private struct DownloadCard: View {
         }
     }
 
-    /// Opens the outputs still on disk in their default app; a beep when none is left.
+    /// Opens the outputs still on disk in their default app; a beep when none is left. Only audio and video: the
+    /// extension comes from the downloaded page, and opening an app or a script would run it.
     private func play() {
-        let urls = existingOutputs
+        let urls = existingOutputs.filter {
+            UTType(filenameExtension: $0.pathExtension)?.conforms(to: .audiovisualContent) == true
+        }
         if urls.isEmpty {
             NSSound.beep()
         } else {
