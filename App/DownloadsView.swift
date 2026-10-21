@@ -339,8 +339,9 @@ struct DownloadsView: View {
     }
 }
 
-/// One job: title and state, then segment, duration, size, progress, then the buttons: Open Page, Reveal in Finder,
-/// Archive or Unarchive, and Remove, with the message and Cancel on the right. Selected adds an accent fill and stroke.
+/// One job: title and state, then segment, duration, size, progress, then the buttons: Play (once done), Open Page,
+/// Reveal in Finder, Archive or Unarchive, and Remove, with the message and Cancel on the right. Selected adds an accent
+/// fill and stroke.
 private struct DownloadCard: View {
     let item: JobStore.Item
     let store: JobStore
@@ -395,6 +396,15 @@ private struct DownloadCard: View {
                     .lineLimit(3)
             }
             HStack(spacing: 8) {
+                if status.state == .done, !status.outputs.isEmpty {
+                    Button(action: play) {
+                        Label("Play", systemImage: "play.fill")
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(RaisedButtonStyle(height: 26))
+                    .help("Play in the default app")
+                }
                 if let pageURL = item.pageURL {
                     Button { NSWorkspace.shared.open(pageURL) } label: {
                         Label("Open Page", systemImage: "safari")
@@ -497,12 +507,26 @@ private struct DownloadCard: View {
 
     /// The outputs still on disk; a beep when none is left.
     private func showInFinder() {
-        let urls = item.status.outputs.filter { FileManager.default.fileExists(atPath: $0) }.map { URL(filePath: $0) }
+        let urls = existingOutputs
         if urls.isEmpty {
             NSSound.beep()
         } else {
             NSWorkspace.shared.activateFileViewerSelecting(urls)
         }
+    }
+
+    /// Opens the outputs still on disk in their default app; a beep when none is left.
+    private func play() {
+        let urls = existingOutputs
+        if urls.isEmpty {
+            NSSound.beep()
+        } else {
+            urls.forEach { NSWorkspace.shared.open($0) }
+        }
+    }
+
+    private var existingOutputs: [URL] {
+        item.status.outputs.filter { FileManager.default.fileExists(atPath: $0) }.map { URL(filePath: $0) }
     }
 }
 
