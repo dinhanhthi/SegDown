@@ -33,6 +33,8 @@
 	<string>FKmP/qGwni8NNNA7jTURnq586qk5m8hf4gXUbcTJ5Es=</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
 	<key>SUVerifyUpdateBeforeExtraction</key>
 	<true/>
 </dict>

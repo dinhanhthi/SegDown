@@ -29,6 +29,7 @@ struct MainView: View {
     let store: JobStore
     let settings: SettingsStore
     let navigation: Navigation
+    let updater: Updater
 
     var body: some View {
         page(navigation.page)
@@ -55,8 +56,24 @@ struct MainView: View {
                         .accessibilityLabel("SegDown")
                 }
                 .hiddenSharedBackground()
-                // A flexible space pushes the tabs to the toolbar's trailing edge, the logo alone at the leading edge.
+                // A flexible space pushes the tabs (and the update button just before them) to the toolbar's trailing
+                // edge, the logo alone at the leading edge.
                 ToolbarItem { Spacer() }
+                if updater.installReady {
+                    ToolbarItem {
+                        Button { updater.installAndRelaunch() } label: {
+                            Image(systemName: "arrow.down")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                        .buttonStyle(RaisedButtonStyle(tint: .green))
+                        .help("Install the new version and relaunch")
+                        .accessibilityLabel("Install Update")
+                        .fixedSize()
+                    }
+                    // Its own green raised circle, not the glass capsule of the tabs next to it.
+                    .hiddenSharedBackground()
+                }
                 ToolbarItem {
                     CapsuleTabs(
                         selection: Binding(get: { navigation.page }, set: { navigation.page = $0 }),

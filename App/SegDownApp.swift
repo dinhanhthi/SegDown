@@ -64,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func showMainWindow() {
         if window == nil {
             let hosting = NSHostingController(
-                rootView: MainView(store: store, settings: settings, navigation: navigation))
+                rootView: MainView(store: store, settings: settings, navigation: navigation, updater: updater))
             // The window owns its size, not the SwiftUI content.
             hosting.sizingOptions = []
             // The SwiftUI toolbar (the page tabs) becomes the window's toolbar, in the traffic-light row.
@@ -119,9 +119,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         updater.checkForUpdates()
     }
 
-    /// "Check for Updates…" stays disabled while the updater is off (no `SUPublicEDKey` yet).
+    /// "Check for Updates…" stays disabled while the updater is off (no `SUPublicEDKey` yet) and takes
+    /// `Updater.menuTitle`.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        menuItem.action == #selector(checkForUpdates) ? updater.canCheck : true
+        guard menuItem.action == #selector(checkForUpdates) else { return true }
+        menuItem.title = updater.menuTitle
+        return updater.canCheck
     }
 
     /// Shows the Dock icon and the window, then activates the app on the next turn (the `.regular` switch from

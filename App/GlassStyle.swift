@@ -41,19 +41,21 @@ enum Palette {
 
 /// A raised button like the toolbar's: `height` tall (a circle for an icon, with no `horizontalPadding`). Liquid Glass
 /// on macOS 26; before, a capsule lit from above with a soft shadow, like `GlassCard(raised:)`. Lighter on hover,
-/// darker while pressed, dimmed when disabled.
+/// darker while pressed, dimmed when disabled. `tint` colors the glass (or the capsule's fill).
 struct RaisedButtonStyle: ButtonStyle {
     var height: CGFloat = 28
     var horizontalPadding: CGFloat = 0
+    var tint: Color?
 
     func makeBody(configuration: Configuration) -> some View {
-        Raised(configuration: configuration, height: height, horizontalPadding: horizontalPadding)
+        Raised(configuration: configuration, height: height, horizontalPadding: horizontalPadding, tint: tint)
     }
 
     private struct Raised: View {
         let configuration: ButtonStyleConfiguration
         let height: CGFloat
         let horizontalPadding: CGFloat
+        let tint: Color?
         @State private var hovered = false
         @Environment(\.isEnabled) private var isEnabled
 
@@ -63,7 +65,7 @@ struct RaisedButtonStyle: ButtonStyle {
                 .foregroundStyle(.primary)
                 .padding(.horizontal, horizontalPadding)
                 .frame(minWidth: height, minHeight: height, maxHeight: height)
-                .modifier(RaisedCapsule())
+                .modifier(RaisedCapsule(tint: tint))
                 .overlay(Capsule().fill(fill).allowsHitTesting(false))
                 .contentShape(Capsule())
                 .opacity(isEnabled ? 1 : 0.45)
@@ -73,13 +75,15 @@ struct RaisedButtonStyle: ButtonStyle {
     }
 
     private struct RaisedCapsule: ViewModifier {
+        let tint: Color?
+
         func body(content: Content) -> some View {
             if #available(macOS 26, *), PlatformFeatures.liquidGlass {
-                content.glassEffect(.regular, in: Capsule())
+                content.glassEffect(.regular.tint(tint), in: Capsule())
             } else {
                 content
                     .background {
-                        Capsule().fill(Palette.inputSurface)
+                        Capsule().fill(tint ?? Palette.inputSurface)
                             .overlay(Capsule().fill(LinearGradient(
                                 colors: [.white.opacity(0.08), .clear], startPoint: .top, endPoint: .center)))
                             .shadow(color: .black.opacity(0.35), radius: 3, y: 1.5)

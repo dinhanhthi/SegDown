@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Archive a download from its card to move it out of the list; the Archived button next to Remove All shows the archived downloads.
 - Search downloads by name from the header: the search bar spans the header and finds titles even with missing letters or accents.
+- New versions download in the background; a green arrow button then shows left of the tabs and installs the update and relaunches in one click.
 
 ### Changed
 

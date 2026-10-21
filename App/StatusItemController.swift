@@ -56,10 +56,10 @@ final class StatusItemController: NSObject, NSMenuItemValidation {
     }()
 
     /// The menu auto-enables its items: "Check for Updates…" is disabled while the updater is off (no
-    /// `SUPublicEDKey` yet) and reads "Update Available…" once a background check found one.
+    /// `SUPublicEDKey` yet) and takes `Updater.menuTitle` (e.g. "Update Available…" once a background check found one).
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard menuItem.action == #selector(checkForUpdates) else { return true }
-        menuItem.title = updater.updateAvailable ? "Update Available…" : "Check for Updates…"
+        menuItem.title = updater.menuTitle
         return updater.canCheck
     }
 
