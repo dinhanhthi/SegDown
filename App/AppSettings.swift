@@ -7,7 +7,8 @@ import os
 import SegDownCore
 
 struct AppSettings: Codable, Equatable, Sendable {
-    /// Absolute path of the folder that receives one folder per job title.
+    /// Absolute path of the folder that receives one folder per job title (the files themselves
+    /// with `flattenOutput`).
     var outputFolder = AppSettings.home + "/Downloads/SegDown"
     var mode: OutputMode = .merged
     /// Applies to every job; the extension no longer chooses it.
@@ -22,6 +23,10 @@ struct AppSettings: Codable, Equatable, Sendable {
     var incognitoDefault = false
     /// Re-encode each finished job's files to make them smaller.
     var compress = false
+    /// Save every job's files straight into the output folder, without a folder per title.
+    var flattenOutput = false
+    /// Name the files and folders in snake_case.
+    var snakeCaseNames = false
     /// The extension shows a Full clip button in the overlay.
     var fullClipButton = true
     /// The extension shows a SegDown button on a video player under the pointer.
@@ -48,13 +53,15 @@ struct AppSettings: Codable, Equatable, Sendable {
             baseDirectory: URL(filePath: folder, directoryHint: .isDirectory).standardizedFileURL,
             maxBytes: maxBytes,
             autoFallback: autoFallback,
-            compress: compress
+            compress: compress,
+            flatten: flattenOutput,
+            snakeCaseNames: snakeCaseNames
         )
     }
 
     private enum CodingKeys: String, CodingKey {
         case outputFolder, mode, precision, autoFallback, maxBytes, maxDuration, incognitoDefault, compress
-        case fullClipButton, playerButton
+        case flattenOutput, snakeCaseNames, fullClipButton, playerButton
     }
 }
 
@@ -70,6 +77,8 @@ extension AppSettings {
         maxDuration = try c.decodeIfPresent(Double.self, forKey: .maxDuration) ?? defaults.maxDuration
         incognitoDefault = try c.decodeIfPresent(Bool.self, forKey: .incognitoDefault) ?? defaults.incognitoDefault
         compress = try c.decodeIfPresent(Bool.self, forKey: .compress) ?? defaults.compress
+        flattenOutput = try c.decodeIfPresent(Bool.self, forKey: .flattenOutput) ?? defaults.flattenOutput
+        snakeCaseNames = try c.decodeIfPresent(Bool.self, forKey: .snakeCaseNames) ?? defaults.snakeCaseNames
         fullClipButton = try c.decodeIfPresent(Bool.self, forKey: .fullClipButton) ?? defaults.fullClipButton
         playerButton = try c.decodeIfPresent(Bool.self, forKey: .playerButton) ?? defaults.playerButton
     }

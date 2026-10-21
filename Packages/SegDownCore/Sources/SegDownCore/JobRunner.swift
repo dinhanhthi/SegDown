@@ -205,11 +205,14 @@ public actor JobRunner {
         }
         try checkCancelled(id)
 
-        let outputDirectory = try PathSanitizer.outputDirectory(
-            title: request.title, base: options.baseDirectory ?? baseDirectory
+        let snakeCase = options.snakeCaseNames
+        let titleDirectory = try PathSanitizer.outputDirectory(
+            title: request.title, base: options.baseDirectory ?? baseDirectory, snakeCase: snakeCase
         )
-        // Use the component outputDirectory produced, so a fallback name has one timestamp.
-        let title = outputDirectory.lastPathComponent
+        // Use the component titleDirectory produced, so a fallback name has one timestamp.
+        let title = titleDirectory.lastPathComponent
+        // Flattened: the files go straight into the base directory, titleDirectory's parent.
+        let outputDirectory = options.flatten ? titleDirectory.deletingLastPathComponent() : titleDirectory
         switch request.mode {
         case .separate:
             var files = parts
@@ -221,7 +224,9 @@ public actor JobRunner {
                 }
                 tracker.setBytes(Self.totalSize(of: files))
             }
-            return try moveParts(files, segments: request.segments, title: title, to: outputDirectory)
+            return try moveParts(
+                files, segments: request.segments, title: title, snakeCase: snakeCase, to: outputDirectory
+            )
         case .merged:
             tracker.begin(index: request.segments.count - 1, message: "Merging")
             var merged = try await merge(id: id, parts: parts, ffmpeg: ffmpeg, tempDirectory: workDirectory)
@@ -234,7 +239,8 @@ public actor JobRunner {
             try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
             // No await between picking the name and moving: the actor keeps concurrent jobs apart.
             let destination = PathSanitizer.uniqueFileURL(
-                in: outputDirectory, fileName: PathSanitizer.mergedFileName(title: title)
+                in: outputDirectory, fileName: PathSanitizer.mergedFileName(title: title, snakeCase: snakeCase),
+                snakeCase: snakeCase
             )
             try FileManager.default.moveItem(at: merged, to: destination)
             return [destination]
@@ -501,18 +507,23 @@ public actor JobRunner {
         }
     }
 
-    /// Moves each part to `<output dir>/<title> - NN [start-end].<ext>` (ext of the part, mp4 normally).
-    private func moveParts(_ parts: [URL], segments: [Segment], title: String, to directory: URL) throws -> [URL] {
+    /// Moves each part to `<output dir>/<title> - NN [start-end].<ext>` (ext of the part, mp4 normally),
+    /// or its `snakeCase` form.
+    private func moveParts(
+        _ parts: [URL], segments: [Segment], title: String, snakeCase: Bool, to directory: URL
+    ) throws -> [URL] {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var outputs: [URL] = []
         for (index, part) in parts.enumerated() {
-            var fileName = PathSanitizer.segmentFileName(title: title, index: index + 1, segment: segments[index])
+            var fileName = PathSanitizer.segmentFileName(
+                title: title, index: index + 1, segment: segments[index], snakeCase: snakeCase
+            )
             if part.pathExtension.lowercased() != "mp4" {
                 fileName = ((fileName as NSString).deletingPathExtension as NSString)
                     .appendingPathExtension(part.pathExtension) ?? fileName
             }
             // No await between picking the name and moving: the actor keeps concurrent jobs apart.
-            let destination = PathSanitizer.uniqueFileURL(in: directory, fileName: fileName)
+            let destination = PathSanitizer.uniqueFileURL(in: directory, fileName: fileName, snakeCase: snakeCase)
             try FileManager.default.moveItem(at: part, to: destination)
             outputs.append(destination)
         }
@@ -662,12 +673,21 @@ public struct JobOptions: Sendable {
     public var autoFallback: Bool
     /// Re-encode the finished files to make them smaller (`CommandBuilder.ffmpegCompress`).
     public var compress: Bool
+    /// Write the files straight into the base directory, without a folder per title.
+    public var flatten: Bool
+    /// Name the files (and the title folder) in snake_case (`PathSanitizer.snakeCase`).
+    public var snakeCaseNames: Bool
 
-    public init(baseDirectory: URL? = nil, maxBytes: Int64? = nil, autoFallback: Bool = true, compress: Bool = false) {
+    public init(
+        baseDirectory: URL? = nil, maxBytes: Int64? = nil, autoFallback: Bool = true, compress: Bool = false,
+        flatten: Bool = false, snakeCaseNames: Bool = false
+    ) {
         self.baseDirectory = baseDirectory
         self.maxBytes = maxBytes
         self.autoFallback = autoFallback
         self.compress = compress
+        self.flatten = flatten
+        self.snakeCaseNames = snakeCaseNames
     }
 }
 

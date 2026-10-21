@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A Full clip button on the overlay downloads the whole video as one file and leaves the marked ranges as they are. It is disabled for live video and for video longer than the Max total duration. Turn it off in Settings › Browser.
 - A SegDown icon shows at the top-left of a video while the pointer is over it (not on ads, small or live videos) and opens the overlay for that video. Turn it off in Settings › Browser; a change reaches the browser the next time the overlay opens.
+- Settings › Output › Flatten output folder saves every file straight into the output folder instead of one folder per video. Off by default.
+- Settings › Output › Snake case names names files and folders like `my_video_title_merged.mp4`, with accents removed (`Học` → `hoc`). Off by default.
 
 ### Fixed
 

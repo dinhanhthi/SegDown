@@ -70,7 +70,7 @@ After each update, replace the `SegDown-extension/` folder with the new release'
 4. Click Download. The ▾ menu picks separate or merged files, incognito, quality, source or video. Full clip downloads the whole video instead and leaves the ranges as they are (not for live video, or video longer than the Max total duration).
 5. Follow the progress on the overlay or in the app's Downloads page.
 
-Files land in `~/Downloads/SegDown/<page title>/` (change it in Settings).
+Files land in `~/Downloads/SegDown/<page title>/` (change it in Settings). Settings › Output can also save every file straight into that folder (Flatten output folder) and name files in snake_case (`my_video_title_merged.mp4`).
 
 Settings › Browser turns off the Full clip button and the icon on videos. A change reaches the browser the next time you open the overlay.
 

@@ -50,6 +50,10 @@ struct SettingsView: View {
                     Text("Precise re-encodes for exact cuts; fast copies streams and cuts at keyframes.")
                 }
                 .pickerStyle(.segmented)
+                switchRow(isOn: setting(\.flattenOutput), title: "Flatten output folder",
+                          hint: "Saves every file straight into the output folder, without a folder per video.")
+                switchRow(isOn: setting(\.snakeCaseNames), title: "Snake case names",
+                          hint: "Names files and folders like my_video_title_merged.mp4.")
                 switchRow(isOn: setting(\.autoFallback), title: "Auto fallback",
                           hint: "If yt-dlp fails, download the captured media instead.")
                 switchRow(isOn: setting(\.compress), title: "Compress after download",

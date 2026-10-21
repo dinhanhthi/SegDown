@@ -15,7 +15,8 @@ public enum PathSanitizer {
     }
 
     /// Returns `title` as a single path component, or `segdown-<yyyy-MM-dd-HHmmss>` when nothing is left.
-    public static func sanitize(_ title: String, now: Date = Date()) -> String {
+    /// With `snakeCase`, both go through `snakeCase(_:)`.
+    public static func sanitize(_ title: String, now: Date = Date(), snakeCase: Bool = false) -> String {
         var name = String(String.UnicodeScalarView(title.unicodeScalars.filter { scalar in
             scalar != "/" && scalar != ":" && scalar != "\\" && !CharacterSet.controlCharacters.contains(scalar)
         }))
@@ -23,14 +24,38 @@ public enum PathSanitizer {
             name = name.replacingOccurrences(of: "..", with: ".")
         }
         name = trimmed(name)
+        if snakeCase {
+            name = Self.snakeCase(name)
+        }
         if name.count > maxTitleLength {
             name = String(name.prefix(maxTitleLength))
         }
         while name.utf8.count > maxTitleBytes {
             name.removeLast()
         }
-        name = trimmed(name)
-        return name.isEmpty ? fallbackName(now: now) : name
+        // Again with `snakeCase`, so the cut cannot leave a trailing `_`.
+        name = snakeCase ? Self.snakeCase(name) : trimmed(name)
+        guard name.isEmpty else { return name }
+        return snakeCase ? Self.snakeCase(fallbackName(now: now)) : fallbackName(now: now)
+    }
+
+    /// `text` in snake_case: folded to ASCII (`Học Đà` → `Hoc Da`), lowercased, each run of other
+    /// characters (spaces, punctuation, CJK, emoji…) turned into one `_`, no `_` at either end.
+    /// Empty when no ASCII letter or digit is left.
+    public static func snakeCase(_ text: String) -> String {
+        let ascii = text.applyingTransform(StringTransform("Latin-ASCII"), reverse: false) ?? text
+        var words: [String] = []
+        var word = ""
+        for scalar in ascii.lowercased().unicodeScalars {
+            if scalar.isASCII, CharacterSet.alphanumerics.contains(scalar) {
+                word.unicodeScalars.append(scalar)
+            } else if !word.isEmpty {
+                words.append(word)
+                word = ""
+            }
+        }
+        if !word.isEmpty { words.append(word) }
+        return words.joined(separator: "_")
     }
 
     /// `segdown-<yyyy-MM-dd-HHmmss>` in the local time zone, independent of the user's locale.
@@ -47,11 +72,12 @@ public enum PathSanitizer {
     public static func outputDirectory(
         title: String,
         base: URL = PathSanitizer.defaultBaseDirectory,
-        now: Date = Date()
+        now: Date = Date(),
+        snakeCase: Bool = false
     ) throws -> URL {
         let standardBase = base.standardizedFileURL
         let directory = standardBase
-            .appendingPathComponent(sanitize(title, now: now), isDirectory: true)
+            .appendingPathComponent(sanitize(title, now: now, snakeCase: snakeCase), isDirectory: true)
             .standardizedFileURL
         guard directory.deletingLastPathComponent().standardizedFileURL.path == standardBase.path else {
             throw JobError.invalid("Output directory escapes \(standardBase.path)")
@@ -59,26 +85,30 @@ public enum PathSanitizer {
         return directory
     }
 
-    /// `<title> - 01 [0h01m05s-0h01m30s].mp4`. `index` is 1-based; `title` must already be sanitized.
-    public static func segmentFileName(title: String, index: Int, segment: Segment) -> String {
+    /// `<title> - 01 [0h01m05s-0h01m30s].mp4`, or `<title>_01_0h01m05s_0h01m30s.mp4` with `snakeCase`.
+    /// `index` is 1-based; `title` must already be sanitized.
+    public static func segmentFileName(title: String, index: Int, segment: Segment, snakeCase: Bool = false) -> String {
         let number = index < 10 ? "0\(index)" : "\(index)"
-        return "\(title) - \(number) [\(timestamp(segment.start))-\(timestamp(segment.end))].mp4"
+        let start = timestamp(segment.start), end = timestamp(segment.end)
+        return snakeCase ? "\(title)_\(number)_\(start)_\(end).mp4" : "\(title) - \(number) [\(start)-\(end)].mp4"
     }
 
-    /// `<title> - merged.mp4`. `title` must already be sanitized.
-    public static func mergedFileName(title: String) -> String {
-        "\(title) - merged.mp4"
+    /// `<title> - merged.mp4`, or `<title>_merged.mp4` with `snakeCase`. `title` must already be sanitized.
+    public static func mergedFileName(title: String, snakeCase: Bool = false) -> String {
+        snakeCase ? "\(title)_merged.mp4" : "\(title) - merged.mp4"
     }
 
-    /// `directory/fileName`, or `directory/<name> (2).<ext>`, ` (3)`… when that file already exists.
-    public static func uniqueFileURL(in directory: URL, fileName: String) -> URL {
+    /// `directory/fileName`, or `directory/<name> (2).<ext>`, ` (3)`… (`_2`, `_3`… with `snakeCase`)
+    /// when that file already exists.
+    public static func uniqueFileURL(in directory: URL, fileName: String, snakeCase: Bool = false) -> URL {
         let fileManager = FileManager.default
         var candidate = directory.appendingPathComponent(fileName, isDirectory: false)
         let stem = (fileName as NSString).deletingPathExtension
         let ext = (fileName as NSString).pathExtension
         var counter = 2
         while fileManager.fileExists(atPath: candidate.path) {
-            let numbered = ext.isEmpty ? "\(stem) (\(counter))" : "\(stem) (\(counter)).\(ext)"
+            let suffix = snakeCase ? "_\(counter)" : " (\(counter))"
+            let numbered = ext.isEmpty ? stem + suffix : "\(stem)\(suffix).\(ext)"
             candidate = directory.appendingPathComponent(numbered, isDirectory: false)
             counter += 1
         }
