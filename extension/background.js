@@ -361,7 +361,9 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   getState   any frame -> {ok, state, ui}, plus `segments` (segs:<tabId>, []
 //              if none) only in the selected video's frame. ui: the app's
 //              switches {fullClipButton, playerButton} from storage.local `ui`
-//              (both true when nothing is stored). Agents send it once at load
+//              (both true when nothing is stored; then it also pings the app,
+//              not awaited, so the pong's `ui` broadcast follows once the app
+//              is reachable; onInstalled pings too). Agents send it once at load
 //              (and after a back/forward cache restore) for state.panelOpen and
 //              ui (a frame that loads after the overlay opened missed the
 //              `state` broadcast).
@@ -1135,6 +1137,9 @@ async function onGetState(tabId, frameId) {
   }));
   const reply = { ok: true, state: hub, ui: await readUI() };
   if (hub.selected && hub.selected.frameId === frameId) reply.segments = segments;
+  // No pong yet (e.g. the app's integration was installed after this extension):
+  // ask the app in the background; its pong broadcasts the switches.
+  if (!(await hasStoredUI())) fetchDeps().catch(hubWarn);
   return reply;
 }
 
@@ -1476,11 +1481,18 @@ async function readUI() {
     : { fullClipButton: true, playerButton: true };
 }
 
-// After a pong: saves the switches when they changed and sends them to every tab.
+// True once a pong has stored the switches (never cleared).
+async function hasStoredUI() {
+  return (await chrome.storage.local.get(UI_KEY))[UI_KEY] !== undefined;
+}
+
+// After a pong: saves the switches when they changed (or were never stored) and
+// sends them to every tab.
 async function updateUI(settings) {
   const ui = { fullClipButton: settings.fullClipButton, playerButton: settings.playerButton };
+  const stored = await hasStoredUI();
   const prev = await readUI();
-  if (prev.fullClipButton === ui.fullClipButton && prev.playerButton === ui.playerButton) return;
+  if (stored && prev.fullClipButton === ui.fullClipButton && prev.playerButton === ui.playerButton) return;
   await chrome.storage.local.set({ [UI_KEY]: ui });
   for (const tab of await chrome.tabs.query({})) {
     if (Number.isInteger(tab.id) && tab.id >= 0) notifyAll(tab.id, { type: "ui", ui });
@@ -2134,6 +2146,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   const from = { tabTitle: sender.tab.title, tabIncognito: sender.tab.incognito === true };
   return replyAsync(hubDispatch(tabId, sender.frameId, msg, from), sendResponse);
+});
+
+// The app's settings as soon as the extension is installed or updated, not only
+// when the overlay first opens. Not on a browser update ("chrome_update"): the
+// ping launches the app.
+chrome.runtime.onInstalled.addListener(({ reason }) => {
+  if (reason === "install" || reason === "update") fetchDeps().catch(hubWarn);
 });
 
 // A subframe that navigates takes its videos with it (top-frame navigation clears
