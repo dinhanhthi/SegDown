@@ -48,15 +48,11 @@ struct MainView: View {
             .modifier(HardTopScrollEdge())
             .toolbar {
                 ToolbarItem(placement: .navigation) {
-                    HStack(spacing: 6) {
-                        Image(nsImage: AboutView.logo)
-                            .resizable()
-                            .interpolation(.high)
-                            .frame(width: 20, height: 20)
-                            .accessibilityHidden(true)
-                        Text("SegDown").font(.headline)
-                    }
-                    .padding(.horizontal, 4)
+                    Image(nsImage: AboutView.logo)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 44, height: 44)
+                        .accessibilityLabel("SegDown")
                 }
                 .hiddenSharedBackground()
                 ToolbarItem(placement: .navigation) {

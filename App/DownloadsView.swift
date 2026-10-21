@@ -83,8 +83,21 @@ struct DownloadsView: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            Text(selection.isEmpty ? "Downloads" : "\(selection.count) selected")
-                .font(.headline)
+            Text("Downloads")
+                .font(.title2.weight(.semibold))
+            Text(verbatim: String(store.items.count))
+                .font(.callout.weight(.semibold))
+                .monospacedDigit()
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Palette.inputSurface))
+                .accessibilityLabel(store.items.count == 1 ? "1 download" : "\(store.items.count) downloads")
+            if !selection.isEmpty {
+                Text("\(selection.count) selected")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
             Spacer()
             Menu {
                 Button("Remove from List", action: removeFromList)
@@ -116,9 +129,9 @@ struct DownloadsView: View {
             .fixedSize()
             .help("Remove every download from the list, or also move their files to the Trash")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .modifier(GlassCard(cornerRadius: 20, raised: true))
+        // Straight on the window glass, not a card, so it does not read as one of the downloads.
+        .padding(.horizontal, 4)
+        .padding(.bottom, 4)
     }
 
     private var failuresShown: Binding<Bool> {
