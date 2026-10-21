@@ -64,13 +64,15 @@ struct WireCompatibilityTests {
                 incognitoDefault: true,
                 maxDuration: 600,
                 fullClipButton: false,
-                playerButton: false
+                playerButton: false,
+                preferredHeight: 1080
             )
         )
 
         let line = try IPC.encodeLine(pong)
 
         #expect(String(decoding: line, as: UTF8.self).contains(#""protocol":\#(IPC.protocolVersion)"#))
+        #expect(String(decoding: line, as: UTF8.self).contains(#""preferredHeight":1080"#))
         #expect(try IPC.decodeLine(IPCResponse.self, from: line) == pong)
     }
 
@@ -87,6 +89,7 @@ struct WireCompatibilityTests {
         #expect(decoded.fullClipButton)
         #expect(decoded.playerButton)
         #expect(decoded.maxDuration == nil)
+        #expect(decoded.preferredHeight == nil)
     }
 
     @Test func formatsRoundTripsWithItsType() throws {

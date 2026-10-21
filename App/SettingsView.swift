@@ -106,6 +106,18 @@ struct SettingsView: View {
                           hint: "Adds a Full clip button to the overlay that downloads the whole video.")
                 switchRow(isOn: setting(\.playerButton), title: "Button on video players",
                           hint: "Shows a SegDown button on a video while the pointer is over it.")
+                switchRow(isOn: heightPreferred, title: "Preferred resolution",
+                          hint: "Downloads the tallest quality up to this one, unless you pick another in the overlay.")
+                if settings.settings.preferredHeight != nil {
+                    LabeledContent("Resolution") {
+                        Picker("Resolution", selection: preferredHeight) {
+                            ForEach(AppSettings.preferredHeights, id: \.self) { Text(Self.heightTitle($0)).tag($0) }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                    }
+                }
             }
             Section {
                 LabeledContent {
@@ -205,6 +217,30 @@ struct SettingsView: View {
             if Self.seconds(durationText) == nil { durationText = "1:00:00" }
             settings.update { $0.maxDuration = Self.seconds(durationText) }
         })
+    }
+
+    // MARK: - Browser
+
+    /// On: 1080p. Off: the best quality.
+    private var heightPreferred: Binding<Bool> {
+        Binding(get: { settings.settings.preferredHeight != nil }, set: { on in
+            settings.update { $0.preferredHeight = on ? 1080 : nil }
+        })
+    }
+
+    private var preferredHeight: Binding<Int> {
+        Binding(get: { settings.settings.preferredHeight ?? 1080 }, set: { height in
+            settings.update { $0.preferredHeight = height }
+        })
+    }
+
+    /// 1440 -> "2K (1440p)", 2160 -> "4K (2160p)", else "720p".
+    static func heightTitle(_ height: Int) -> String {
+        switch height {
+        case 1440: "2K (1440p)"
+        case 2160: "4K (2160p)"
+        default: "\(height)p"
+        }
     }
 
     private func loadFields() {

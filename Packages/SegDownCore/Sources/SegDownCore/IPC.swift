@@ -21,7 +21,8 @@
 //      "protocol": 3,                                                    // absent → 1
 //      "settings": {"mode": "separate", "incognitoDefault": false,       // optional
 //                   "maxDuration": 600,                                  // maxDuration optional
-//                   "fullClipButton": true, "playerButton": true}}       // absent → true
+//                   "fullClipButton": true, "playerButton": true,        // absent → true
+//                   "preferredHeight": 720}}                             // optional; absent → Best
 //     {"type": "enqueued", "id": "…"}
 //     {"type": "status", "jobs": [{…JobStatus…}]}
 //     {"type": "cancelled", "id": "…"}
@@ -86,30 +87,35 @@ extension IPCRequest: Codable {
 /// The app settings an extension needs, sent in `pong` (protocol 2). `maxDuration` is the max total
 /// duration of a job's segments in seconds; `nil` means no limit. `fullClipButton` and
 /// `playerButton` turn on the overlay's Full clip button and the button on video players; an older
-/// app's missing keys decode to `true`.
+/// app's missing keys decode to `true`. `preferredHeight` is the height the extension's quality
+/// picker takes by default (the tallest quality up to it); `nil`, or absent from an older app, means
+/// the best quality.
 public struct ClientSettings: Codable, Sendable, Hashable {
     public var mode: OutputMode
     public var incognitoDefault: Bool
     public var maxDuration: Double?
     public var fullClipButton: Bool
     public var playerButton: Bool
+    public var preferredHeight: Int?
 
     public init(
         mode: OutputMode,
         incognitoDefault: Bool,
         maxDuration: Double? = nil,
         fullClipButton: Bool = true,
-        playerButton: Bool = true
+        playerButton: Bool = true,
+        preferredHeight: Int? = nil
     ) {
         self.mode = mode
         self.incognitoDefault = incognitoDefault
         self.maxDuration = maxDuration
         self.fullClipButton = fullClipButton
         self.playerButton = playerButton
+        self.preferredHeight = preferredHeight
     }
 
     private enum CodingKeys: String, CodingKey {
-        case mode, incognitoDefault, maxDuration, fullClipButton, playerButton
+        case mode, incognitoDefault, maxDuration, fullClipButton, playerButton, preferredHeight
     }
 
     public init(from decoder: any Decoder) throws {
@@ -119,6 +125,7 @@ public struct ClientSettings: Codable, Sendable, Hashable {
         maxDuration = try c.decodeIfPresent(Double.self, forKey: .maxDuration)
         fullClipButton = try c.decodeIfPresent(Bool.self, forKey: .fullClipButton) ?? true
         playerButton = try c.decodeIfPresent(Bool.self, forKey: .playerButton) ?? true
+        preferredHeight = try c.decodeIfPresent(Int.self, forKey: .preferredHeight)
     }
 }
 
@@ -247,7 +254,8 @@ public enum IPC {
     /// The wire protocol version the app sends in `pong`. 2 adds the optional `JobRequest` keys
     /// (`incognito`, `fallback`, `mediaDuration`), `JobStatus.bytes`, `JobStatus.fallbackUsed` and
     /// `pong.settings`. The optional `JobRequest.pageURL` came later without a bump: older apps ignore it.
-    /// 3 adds `JobRequest.maxHeight` and the page probe's `formats` reply.
+    /// 3 adds `JobRequest.maxHeight` and the page probe's `formats` reply. The optional
+    /// `ClientSettings.preferredHeight` came later without a bump: older extensions ignore it.
     public static let protocolVersion = 3
     /// Same cap as a native messaging frame.
     public static let maxLineBytes = 1024 * 1024

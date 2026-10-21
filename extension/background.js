@@ -497,16 +497,19 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //       the native call fails, else the app's message);
 //     variants [{width, height (null when the playlist has no RESOLUTION),
 //       bandwidth}], highest bandwidth first (ties: playlist order, so index 0
-//       is the variant the app picks by default), and variant: the chosen index.
+//       is the variant the app picks by default), and variant: the index the job
+//       takes: the user's choice, else the preferred one (settings.preferredHeight:
+//       the tallest variant with a height <= it, else the shortest; variants
+//       without a height are skipped), else 0.
 //   chooseVariant {index} [selected]: index into the current source's variants.
 //              -> {ok, source: summary}, or {ok: false, error: "unknown-variant"}
-//              when out of range. Index 0 removes the choice. The choice
-//              (var:<tabId>) holds for that source and selected video until
-//              either changes or the page changes.
-//   resolveSource adds variantURL only for a non-default choice: without it the
+//              when out of range. Index 0 is a choice too (it overrides the
+//              preferred one). The choice (var:<tabId>) holds for that source and
+//              selected video until either changes or the page changes.
+//   resolveSource adds variantURL only when that index is not 0: without it the
 //   app fetches the master itself and also takes the variant's separate audio
-//   rendition; with it the app uses that playlist as is (a separate audio
-//   rendition is not added). audioURL is never set.
+//   rendition; with it the app uses that playlist and takes its audio rendition
+//   from the master. audioURL is never set.
 //
 //   Page resolution picker. Only when the pong's protocol >= 3 (an older app
 //   answers a page probe with variants [] and ignores maxHeight) and the job
@@ -525,9 +528,11 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   pending or failed), `view`'s source adds (numbers only, never URLs):
 //     heightProbe {state: "pending"} (not probed yet), else heights [integer]
 //       (the cached list, [] after a failure) and height: the chosen index, 0 =
-//       Best (no maxHeight), i = heights[i - 1].
-//   chooseHeight {index} [selected]: 0 removes the choice, i in
-//              1...heights.length picks heights[i - 1]. -> {ok}, or {ok: false,
+//       Best (no maxHeight), i = heights[i - 1]; without a choice, the preferred
+//       one (settings.preferredHeight: the tallest height <= it, else the
+//       shortest), else 0.
+//   chooseHeight {index} [selected]: 0 picks Best (it overrides the preferred
+//              height), i in 1...heights.length picks heights[i - 1]. -> {ok}, or {ok: false,
 //              error: "unknown-height"} when out of range or the job would not
 //              run yt-dlp. The choice (res:<tabId>) holds for that page URL and
 //              selected video, while the height is in the cached list, until
@@ -539,7 +544,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "ping"}) ->
 //              {type: "pong", version, missing: [string], protocol?, settings?:
 //              {mode, incognitoDefault, maxDuration?, fullClipButton?,
-//              playerButton?}}, at most once per DEPS_TTL_MS (10 s; one cached
+//              playerButton?, preferredHeight?}}, at most once per DEPS_TTL_MS (10 s; one cached
 //              answer for every tab, also for the settings; concurrent callers
 //              share one request). protocol: an integer >= 1, absent -> 1 (2:
 //              incognito and fallback, 3: maxHeight and the page probe).
@@ -547,7 +552,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              (else "separate"), incognitoDefault (true only when true, so an
 //              app without settings gives false), maxDuration (seconds, finite >
 //              0, else no limit), fullClipButton and playerButton (false only
-//              when false, so absent -> true). Every pong sets the persistence
+//              when false, so absent -> true), preferredHeight (an integer
+//              1...8640, else null = Best). Every pong sets the persistence
 //              gate to settings.incognitoDefault (Segment persistence) and keeps
 //              storage.local `ui` equal to the two switches (written, and sent
 //              as `ui` to "all" in every tab (below), only when they differ
@@ -584,7 +590,10 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              https://<top host>/watch/?v=<videoId> instead (page source too).
 //              maxHeight: protocol >= 3 and a page source only (never for the
 //              fallback): the chooseHeight choice that still applies to the
-//              job's page URL, else omitted (Best).
+//              job's page URL (omitted for Best); without one,
+//              settings.preferredHeight unless the user chose an HLS variant
+//              (yt-dlp takes the tallest format up to it); else omitted (Best).
+//              The fallback's variantURL follows the preferred variant too.
 //              full: true ignores the marked segments (segs:<tabId> is neither
 //              read nor written) and sends one segment {start: 0, end: that
 //              duration}; without one -> {ok: false, error: "no-duration"} (live
@@ -768,7 +777,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   var:<tabId>  -> {source, url, selected}   (chooseVariant: the master's URL, the
 //                    chosen variant's URL, the selection; never sent to content scripts)
 //   res:<tabId>  -> {page, height, selected}   (chooseHeight: the page URL, the chosen
-//                    height, the selection; never sent to content scripts)
+//                    height (0 = Best), the selection; never sent to content scripts)
 //   jobs:<tabId> -> [{jobId, title?, ts}]   (4.3 enqueued jobs, oldest first, at most
 //                    MAX_JOBS_PER_TAB; title as sent to the app, absent for incognito jobs)
 //   jobt         -> {<jobId>: {title, ts, page?: {key, ranges}, applied?}}   (4.4:
@@ -1479,14 +1488,15 @@ function correlate(tabId) {
 // For the job builder (4.3): {source, frameId, via, pageURL, duration} with the
 // full Source (captured headers), or null. Service-worker only; never send it to
 // a content script. Reads the probe cache only (no native call); variantURL only
-// for a non-default choice.
+// for a variant other than the default one (variantChosen: the user chose it).
 async function resolveSource(tabId) {
   const r = await correlate(tabId);
   if (!r) return null;
   if (isHLS(r)) {
     const { list, choice } = await readVariants(tabId, r.source.url);
-    const i = choice ? list.findIndex((v) => v.url === choice.url) : -1;
+    const i = variantIndex(list, choice);
     if (i > 0) r.source.variantURL = list[i].url;
+    r.variantChosen = Boolean(choice);
   }
   return r;
 }
@@ -1498,7 +1508,7 @@ async function resolveSource(tabId) {
 async function planSource(tabId, protocol) {
   const r = await resolveSource(tabId);
   if (!r) return null;
-  const pinned = r.via === "user" || Boolean(r.source.variantURL);
+  const pinned = r.via === "user" || Boolean(r.variantChosen && r.source.variantURL);
   if (r.source.type === "media" && !pinned && protocol >= 2 && r.pageURL) {
     return { r, source: { type: "page", url: r.pageURL }, fallback: r.source };
   }
@@ -1558,6 +1568,7 @@ function cleanSettings(s) {
     maxDuration: isFiniteNum(o.maxDuration) && o.maxDuration > 0 ? o.maxDuration : null,
     fullClipButton: o.fullClipButton !== false,
     playerButton: o.playerButton !== false,
+    preferredHeight: Number.isInteger(o.preferredHeight) && o.preferredHeight >= 1 && o.preferredHeight <= MAX_HEIGHT ? o.preferredHeight : null,
   };
 }
 
@@ -1611,6 +1622,22 @@ async function pingNative() {
 }
 
 const depsCache = { ts: 0, result: null, run: null };
+
+// settings.preferredHeight from the last pong (no native call), or null.
+const preferredHeight = () => (depsCache.result && depsCache.result.settings ? depsCache.result.settings.preferredHeight : null);
+
+// The index in heights of the tallest one <= pref, else of the shortest one; -1
+// without a preference or a height (non-integers are skipped). Ties keep the first.
+function preferredIndex(heights, pref) {
+  let best = -1;
+  if (!pref) return best;
+  heights.forEach((h, i) => {
+    if (!Number.isInteger(h)) return;
+    const b = heights[best];
+    if (best < 0 || (h <= pref ? b > pref || h > b : b > pref && h < b)) best = i;
+  });
+  return best;
+}
 
 // retryError: a cached failure is not reused (Download asks the app again).
 function fetchDeps(retryError = false) {
@@ -1770,6 +1797,12 @@ function readVariants(tabId, url) {
   });
 }
 
+// The variant the job takes: the user's choice, else the preferred height's, else 0.
+function variantIndex(list, choice) {
+  if (choice) return Math.max(0, list.findIndex((v) => v.url === choice.url));
+  return Math.max(0, preferredIndex(list.map((v) => v.height), preferredHeight()));
+}
+
 // summarizeSource plus the variant fields for an hls source; starts a probe run
 // only while the panel is open (a probe spawns the native host).
 async function describeSource(tabId, r) {
@@ -1782,8 +1815,7 @@ async function describeSource(tabId, r) {
   else if (rec.error) summary.probe = { state: "error", message: String(rec.error.message) };
   else if (list.length) {
     summary.variants = list.map((v) => ({ width: v.width, height: v.height, bandwidth: v.bandwidth }));
-    const i = choice ? list.findIndex((v) => v.url === choice.url) : -1;
-    summary.variant = Math.max(0, i);
+    summary.variant = variantIndex(list, choice);
   }
   return summary;
 }
@@ -1794,7 +1826,6 @@ async function onChooseVariant(tabId, { index }) {
   const { list } = await readVariants(tabId, r.source.url);
   if (index >= list.length) return { ok: false, error: "unknown-variant" };
   await withTab(tabId, async () => {
-    if (index === 0) return chrome.storage.session.remove(varKey(tabId));
     const { selected } = await readHub(tabId);
     return chrome.storage.session.set({ [varKey(tabId)]: { source: r.source.url, url: list[index].url, selected } });
   });
@@ -1809,7 +1840,7 @@ async function onChooseVariant(tabId, { index }) {
 const heightsPage = (plan, protocol) => (plan && protocol >= 3 && plan.source.type === "page" ? plan.source.url : null);
 
 // The cached heights for pageURL and the height choice that still applies to it
-// (a choice for another page, video or a vanished height is dropped here).
+// (a choice for another page, video or a vanished height is dropped here; 0 = Best).
 function readHeights(tabId, pageURL) {
   return withTab(tabId, async () => {
     const got = await chrome.storage.session.get([probeKey(tabId), resKey(tabId)]);
@@ -1818,7 +1849,7 @@ function readHeights(tabId, pageURL) {
     let choice = isObject(got[resKey(tabId)]) ? got[resKey(tabId)] : null;
     if (choice) {
       const { selected } = await readHub(tabId);
-      if (choice.page !== pageURL || !sameSelection(choice.selected || null, selected) || !list.includes(choice.height)) {
+      if (choice.page !== pageURL || !sameSelection(choice.selected || null, selected) || !(choice.height === 0 || list.includes(choice.height))) {
         await chrome.storage.session.remove(resKey(tabId));
         choice = null;
       }
@@ -1857,9 +1888,8 @@ async function onChooseHeight(tabId, { index }) {
   const { list } = await readHeights(tabId, page);
   if (index > list.length) return { ok: false, error: "unknown-height" };
   await withTab(tabId, async () => {
-    if (index === 0) return chrome.storage.session.remove(resKey(tabId));
     const { selected } = await readHub(tabId);
-    return chrome.storage.session.set({ [resKey(tabId)]: { page, height: list[index - 1], selected } });
+    return chrome.storage.session.set({ [resKey(tabId)]: { page, height: index ? list[index - 1] : 0, selected } });
   });
   hubLog(`chooseHeight tab=${tabId} index=${index}`);
   return { ok: true };
@@ -1939,7 +1969,8 @@ async function onDownload(tabId, from, body) {
   const page = heightsPage(plan, app.protocol); // the page attempt only, never the fallback
   if (page) {
     const { choice } = await readHeights(tabId, page);
-    if (choice) job.maxHeight = choice.height;
+    const height = choice ? choice.height : plan.r.variantChosen ? null : app.settings.preferredHeight;
+    if (height) job.maxHeight = height;
   }
   if (plan.r.duration !== null) job.mediaDuration = plan.r.duration;
   if (plan.r.pageURL) job.pageURL = plan.r.pageURL;
@@ -2293,7 +2324,10 @@ async function onView(tabId, from) {
     if (hub.panelOpen) startPageProbe(tabId, page);
     const { rec, list, choice } = await readHeights(tabId, page);
     if (!rec) source.heightProbe = { state: "pending" };
-    else Object.assign(source, { heights: list, height: choice ? 1 + list.indexOf(choice.height) : 0 });
+    else {
+      const height = choice ? (choice.height ? 1 + list.indexOf(choice.height) : 0) : 1 + preferredIndex(list, settings.preferredHeight);
+      Object.assign(source, { heights: list, height });
+    }
   }
   const list = sourceList(Array.isArray(entries) ? entries : []);
   const sourceIndex = plan && plan.r.source.type === "media" ? list.findIndex((e) => e.url === plan.r.source.url) : -1;

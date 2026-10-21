@@ -31,6 +31,12 @@ struct AppSettings: Codable, Equatable, Sendable {
     var fullClipButton = true
     /// The extension shows a SegDown button on a video player under the pointer.
     var playerButton = true
+    /// The extension takes the tallest quality up to this height when the user picks none (one of
+    /// `preferredHeights`); `nil` = the best quality.
+    var preferredHeight: Int?
+
+    /// The heights Settings offers for `preferredHeight`.
+    static let preferredHeights = [360, 480, 720, 1080, 1440, 2160]
 
     /// The user's real home from the password database, like `IPC.socketURL()`.
     static let home = getpwuid(getuid()).flatMap { $0.pointee.pw_dir.map { String(cString: $0) } }
@@ -43,7 +49,7 @@ struct AppSettings: Codable, Equatable, Sendable {
     /// What the extension gets in `pong`.
     var clientSettings: ClientSettings {
         ClientSettings(mode: mode, incognitoDefault: incognitoDefault, maxDuration: maxDuration,
-                       fullClipButton: fullClipButton, playerButton: playerButton)
+                       fullClipButton: fullClipButton, playerButton: playerButton, preferredHeight: preferredHeight)
     }
 
     var jobOptions: JobOptions {
@@ -61,7 +67,7 @@ struct AppSettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case outputFolder, mode, precision, autoFallback, maxBytes, maxDuration, incognitoDefault, compress
-        case flattenOutput, snakeCaseNames, fullClipButton, playerButton
+        case flattenOutput, snakeCaseNames, fullClipButton, playerButton, preferredHeight
     }
 }
 
@@ -81,6 +87,7 @@ extension AppSettings {
         snakeCaseNames = try c.decodeIfPresent(Bool.self, forKey: .snakeCaseNames) ?? defaults.snakeCaseNames
         fullClipButton = try c.decodeIfPresent(Bool.self, forKey: .fullClipButton) ?? defaults.fullClipButton
         playerButton = try c.decodeIfPresent(Bool.self, forKey: .playerButton) ?? defaults.playerButton
+        preferredHeight = try c.decodeIfPresent(Int.self, forKey: .preferredHeight) ?? defaults.preferredHeight
     }
 }
 

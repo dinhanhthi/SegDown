@@ -19,6 +19,7 @@
 - The SegDown app on your Mac downloads only those ranges: direct mp4 and HLS (including clear-key AES-128) with `ffmpeg`, and pages that `yt-dlp` supports with `yt-dlp`.
 - One file per range, or all ranges merged into one mp4.
 - Precise cuts (re-encoded, exact times) or Fast cuts (no re-encoding, nearest keyframes).
+- Pick the quality per video, or set a preferred resolution (360p to 4K) once in Settings.
 - Optional compression, size and duration limits, and incognito downloads that stay out of the history.
 
 ## Install
@@ -67,12 +68,14 @@ After each update, replace the `SegDown-extension/` folder with the new release'
 1. Play the video, so the extension sees its media.
 2. Click the SegDown icon at the top-left of the video (it shows while the pointer is over it), click the SegDown toolbar button, or press Alt+Shift+S.
 3. Mark the ranges: Mark start / Mark end, or `[` / `]`.
-4. Click Download. The ▾ menu picks separate or merged files, incognito, quality, source or video. For yt-dlp downloads (YouTube and the like), Quality sets the resolution: Best, or the tallest format up to a height such as 720p. Full clip downloads the whole video instead and leaves the ranges as they are (not for live video, or video longer than the Max total duration).
+4. Click Download. The ▾ menu picks separate or merged files, incognito, quality, source or video. Quality sets the resolution: for yt-dlp downloads (YouTube and the like), Best or the tallest format up to a height such as 720p; for an HLS stream with several variants, one of them. It starts on the Preferred resolution from Settings when one is set. Full clip downloads the whole video instead and leaves the ranges as they are (not for live video, or video longer than the Max total duration).
+
+   If the buttons cover the player's own controls, drag them by their ⋮⋮ grip anywhere on the video (the spot is kept until the page reloads).
 5. Follow the progress on the overlay or in the app's Downloads page.
 
-Files land in `~/Downloads/SegDown/<page title>/` (change it in Settings). Settings › Output can also save every file straight into that folder (Flatten output folder) and name files in snake_case (`my_video_title_merged.mp4`).
+Files land in `~/Downloads/SegDown/<page title>/` (change it in Settings). Settings › Output can also save every file straight into that folder (Flatten output folder), name files in snake_case (`my_video_title_merged.mp4`) and fall back to the captured media when yt-dlp fails (Auto fallback).
 
-Settings › Browser turns off the Full clip button and the icon on videos. A change reaches the browser the next time you open the overlay. A browser connected after the change gets the settings on its first page load once the extension can reach the app.
+Settings › Browser turns off the Full clip button and the icon on videos, and sets a Preferred resolution (360p, 480p, 720p, 1080p, 2K or 4K): when you pick no quality, the extension takes the tallest one up to it, or the smallest one when all are taller. A change reaches the browser the next time you open the overlay. A browser connected after the change gets the settings on its first page load once the extension can reach the app.
 
 ## Not supported
 
