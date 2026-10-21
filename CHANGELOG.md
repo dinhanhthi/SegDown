@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-21
+
 ### Added
 
 - Mark time ranges on a web video with a segment bar on the video itself (Mark start / Mark end, or `[` / `]`) and download only those ranges. Works in Chrome, Chromium, Brave, Edge and Arc, and in Safari with the extension that ships inside the app.
