@@ -77,7 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             // Full size content: the background runs under the toolbar too.
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
             window.isReleasedWhenClosed = false
-            window.minSize = NSSize(width: 600, height: 420)
+            // Narrower, the toolbar has no room for the logo and the tabs and hides the tabs.
+            window.minSize = NSSize(width: 630, height: 420)
             window.setContentSize(NSSize(width: 640, height: 560))
             // A new name since the tabs left the sidebar: the frame saved for the wider window is not restored.
             if !window.setFrameUsingName("MainWindowTabs") { window.center() }

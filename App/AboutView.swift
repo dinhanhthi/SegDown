@@ -27,8 +27,8 @@ struct AboutView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// `logo_512.png` from the bundle, or the app icon.
-    private static let logo: NSImage = {
+    /// `logo_512.png` from the bundle, or the app icon. Also the logo in the main window's toolbar.
+    static let logo: NSImage = {
         Bundle.main.url(forResource: "logo_512", withExtension: "png").flatMap(NSImage.init(contentsOf:))
             ?? NSApp.applicationIconImage
     }()

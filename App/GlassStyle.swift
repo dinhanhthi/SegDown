@@ -290,3 +290,16 @@ struct HardTopScrollEdge: ViewModifier {
         }
     }
 }
+
+extension ToolbarContent {
+    /// On macOS 26+ (unless `--force-fallbacks`), the toolbar draws no glass behind this item, so it does not share
+    /// the capsule of the items next to it.
+    @ToolbarContentBuilder
+    func hiddenSharedBackground() -> some ToolbarContent {
+        if #available(macOS 26, *), PlatformFeatures.liquidGlass {
+            sharedBackgroundVisibility(.hidden)
+        } else {
+            self
+        }
+    }
+}
