@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-21
+
 ### Added
 
 - Archive a download from its card to move it out of the list; the Archived button next to Remove All shows the archived downloads.
