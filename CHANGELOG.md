@@ -7,10 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-21
+
 ### Added
 
+- The menu bar icon shows a red dot while downloads are active.
 - The Dependencies page checks Homebrew for newer yt-dlp, deno and ffmpeg and upgrades each one with an Upgrade button (disabled while downloads run). An old yt-dlp is the usual cause of "The site refused the download (HTTP 403/410)".
 - For downloads that go through yt-dlp, such as YouTube, the overlay's ▾ menu has a Quality section with the video's resolutions: Best (the default) or a height such as 720p, and the download takes the tallest format up to that height. Pages with a multi-variant HLS stream keep their Quality list as before. Update the app and the extension together.
+
+### Changed
+
+- A failed download shows its error on its own row, above the card's buttons.
+
+### Fixed
+
+- On a Facebook feed, SegDown downloads the video you selected instead of facebook.com.
 
 ## [0.5.1] - 2026-10-21
 
