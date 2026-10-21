@@ -60,7 +60,9 @@ struct DownloadsView: View {
         ScrollView {
             LazyVStack(spacing: 10) {
                 ForEach(store.items) { item in
-                    DownloadCard(item: item, store: store, selected: selection.contains(item.id))
+                    DownloadCard(item: item, store: store, selected: selection.contains(item.id),
+                                 remove: { removeFromList(ids: [item.id]) },
+                                 trash: { askTrash(ids: [item.id]) })
                         .contentShape(Rectangle())
                         .onTapGesture { select(item.id) }
                         .highPriorityGesture(TapGesture().modifiers(.command).onEnded { toggle(item.id) },
@@ -99,21 +101,23 @@ struct DownloadsView: View {
                     .monospacedDigit()
             }
             Spacer()
-            Menu {
-                Button("Remove from List", action: removeFromList)
-                Button("Move to Trash…", action: askTrash)
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "trash").accessibilityLabel("Remove")
-                    MenuChevron()
+            // One download has its own Remove menu on its card.
+            if selection.count > 1 {
+                Menu {
+                    Button("Remove from List", action: removeFromList)
+                    Button("Move to Trash…", action: askTrash)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "trash").accessibilityLabel("Remove")
+                        MenuChevron()
+                    }
                 }
+                .menuStyle(.button)
+                .buttonStyle(RaisedButtonStyle(horizontalPadding: 10))
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Remove the selected downloads from the list (⌫), or also move their files to the Trash")
             }
-            .menuStyle(.button)
-            .buttonStyle(RaisedButtonStyle(horizontalPadding: 10))
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .disabled(selection.isEmpty)
-            .help("Remove the selected downloads from the list (⌫), or also move their files to the Trash")
             Menu {
                 Button("Remove All from List", action: removeAllFromList)
                 Button("Move All to Trash…", action: askTrashAll)
@@ -145,9 +149,19 @@ struct DownloadsView: View {
         selection.removeAll()
     }
 
+    /// One card's Remove menu: running downloads are cancelled; files stay on disk.
+    private func removeFromList(ids: Set<String>) {
+        store.remove(ids: ids, trashFiles: false)
+        selection.subtract(ids)
+    }
+
     private func askTrash() {
         guard !selection.isEmpty else { return }
-        trashIDs = selection
+        askTrash(ids: selection)
+    }
+
+    private func askTrash(ids: Set<String>) {
+        trashIDs = ids
         confirmTrash = true
     }
 
@@ -186,12 +200,15 @@ struct DownloadsView: View {
     }
 }
 
-/// One job: title, Reveal in Finder and state, segment, duration, size, progress, then the message and Cancel.
+/// One job: title, Reveal in Finder, Remove and state, segment, duration, size, progress, then the message and Cancel.
 /// Selected adds an accent fill and stroke.
 private struct DownloadCard: View {
     let item: JobStore.Item
     let store: JobStore
     let selected: Bool
+    /// Remove from List, and Move to Trash… (which asks first), for this job alone.
+    let remove: () -> Void
+    let trash: () -> Void
 
     var body: some View {
         let status = item.status
@@ -219,6 +236,21 @@ private struct DownloadCard: View {
                     .buttonStyle(RaisedButtonStyle(height: 26))
                     .help("Reveal in Finder")
                 }
+                Menu {
+                    Button("Remove from List", action: remove)
+                    Button("Move to Trash…", action: trash)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "trash").accessibilityLabel("Remove")
+                        MenuChevron()
+                    }
+                    .font(.system(size: 12))
+                }
+                .menuStyle(.button)
+                .buttonStyle(RaisedButtonStyle(height: 26, horizontalPadding: 9))
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Remove the download from the list, or also move its files to the Trash")
                 StateBadge(state: status.state)
             }
             HStack(spacing: 12) {
