@@ -1601,13 +1601,18 @@ async function updateUI(settings) {
   }
 }
 
+// Downloads between the click and the app's reply: a reload then would drop the job.
+let downloadsInFlight = 0;
+
 // The app updates the folder a Chromium browser loads this extension from (its
 // Browsers page), so an app version other than this one means newer files on disk:
 // reload to run them. Once per version pair, so a copy loaded from elsewhere (an
-// older release zip) or Safari's appex never loops.
+// older release zip) or Safari's appex never loops. Never during a download: a
+// later ping (after DEPS_TTL_MS) reloads instead.
 async function reloadIfOutdated(appVersion) {
   const own = chrome.runtime.getManifest().version;
   if (typeof appVersion !== "string" || appVersion === own || typeof chrome.runtime.reload !== "function") return;
+  if (downloadsInFlight > 0) return;
   const pair = `${own}>${appVersion}`;
   if ((await chrome.storage.local.get(RELOAD_KEY))[RELOAD_KEY] === pair) return;
   await chrome.storage.local.set({ [RELOAD_KEY]: pair });
@@ -2427,7 +2432,10 @@ function route(tabId, frameId, type, body, from) {
     case "chooseHeight":
       return onChooseHeight(tabId, body);
     case "download":
-      return onDownload(tabId, from, body);
+      downloadsInFlight++;
+      return onDownload(tabId, from, body).finally(() => {
+        downloadsInFlight--;
+      });
     case "jobs":
       return onJobs(tabId);
     case "cancel":

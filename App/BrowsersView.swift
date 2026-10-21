@@ -45,6 +45,12 @@ struct BrowsersView: View {
                     Text("Browser integration")
                     Text("Installs the native messaging host for every Chromium browser found.")
                 }
+                if let message {
+                    Text(message.text)
+                        .font(.caption)
+                        .foregroundStyle(message.isError ? .red : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 LabeledContent {
                     HStack {
                         Text((ExtensionFolder.chromeURL().path(percentEncoded: false) as NSString).abbreviatingWithTildeInPath)
@@ -61,12 +67,6 @@ struct BrowsersView: View {
                     Text("Extension folder")
                     Text("Load unpacked this folder once on your browser's extensions page, with Developer mode on. "
                         + "SegDown keeps it up to date with the app.")
-                }
-                if let message {
-                    Text(message.text)
-                        .font(.caption)
-                        .foregroundStyle(message.isError ? .red : .secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             } header: {
                 HStack {
