@@ -1,1 +1,16 @@
-<?xml version="1.0" encoding="utf-8"?><rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><title>SegDown</title><link>https://dinhanhthi.github.io/SegDown/appcast.xml</link></channel></rss>
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>SegDown</title>
+        <link>https://dinhanhthi.github.io/SegDown/appcast.xml</link>
+        <item>
+            <title>0.2.0</title>
+            <pubDate>Wed, 21 Oct 2026 07:57:03 +0200</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/dinhanhthi/SegDown/blob/main/CHANGELOG.md</sparkle:fullReleaseNotesLink>
+            <sparkle:version>1</sparkle:version>
+            <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/dinhanhthi/SegDown/releases/download/v0.2.0/SegDown-0.2.0.zip" length="6302384" type="application/octet-stream" sparkle:edSignature="hq/roz/SiYtIYwY4CmP9Lq+f8TIh//p2nwtcBXQY+q6PWRk/kv0bn4eqjhdZ0qOgusCJMnDET9xer/n4arVMCw=="/>
+        </item>
+    </channel>
+</rss>
