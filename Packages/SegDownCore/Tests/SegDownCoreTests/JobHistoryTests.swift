@@ -1,4 +1,5 @@
-// Guards the history's privacy: incognito jobs, sources, URLs and the file's permissions.
+// Guards the history's privacy (incognito jobs, sources, URLs, the file's permissions) and the
+// persisted archived flag.
 import Foundation
 import Testing
 @testable import SegDownCore
@@ -60,5 +61,38 @@ struct JobHistoryTests {
 
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+    }
+
+    @Test func archivedFlagSurvivesReloadAndUnarchiveClearsIt() throws {
+        let url = try tempFileURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var history = JobHistory(fileURL: url)
+        try history.append(record(id: "a"), incognito: false)
+        try history.setArchived(ids: ["a"], archived: true)
+
+        var reloaded = JobHistory(fileURL: url)
+        reloaded.load()
+        #expect(reloaded.records.first?.archived == true)
+
+        try reloaded.setArchived(ids: ["a"], archived: false)
+        var again = JobHistory(fileURL: url)
+        again.load()
+        #expect(again.records.map(\.id) == ["a"])
+        #expect(again.records.first?.archived == nil)
+    }
+
+    @Test func fileWithoutArchivedKeyLoadsAsNotArchived() throws {
+        let url = try tempFileURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let json = """
+            [{"id": "old", "title": "Clip", "state": "done", "createdAt": "2026-10-01T10:00:00Z",
+              "finishedAt": "2026-10-01T10:05:00Z", "segmentCount": 1, "totalDuration": 10, "outputs": []}]
+            """
+        try Data(json.utf8).write(to: url)
+
+        var history = JobHistory(fileURL: url)
+        history.load()
+        #expect(history.records.map(\.id) == ["old"])
+        #expect(history.records.first?.archived == nil)
     }
 }

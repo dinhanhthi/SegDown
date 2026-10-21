@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Archive a download from its card to move it out of the list; the Archived button next to Remove All shows the archived downloads.
+- Search downloads by name from the header: the search bar spans the header and finds titles even with missing letters or accents.
+
+### Changed
+
+- The card buttons sit on their own row at the bottom of the card.
+- Tooltips show sooner, such as a card's full title.
+
 ## [0.4.0] - 2026-10-21
 
 ### Added

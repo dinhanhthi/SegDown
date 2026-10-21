@@ -18,6 +18,8 @@ public struct JobRecord: Codable, Sendable, Hashable, Identifiable {
     public var message: String?
     public var fallbackUsed: Bool?
     public var pageURL: URL?
+    /// `nil` when not archived.
+    public var archived: Bool?
 
     public init(
         id: String,
@@ -31,7 +33,8 @@ public struct JobRecord: Codable, Sendable, Hashable, Identifiable {
         outputs: [String] = [],
         message: String? = nil,
         fallbackUsed: Bool? = nil,
-        pageURL: URL? = nil
+        pageURL: URL? = nil,
+        archived: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -45,6 +48,7 @@ public struct JobRecord: Codable, Sendable, Hashable, Identifiable {
         self.message = message
         self.fallbackUsed = fallbackUsed
         self.pageURL = pageURL
+        self.archived = archived
     }
 }
 
@@ -87,6 +91,13 @@ public struct JobHistory: Sendable {
 
     public mutating func remove(ids: Set<String>) throws {
         records.removeAll { ids.contains($0.id) }
+        try save()
+    }
+
+    public mutating func setArchived(ids: Set<String>, archived: Bool) throws {
+        for index in records.indices where ids.contains(records[index].id) {
+            records[index].archived = archived ? true : nil
+        }
         try save()
     }
 

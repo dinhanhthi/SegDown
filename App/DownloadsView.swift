@@ -1,22 +1,46 @@
 // The Downloads page: one card per job, newest first, with selection; remove from the list, or also move the files to
-// the Trash after a confirmation.
+// the Trash after a confirmation. The Archived button switches between the downloads and the archived ones; Search
+// filters the cards shown by title.
 import AppKit
 import SegDownCore
 import SwiftUI
 
 /// The jobs as cards. Click selects one, ⌘-click toggles, ⇧-click extends from the last clicked card; ⌘A (the Edit
 /// menu's Select All) and ⌫ (remove from the list) work while the page has focus, which a click on a card gives it.
+/// The list shows either the downloads or, with the Archived button on, the archived ones; the header, selection and
+/// Remove All act on the list shown. Search grows into a field across the header and fuzzy-filters that list by title,
+/// best match first; X or Escape closes it and shows the whole list again.
 struct DownloadsView: View {
     let store: JobStore
     @State private var selection: Set<String> = []
+    /// The archived list instead of the downloads; the Archived button shows once a download is archived.
+    @State private var showArchived = false
     @State private var anchor: String?
     @State private var confirmTrash = false
-    /// The jobs the Trash sheet is about: the selection, or every job for Move All to Trash.
+    /// The jobs the Trash sheet is about: the selection, or every job shown for Move All to Trash.
     @State private var trashIDs: Set<String> = []
     @State private var trashFailures: [JobStore.TrashFailure] = []
     /// Shown once the sheet is gone: a window shows one sheet or alert at a time.
     @State private var pendingFailures: [JobStore.TrashFailure] = []
     @FocusState private var focused: Bool
+    /// The search field in place of the header; `expanded` grows it from the Search button's place to the full row.
+    @State private var searching = false
+    @State private var expanded = false
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// The jobs of the list shown, before the search: the downloads, or the archived ones.
+    private var scoped: [JobStore.Item] {
+        store.items.filter { $0.archived == showArchived }
+    }
+
+    /// The jobs of the list shown, matching the search best first while there is a query.
+    private var shown: [JobStore.Item] {
+        query.trimmingCharacters(in: .whitespaces).isEmpty
+            ? scoped
+            : FuzzyMatch.rank(scoped, query: query) { $0.title }
+    }
 
     var body: some View {
         Group {
@@ -30,13 +54,27 @@ struct DownloadsView: View {
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
+        // Not while typing in the search field: ⌫ and ⌘A are the field's then.
         .onCommand(#selector(NSResponder.selectAll(_:))) {
-            selection = Set(store.items.map(\.id))
+            if !searchFocused { selection = Set(shown.map(\.id)) }
         }
-        .onDeleteCommand(perform: removeFromList)
-        // Jobs that left the list (trimmed, history cleared, removed) are not selected.
-        .onChange(of: store.items.map(\.id)) { _, ids in
+        .onDeleteCommand {
+            if !searchFocused { removeFromList() }
+        }
+        // Jobs that left the list (trimmed, history cleared, removed, archived, the other list shown) are not selected.
+        .onChange(of: shown.map(\.id)) { _, ids in
             selection.formIntersection(ids)
+        }
+        // The last archived job unarchived or removed: back to the downloads, as the Archived button is gone.
+        .onChange(of: store.items.contains(where: \.archived)) { _, anyArchived in
+            if !anyArchived { showArchived = false }
+        }
+        // Every job gone: the empty page replaces the header, so the next download is not hidden by an old search.
+        .onChange(of: store.items.isEmpty) { _, empty in
+            guard empty else { return }
+            query = ""
+            expanded = false
+            searching = false
         }
         .sheet(isPresented: $confirmTrash, onDismiss: {
             trashFailures = pendingFailures
@@ -58,11 +96,19 @@ struct DownloadsView: View {
 
     private var list: some View {
         ScrollView {
+            // The header stays, so the Archived button can switch back.
+            if shown.isEmpty {
+                Text(scoped.isEmpty ? "No downloads" : "No matching downloads")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
             LazyVStack(spacing: 10) {
-                ForEach(store.items) { item in
+                ForEach(shown) { item in
                     DownloadCard(item: item, store: store, selected: selection.contains(item.id),
                                  remove: { removeFromList(ids: [item.id]) },
-                                 trash: { askTrash(ids: [item.id]) })
+                                 trash: { askTrash(ids: [item.id]) },
+                                 archive: { toggleArchived(item) })
                         .contentShape(Rectangle())
                         .onTapGesture { select(item.id) }
                         .highPriorityGesture(TapGesture().modifiers(.command).onEnded { toggle(item.id) },
@@ -84,16 +130,29 @@ struct DownloadsView: View {
     }
 
     private var header: some View {
+        Group {
+            if searching {
+                searchBar
+            } else {
+                buttons
+            }
+        }
+        // Straight on the window glass, not a card, so it does not read as one of the downloads.
+        .padding(.horizontal, 4)
+        .padding(.bottom, 4)
+    }
+
+    private var buttons: some View {
         HStack(spacing: 12) {
-            Text("Downloads")
+            Text(showArchived ? "Archived" : "Downloads")
                 .font(.title2.weight(.semibold))
-            Text(verbatim: String(store.items.count))
+            Text(verbatim: String(shown.count))
                 .font(.callout.weight(.semibold))
                 .monospacedDigit()
                 .padding(.horizontal, 8)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(Palette.inputSurface))
-                .accessibilityLabel(store.items.count == 1 ? "1 download" : "\(store.items.count) downloads")
+                .accessibilityLabel(shown.count == 1 ? "1 download" : "\(shown.count) downloads")
             if !selection.isEmpty {
                 Text("\(selection.count) selected")
                     .font(.callout)
@@ -118,6 +177,18 @@ struct DownloadsView: View {
                 .fixedSize()
                 .help("Remove the selected downloads from the list (⌫), or also move their files to the Trash")
             }
+            if store.items.contains(where: \.archived) {
+                Button {
+                    showArchived.toggle()
+                    selection.removeAll()
+                } label: {
+                    Label("Archived", systemImage: showArchived ? "archivebox.fill" : "archivebox")
+                        .labelStyle(.iconOnly)
+                        .foregroundStyle(showArchived ? Color.accentColor : .primary)
+                }
+                .buttonStyle(RaisedButtonStyle())
+                .help(showArchived ? "Show downloads" : "Show archived downloads")
+            }
             Menu {
                 Button("Remove All from List", action: removeAllFromList)
                 Button("Move All to Trash…", action: askTrashAll)
@@ -131,11 +202,68 @@ struct DownloadsView: View {
             .buttonStyle(RaisedButtonStyle(horizontalPadding: 10))
             .menuIndicator(.hidden)
             .fixedSize()
+            .disabled(shown.isEmpty)
             .help("Remove every download from the list, or also move their files to the Trash")
+            Button {
+                searching = true
+            } label: {
+                Label("Search", systemImage: "magnifyingglass")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(RaisedButtonStyle())
+            .help("Search downloads")
         }
-        // Straight on the window glass, not a card, so it does not read as one of the downloads.
-        .padding(.horizontal, 4)
-        .padding(.bottom, 4)
+    }
+
+    /// A capsule as wide as the Search button at its place, at the trailing edge, that grows to the row's width once
+    /// shown; closing shrinks it back before the buttons return.
+    private var searchBar: some View {
+        HStack(spacing: 0) {
+            Image(systemName: "magnifyingglass")
+                .frame(width: 28, height: 28)
+            TextField("Search downloads", text: $query)
+                .textFieldStyle(.plain)
+                .focused($searchFocused)
+                .onExitCommand(perform: closeSearch)
+                .opacity(expanded ? 1 : 0)
+            Button(action: closeSearch) {
+                Image(systemName: "xmark")
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Close search (Esc)")
+            .opacity(expanded ? 1 : 0)
+        }
+        .frame(width: expanded ? nil : 28, height: 28, alignment: .leading)
+        .clipped()
+        .background(Capsule().fill(Palette.inputSurface))
+        .overlay(Capsule().strokeBorder(Palette.surfaceBorder, lineWidth: 1).allowsHitTesting(false))
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .onAppear {
+            withAnimation(reduceMotion ? nil : Self.searchAnimation) { expanded = true }
+            searchFocused = true
+        }
+    }
+
+    /// The search bar growing and shrinking.
+    private static let searchAnimation = Animation.snappy(duration: 0.3)
+
+    /// Clears the query, so the whole list shows at once, then shrinks the bar back into the Search button. The field
+    /// lets go of the keys first (nothing typed while it shrinks), and the page takes them back for ⌫ and ⌘A.
+    private func closeSearch() {
+        searchFocused = false
+        query = ""
+        guard !reduceMotion else {
+            expanded = false
+            searching = false
+            focused = true
+            return
+        }
+        withAnimation(Self.searchAnimation) { expanded = false } completion: {
+            searching = false
+            focused = true
+        }
     }
 
     private var failuresShown: Binding<Bool> {
@@ -155,6 +283,12 @@ struct DownloadsView: View {
         selection.subtract(ids)
     }
 
+    /// One card's Archive button: the card leaves the list it was in.
+    private func toggleArchived(_ item: JobStore.Item) {
+        store.setArchived(ids: [item.id], archived: !item.archived)
+        selection.remove(item.id)
+    }
+
     private func askTrash() {
         guard !selection.isEmpty else { return }
         askTrash(ids: selection)
@@ -167,12 +301,12 @@ struct DownloadsView: View {
 
     /// Running downloads are cancelled; files stay on disk.
     private func removeAllFromList() {
-        store.remove(ids: Set(store.items.map(\.id)), trashFiles: false)
+        store.remove(ids: Set(shown.map(\.id)), trashFiles: false)
         selection.removeAll()
     }
 
     private func askTrashAll() {
-        trashIDs = Set(store.items.map(\.id))
+        trashIDs = Set(shown.map(\.id))
         confirmTrash = true
     }
 
@@ -190,7 +324,7 @@ struct DownloadsView: View {
 
     /// Adds the cards from the anchor to `id`, in list order; without an anchor, selects `id` alone.
     private func extend(to id: String) {
-        let ids = store.items.map(\.id)
+        let ids = shown.map(\.id)
         guard let anchor, let from = ids.firstIndex(of: anchor), let to = ids.firstIndex(of: id) else {
             select(id)
             return
@@ -200,8 +334,8 @@ struct DownloadsView: View {
     }
 }
 
-/// One job: title, Open Page, Reveal in Finder, Remove and state, segment, duration, size, progress, then the message and Cancel.
-/// Selected adds an accent fill and stroke.
+/// One job: title and state, then segment, duration, size, progress, the message and Cancel, then the buttons: Open
+/// Page, Reveal in Finder, Archive or Unarchive, and Remove. Selected adds an accent fill and stroke.
 private struct DownloadCard: View {
     let item: JobStore.Item
     let store: JobStore
@@ -209,6 +343,8 @@ private struct DownloadCard: View {
     /// Remove from List, and Move to Trash… (which asks first), for this job alone.
     let remove: () -> Void
     let trash: () -> Void
+    /// Archive, or Unarchive when archived, without asking.
+    let archive: () -> Void
 
     var body: some View {
         let status = item.status
@@ -227,40 +363,6 @@ private struct DownloadCard: View {
                     .truncationMode(.tail)
                     .help(item.title)
                 Spacer(minLength: 8)
-                if let pageURL = item.pageURL {
-                    Button { NSWorkspace.shared.open(pageURL) } label: {
-                        Label("Open Page", systemImage: "safari")
-                            .labelStyle(.iconOnly)
-                            .font(.system(size: 12))
-                    }
-                    .buttonStyle(RaisedButtonStyle(height: 26))
-                    // Page URLs are untrusted: shown as plain text only.
-                    .help(Text(verbatim: pageURL.absoluteString))
-                }
-                if !status.outputs.isEmpty {
-                    Button(action: showInFinder) {
-                        Label("Reveal in Finder", systemImage: "folder")
-                            .labelStyle(.iconOnly)
-                            .font(.system(size: 12))
-                    }
-                    .buttonStyle(RaisedButtonStyle(height: 26))
-                    .help("Reveal in Finder")
-                }
-                Menu {
-                    Button("Remove from List", action: remove)
-                    Button("Move to Trash…", action: trash)
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "trash").accessibilityLabel("Remove")
-                        MenuChevron()
-                    }
-                    .font(.system(size: 12))
-                }
-                .menuStyle(.button)
-                .buttonStyle(RaisedButtonStyle(height: 26, horizontalPadding: 9))
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("Remove the download from the list, or also move its files to the Trash")
                 StateBadge(state: status.state)
             }
             HStack(spacing: 12) {
@@ -297,6 +399,57 @@ private struct DownloadCard: View {
                     }
                 }
             }
+            HStack(spacing: 8) {
+                if let pageURL = item.pageURL {
+                    Button { NSWorkspace.shared.open(pageURL) } label: {
+                        Label("Open Page", systemImage: "safari")
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(RaisedButtonStyle(height: 26))
+                    // Page URLs are untrusted: shown as plain text only.
+                    .help(Text(verbatim: pageURL.absoluteString))
+                }
+                if !status.outputs.isEmpty {
+                    Button(action: showInFinder) {
+                        Label("Reveal in Finder", systemImage: "folder")
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(RaisedButtonStyle(height: 26))
+                    .help("Reveal in Finder")
+                }
+                Button(action: archive) {
+                    Group {
+                        if item.archived {
+                            Label("Unarchive", systemImage: "tray.and.arrow.up")
+                        } else {
+                            Label("Archive", systemImage: "archivebox")
+                        }
+                    }
+                    .labelStyle(.iconOnly)
+                    .font(.system(size: 12))
+                }
+                .buttonStyle(RaisedButtonStyle(height: 26))
+                .help(item.archived ? "Unarchive" : "Archive")
+                Menu {
+                    Button("Remove from List", action: remove)
+                    Button("Move to Trash…", action: trash)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "trash").accessibilityLabel("Remove")
+                        MenuChevron()
+                    }
+                    .font(.system(size: 12))
+                }
+                .menuStyle(.button)
+                .buttonStyle(RaisedButtonStyle(height: 26, horizontalPadding: 9))
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Remove the download from the list, or also move its files to the Trash")
+                Spacer()
+            }
+            .padding(.top, 6)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

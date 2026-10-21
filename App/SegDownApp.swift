@@ -29,6 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var window: NSWindow?
 
     override init() {
+        // Card titles truncate; their `.help()` full text shows after 150 ms instead of the default ~1 s.
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 150])
         settings = SettingsStore()
         store = JobStore(settings: settings)
         super.init()

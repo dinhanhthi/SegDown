@@ -32,6 +32,8 @@ final class JobStore {
         let createdAt: Date
         /// Set when the job ends (done, failed or cancelled).
         var finishedAt: Date?
+        /// Listed in the Archived list instead of the main one; kept across launches.
+        var archived: Bool
     }
 
     /// A file `remove(ids:trashFiles:)` could not move to the Trash.
@@ -156,6 +158,19 @@ final class JobStore {
         return failures
     }
 
+    /// Archives or unarchives the jobs `ids` in the list and the history. Incognito jobs and running
+    /// ones are not in the history yet: a running one is recorded with its flag when it ends.
+    func setArchived(ids: Set<String>, archived: Bool) {
+        for index in items.indices where ids.contains(items[index].id) {
+            items[index].archived = archived
+        }
+        do {
+            try history.setArchived(ids: ids, archived: archived)
+        } catch {
+            logHistoryError(error)
+        }
+    }
+
     /// Removes every job that is done, failed or cancelled and clears the history file.
     /// Running jobs are untouched.
     func clearHistory() {
@@ -194,7 +209,7 @@ final class JobStore {
                  segmentCount: validated.segments.count,
                  totalDuration: validated.segments.reduce(0) { $0 + ($1.end - $1.start) },
                  sourceKind: sourceKind, fallbackUsed: false, pageURL: pageURL, incognito: incognito,
-                 createdAt: Date()),
+                 createdAt: Date(), archived: false),
             at: 0
         )
         trim()
@@ -235,7 +250,8 @@ final class JobStore {
             createdAt: item.createdAt, finishedAt: item.finishedAt ?? Date(),
             segmentCount: item.segmentCount, totalDuration: item.totalDuration,
             bytes: item.bytes, outputs: item.status.outputs, message: item.status.message,
-            fallbackUsed: item.fallbackUsed ? true : nil, pageURL: item.pageURL
+            fallbackUsed: item.fallbackUsed ? true : nil, pageURL: item.pageURL,
+            archived: item.archived ? true : nil
         )
     }
 
@@ -252,7 +268,8 @@ final class JobStore {
             id: record.id, title: record.title, status: status,
             segmentCount: record.segmentCount, totalDuration: record.totalDuration,
             bytes: record.bytes, sourceKind: nil, fallbackUsed: record.fallbackUsed == true,
-            pageURL: record.pageURL, incognito: false, createdAt: record.createdAt, finishedAt: record.finishedAt
+            pageURL: record.pageURL, incognito: false, createdAt: record.createdAt, finishedAt: record.finishedAt,
+            archived: record.archived == true
         )
     }
 
