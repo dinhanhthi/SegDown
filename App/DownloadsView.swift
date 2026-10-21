@@ -257,6 +257,7 @@ private struct DownloadCard: View {
                 Text("Segment \(min(status.segmentIndex + 1, status.segmentCount))/\(status.segmentCount)")
                 Text(verbatim: Self.durationText(item.totalDuration))
                 Text(verbatim: item.bytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
+                    .foregroundStyle(item.bytes.flatMap(Self.sizeColor) ?? .secondary)
             }
             .font(.callout)
             .foregroundStyle(.secondary)
@@ -265,7 +266,7 @@ private struct DownloadCard: View {
                 ProgressView(value: min(max(status.fraction, 0), 1))
             }
             if item.fallbackUsed {
-                Text("Switched to the captured media")
+                Label("Switched to the captured media", systemImage: "info.circle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -302,6 +303,18 @@ private struct DownloadCard: View {
 
     /// The `GlassCard` shape, for the selection.
     private static let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
+
+    /// Heavier files stand out more: plain under 100 MB, then yellow, orange from 500 MB, red from 1 GB, purple from
+    /// 2 GB (decimal units, as `ByteCountFormatter` shows them).
+    static func sizeColor(_ bytes: Int64) -> Color? {
+        switch bytes {
+        case 2_000_000_000...: .purple
+        case 1_000_000_000...: .red
+        case 500_000_000...: .orange
+        case 100_000_000...: .yellow
+        default: nil
+        }
+    }
 
     /// m:ss, or h:mm:ss from one hour; the same digits in every locale.
     static func durationText(_ seconds: Double) -> String {
