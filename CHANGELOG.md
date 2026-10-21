@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A Full clip button on the overlay downloads the whole video as one file and leaves the marked ranges as they are. It is disabled for live video and for video longer than the Max total duration. Turn it off in Settings › Browser.
 - A SegDown icon shows at the top-left of a video while the pointer is over it (not on ads, small or live videos) and opens the overlay for that video. Turn it off in Settings › Browser; a change reaches the browser the next time the overlay opens.
 
+### Fixed
+
+- HLS streams whose segments have a non-media file name (such as `file-0000.png`) now download instead of failing with "Invalid data found when processing input". This needs ffmpeg 7.1 or later.
+
 ## [0.2.1] - 2026-10-21
 
 ### Added

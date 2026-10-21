@@ -29,6 +29,8 @@ Requires macOS 15 or later, and:
 brew install yt-dlp ffmpeg deno
 ```
 
+ffmpeg must be 7.1 or later.
+
 Download `SegDown-X.Y.Z.dmg` from the [latest release](https://github.com/dinhanhthi/SegDown/releases/latest), drag SegDown to `/Applications` and open it. It lives in the menu bar; its Dependencies page shows any missing tool.
 
 Updates: Check for Updates… in the menu bar menu or the app menu.

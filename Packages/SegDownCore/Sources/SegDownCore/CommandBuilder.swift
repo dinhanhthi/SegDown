@@ -25,7 +25,7 @@ public enum CommandBuilder {
     /// ffmpeg arguments that download one segment into `output` (`<tmp>/part-NNN.mp4`).
     ///
     /// - `input`: the media URL (for HLS the chosen variant playlist, never the master).
-    /// - `kind`: in fast mode HLS also gets `-copypriorss 0` (see below).
+    /// - `kind`: HLS inputs get `-extension_picky 0`, and in fast mode `-copypriorss 0` (see below).
     /// - `audio`: the separate HLS audio rendition, if any. It is a second input with its own
     ///   whitelist/headers (ffmpeg input options apply only to the next `-i`) and the same `-ss`.
     /// - `headers`: validated, canonically cased headers (`Referer`, `Origin`, `User-Agent`, `Cookie`).
@@ -38,6 +38,11 @@ public enum CommandBuilder {
     /// starts at `-ss`. `-copypriorss 0` drops packets before `-ss`: video then starts at the
     /// next keyframe, within one GOP. Not used for mp4, whose demuxer already seeks every stream
     /// to the keyframe before `-ss`.
+    ///
+    /// ffmpeg 7.1+ rejects HLS segments whose extension is not a known media one (some sites serve
+    /// MPEG-TS as `file-0000.png`); `-extension_picky 0` lets them through. It is safe because
+    /// `-protocol_whitelist` excludes `file`. HLS inputs only: the mp4 demuxer has no such option
+    /// and ffmpeg exits on it.
     public static func ffmpegSegment(
         input: URL,
         kind: MediaKind,
@@ -53,9 +58,9 @@ public enum CommandBuilder {
         let start = format(milliseconds: startMs)
 
         var args = ["-hide_banner", "-nostdin", "-y"]
-        args += inputArguments(url: input, source: source, start: start, headers: headers)
+        args += inputArguments(url: input, kind: kind, source: source, start: start, headers: headers)
         if let audio {
-            args += inputArguments(url: audio, source: source, start: start, headers: headers)
+            args += inputArguments(url: audio, kind: kind, source: source, start: start, headers: headers)
             args += ["-map", "0:v:0", "-map", "1:a:0"]
         }
         args += ["-t", format(milliseconds: durationMs)]
@@ -146,8 +151,13 @@ public enum CommandBuilder {
     // MARK: - Helpers
 
     /// Per-input options followed by `-ss S -i URL`.
-    private static func inputArguments(url: URL, source: URL, start: String, headers: [String: String]) -> [String] {
+    private static func inputArguments(
+        url: URL, kind: MediaKind, source: URL, start: String, headers: [String: String]
+    ) -> [String] {
         var args = ["-protocol_whitelist", protocolWhitelist]
+        if kind == .hls {
+            args += ["-extension_picky", "0"]
+        }
         if let userAgent = headers["User-Agent"] {
             args += ["-user_agent", userAgent]
         }

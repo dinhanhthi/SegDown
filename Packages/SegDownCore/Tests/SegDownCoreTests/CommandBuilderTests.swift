@@ -55,6 +55,27 @@ struct CommandBuilderTests {
         #expect(!http.contains("-cookies"))
     }
 
+    @Test func extensionPickyOffOnlyForHLSInputs() {
+        // ffmpeg 7.1+ rejects HLS segments named like `file-0000.png`; mp4 inputs fail on the option.
+        let hls = CommandBuilder.ffmpegSegment(
+            input: input, kind: .hls, audio: URL(string: "https://cdn.example.com/audio.m3u8")!,
+            headers: [:], source: input, segment: Segment(start: 0, end: 1), precision: .fast, output: output
+        )
+        let inputs = hls.indices.filter { hls[$0] == "-i" }
+        #expect(inputs.count == 2)
+        let picky = hls.indices.filter { hls[$0] == "-extension_picky" && hls[$0 + 1] == "0" }
+        #expect(picky.count == 2)
+        #expect(zip(picky, inputs).allSatisfy { p, i in
+            p < i && !hls[p..<i].contains("-i")
+        })
+
+        let mp4 = CommandBuilder.ffmpegSegment(
+            input: URL(string: "https://cdn.example.com/v.mp4")!, kind: .mp4, audio: nil, headers: [:],
+            source: input, segment: Segment(start: 0, end: 1), precision: .fast, output: output
+        )
+        #expect(!mp4.contains("-extension_picky"))
+    }
+
     @Test func fastModeCopiesStreams() throws {
         let args = segmentArgs(precision: .fast)
         let c = try #require(args.firstIndex(of: "-c"))
