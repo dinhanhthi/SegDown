@@ -100,7 +100,8 @@ function classify(pathname, ctype) {
 // first, then its oldest entry) and MAX_ENTRIES_PER_TAB per tab (taken from the
 // frame with the most entries, same order).
 // Never call storage.session.setAccessLevel: Cookie values live here. (storage.local,
-// the saved segments, is owned by the hub; see the end of its section.)
+// the saved segments and the app's ui switches, is owned by the hub; see the end
+// of its section.)
 // ---------------------------------------------------------------------------
 
 const capKey = (tabId) => `cap:${tabId}`;
@@ -285,7 +286,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // ---------------------------------------------------------------------------
 // Hub + frame routing (3.3)
 //
-// Message protocol. The agent and the overlay follow it; change it here first.
+// Message protocol. The agent, the overlay and the player button follow it;
+// change it here first.
 //
 // Content -> hub: chrome.runtime.sendMessage({type, ...}). The hub takes the tab
 // and frame ONLY from sender.tab.id / sender.frameId, never from the body. It
@@ -297,12 +299,14 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // Selected frame. The overlay lives in the frame that holds the selected video
 // (hub:<tabId>.selected.frameId), which may be a cross-origin (even ad) iframe:
 // its message bodies are untrusted and the hub only takes menu choices from them
-// (an output mode, an incognito flag, indexes into the hub's own lists), never a
-// URL, headers, a title or segment times. The types marked [selected] below are
-// accepted only from that frame (else {ok: false, error: "not-selected-frame"});
-// their replies are summaries (no URLs, no header values, no captures). One
-// exception: while nothing is selected, a frame may `select` one of its own
-// videos (frameId = its sender.frameId), so it can claim the overlay.
+// (an output mode, an incognito flag, the full-clip flag, indexes into the hub's
+// own lists), never a URL, headers, a title, segment times or a duration. The
+// types marked [selected] below are accepted only from that frame (else {ok:
+// false, error: "not-selected-frame"}); their replies are summaries (no URLs, no
+// header values, no captures). Two exceptions: while nothing is selected, a frame
+// may `select` one of its own videos (frameId = its sender.frameId), so it can
+// claim the overlay; and `openOverlay` (the player button) is accepted from any
+// frame, for its own videos only.
 //
 //   Agent (every frame, owns that frame's <video> elements):
 //   candidates {videos: [{videoKey, area, duration, live, paused, excluded, score,
@@ -354,11 +358,20 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   setPanelOpen {open: boolean} [selected] -> {ok, state} (the overlay's
 //              close button); sends state to "all" like the toggle. panelOpen
 //              stays false while nothing is selected.
-//   getState   any frame -> {ok, state}, plus `segments` (segs:<tabId>, [] if
-//              none) only in the selected video's frame. Agents send it once at
-//              load (and after a back/forward cache restore) for
-//              state.panelOpen (a frame that loads after the overlay opened
-//              missed the `state` broadcast).
+//   getState   any frame -> {ok, state, ui}, plus `segments` (segs:<tabId>, []
+//              if none) only in the selected video's frame. ui: the app's
+//              switches {fullClipButton, playerButton} from storage.local `ui`
+//              (both true when nothing is stored). Agents send it once at load
+//              (and after a back/forward cache restore) for state.panelOpen and
+//              ui (a frame that loads after the overlay opened missed the
+//              `state` broadcast).
+//   openOverlay {videoKey} any frame, NOT [selected] (the player button):
+//              frameId is always the sender's, never the body's. videoKey must
+//              be one of that frame's candidates with excluded null (else {ok:
+//              false, error: "no-video"}). Selects it like `select` (selectedBy
+//              "user"; its errors pass through), opens the panel like
+//              setPanelOpen {open: true} (state to "all"), then sends
+//              toggleOverlay {open: true} to that frame. -> {ok, state}.
 //
 //   Segments. The hub owns the tab's segments: segs:<tabId> in storage.session,
 //   a list sorted by start (then end) of at most MAX_SEGMENTS {start, end}
@@ -473,39 +486,50 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              "deno" (others dropped). The hub asks the app
 //              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "ping"}) ->
 //              {type: "pong", version, missing: [string], protocol?, settings?:
-//              {mode, incognitoDefault, maxDuration?}}, at most once per
-//              DEPS_TTL_MS (10 s; one cached answer for every tab, also for the
-//              settings; concurrent callers share one request). protocol: an
-//              integer >= 1, absent -> 1. settings are checked field by field:
-//              mode "separate" | "merged" (else "separate"), incognitoDefault
-//              (true only when true, so an app without settings gives false),
-//              maxDuration (seconds, finite > 0, else no limit). Every pong sets
-//              the persistence gate to settings.incognitoDefault (Segment
-//              persistence). Any other reply or a failed call -> missing [] and
-//              appError (APP_UNREACHABLE when the call fails), cached the same
-//              way. appError blocks nothing here; Download pings again when the
-//              cached answer is a failure and refuses while the app still does
-//              not answer (below).
+//              {mode, incognitoDefault, maxDuration?, fullClipButton?,
+//              playerButton?}}, at most once per DEPS_TTL_MS (10 s; one cached
+//              answer for every tab, also for the settings; concurrent callers
+//              share one request). protocol: an integer >= 1, absent -> 1.
+//              settings are checked field by field: mode "separate" | "merged"
+//              (else "separate"), incognitoDefault (true only when true, so an
+//              app without settings gives false), maxDuration (seconds, finite >
+//              0, else no limit), fullClipButton and playerButton (false only
+//              when false, so absent -> true). Every pong sets the persistence
+//              gate to settings.incognitoDefault (Segment persistence) and keeps
+//              storage.local `ui` equal to the two switches (written, and sent
+//              as `ui` to "all" in every tab (below), only when they differ
+//              from the stored value). A ping without a pong leaves `ui` as it
+//              is (never pinged: both true). Any other reply or a failed call
+//              -> missing [] and appError (APP_UNREACHABLE when the call fails),
+//              cached the same way. appError blocks nothing here; Download
+//              pings again when the cached answer is a failure and refuses
+//              while the app still does not answer (below).
 //
 //   Send the job (4.3).
-//   download {mode?: "separate" | "merged", incognito?: boolean} [selected]: the
-//              overlay's Download button. Every other field is ignored. The hub
-//              builds the rest from its own state: segments from segs:<tabId>
-//              ([] -> {ok: false, error: "no-segments"}); then the app's pong
-//              (deps; still failing -> the app-unreachable / app-error replies
-//              below); the effective incognito = the tab is incognito
-//              (Incognito) || body incognito (the body can turn it on, never
-//              off), refused with {ok: false, error: "app-outdated", message:
-//              "Update the SegDown app to download incognito"} when the pong's
-//              protocol < 2; the source from resolveSource(tabId) (with captured
-//              headers and the chooseSource / chooseVariant choices; null ->
-//              {ok: false, error: "no-source"}): when it is media, the user
+//   download {mode?: "separate" | "merged", incognito?: boolean, full?: boolean}
+//              [selected]: the overlay's Download button (full: true for its
+//              Full clip button). Every other field is ignored. The hub builds
+//              the rest from its own state: segments from segs:<tabId> ([] ->
+//              {ok: false, error: "no-segments"}; not read for full); then the
+//              app's pong (deps; still failing -> the app-unreachable /
+//              app-error replies below); the effective incognito = the tab is
+//              incognito (Incognito) || body incognito (the body can turn it
+//              on, never off), refused with {ok: false, error: "app-outdated",
+//              message: "Update the SegDown app to download incognito"} when the
+//              pong's protocol < 2; the source from resolveSource(tabId) (with
+//              captured headers and the chooseSource / chooseVariant choices;
+//              null -> {ok: false, error: "no-source"}): when it is media, the user
 //              pinned neither the source (chooseSource) nor a non-default
 //              variant (chooseVariant), protocol >= 2 and top:<tabId> holds an
 //              http(s) URL, the job gets source = {type: "page", url: top URL}
 //              and fallback = that media (the app tries yt-dlp first); otherwise
 //              source = the resolved source and no fallback. mediaDuration: the
 //              selected candidate's duration when finite > 0, else omitted.
+//              full: true ignores the marked segments (segs:<tabId> is neither
+//              read nor written) and sends one segment {start: 0, end: that
+//              duration}; without one -> {ok: false, error: "no-duration"} (live
+//              or unknown), over settings.maxDuration -> {ok: false, error:
+//              "over-limit"} (both checked after the source).
 //              mode: the body's, else settings.mode ("separate" without
 //              settings). The title comes from the tab (sender.tab.title, else
 //              chrome.tabs.get), never from the body or the frame's document:
@@ -513,9 +537,10 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              trimmed, the first MAX_TITLE_CHARS code points kept (the app
 //              counts characters, which are never more than code points, and
 //              sanitizes it again). precision is always "precise" (required on
-//              the wire; the app replaces it with its own setting). The hub
-//              refuses neither a missing tool nor a total over maxDuration (the
-//              overlay disables Download from `view`; the app checks both).
+//              the wire; the app replaces it with its own setting). Apart from
+//              a full clip's over-limit, the hub refuses neither a missing tool
+//              nor a total over maxDuration (the overlay disables Download and
+//              Full clip from `view`; the app checks both).
 //              Then:
 //              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "enqueue", job:
 //              {source, title, segments: [{start, end}], mode, precision,
@@ -598,8 +623,10 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //                incognito {on, forced} (Incognito; before the first pong the
 //                  unknown default counts as off),
 //                mode (settings.mode, "separate" without settings),
-//                overLimit (the segments' total duration > settings.maxDuration)
-//                  and maxDuration (seconds) only when overLimit,
+//                fullClip (settings.fullClipButton: show Full clip; true
+//                  without settings),
+//                overLimit (the segments' total duration > settings.maxDuration),
+//                maxDuration (seconds, or null = no limit; always present),
 //                depsProblem (only when Download must be disabled: ffmpeg
 //                  missing, or yt-dlp missing for a page source without a
 //                  fallback; deno never blocks),
@@ -620,12 +647,15 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   to "overlay" (the selected video's frame):
 //     segments {segments: [{start, end}]}: after every change of segs:<tabId>
 //     mark {action, time, frameId, videoKey, start?, end?} | markError {action, error}
-//     toggleOverlay {open}: the toggle below; open = the new panelOpen.
+//     toggleOverlay {open}: the toggle below or `openOverlay`; open = the new
+//     panelOpen.
 //     sourceChanged {}: a probe run stored results; the overlay asks `view` again.
 //   to "all" (every frame, no frameId option):
 //     state {state} after the selection, selectedBy or pendingStart changes.
 //     Also sent after panelOpen changes: agents listen for `[` / `]` only while
 //     the overlay is open.
+//     ui {ui: {fullClipButton, playerButton}} to every tab (chrome.tabs.query)
+//     when a pong changed the stored switches (storage.local `ui`).
 //
 // Overlay toggle (3.5): the "toggle-panel" command and the toolbar button
 // (chrome.action.onClicked; fires once the manifest has no default_popup, 5.4)
@@ -678,6 +708,9 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // access level is set to trusted contexts where the browser supports that):
 //   seg:<url>    -> {segments, ts}   (at most 200, newest ts kept; entries saved by
 //                    older versions also carry mode and precision, ignored)
+//   ui           -> {fullClipButton, playerButton}   (the app's switches from the
+//                    last pong; absent -> both true; sent to content scripts only
+//                    through getState and the `ui` broadcast)
 // ---------------------------------------------------------------------------
 
 const MAX_CANDIDATES_PER_FRAME = 20;
@@ -706,6 +739,7 @@ const MAX_OUTPUTS = 100; // output names per job
 const PORT_IDLE_MS = 5 * 1000;
 const STATUS_TIMEOUT_MS = 20 * 1000;
 const TITLES_KEY = "jobt";
+const UI_KEY = "ui"; // storage.local: the app's switches from the last pong
 const DEPS_TTL_MS = 10 * 1000; // ping answers (missing tools, settings) are reused this long
 const TOOLS = new Set(["yt-dlp", "ffmpeg", "ffprobe", "deno"]); // SegDownCore Tool raw values
 const INCOGNITO_NEEDS_UPDATE = "Update the SegDown app to download incognito";
@@ -775,6 +809,7 @@ const HUB_VALIDATORS = new Map([
         ? { frameId: m.frameId, videoKey: m.videoKey }
         : null,
   ],
+  ["openOverlay", (m) => (isVideoKey(m.videoKey) ? { videoKey: m.videoKey } : null)],
   ["getState", () => ({})],
   ["setPanelOpen", (m) => (typeof m.open === "boolean" ? { open: m.open } : null)],
   ["getSource", () => ({})],
@@ -783,8 +818,10 @@ const HUB_VALIDATORS = new Map([
   [
     "download",
     (m) =>
-      (m.mode === undefined || MODES.has(m.mode)) && (m.incognito === undefined || typeof m.incognito === "boolean")
-        ? { mode: m.mode === undefined ? null : m.mode, incognito: m.incognito === true }
+      (m.mode === undefined || MODES.has(m.mode)) &&
+      (m.incognito === undefined || typeof m.incognito === "boolean") &&
+      (m.full === undefined || typeof m.full === "boolean")
+        ? { mode: m.mode === undefined ? null : m.mode, incognito: m.incognito === true, ...(m.full === true ? { full: true } : {}) }
         : null,
   ],
   ["jobs", () => ({})],
@@ -1076,13 +1113,27 @@ async function setPanelOpen(tabId, open) {
   return { ok: true, state: hub };
 }
 
+// Player button: the sender frame (never the message) selects one of its own
+// non-excluded videos and opens the overlay on it. Not selected-frame gated.
+async function onOpenOverlay(tabId, frameId, { videoKey }) {
+  const cands = await withTab(tabId, () => readCands(tabId));
+  if (!(cands[frameId] || []).some((v) => v.videoKey === videoKey && v.excluded === null)) {
+    return { ok: false, error: "no-video" };
+  }
+  const selected = await onSelect(tabId, { frameId, videoKey });
+  if (!selected.ok) return selected;
+  const { state } = await setPanelOpen(tabId, true);
+  notifyOverlay(tabId, frameId, { type: "toggleOverlay", open: true });
+  return { ok: true, state };
+}
+
 // Only the selected video's frame gets segments (it holds the overlay).
 async function onGetState(tabId, frameId) {
   const { hub, segments } = await withTab(tabId, async () => ({
     hub: await readHub(tabId),
     segments: await readSegments(tabId),
   }));
-  const reply = { ok: true, state: hub };
+  const reply = { ok: true, state: hub, ui: await readUI() };
   if (hub.selected && hub.selected.frameId === frameId) reply.segments = segments;
   return reply;
 }
@@ -1412,11 +1463,33 @@ function cleanSettings(s) {
     mode: MODES.has(o.mode) ? o.mode : "separate",
     incognitoDefault: o.incognitoDefault === true,
     maxDuration: isFiniteNum(o.maxDuration) && o.maxDuration > 0 ? o.maxDuration : null,
+    fullClipButton: o.fullClipButton !== false,
+    playerButton: o.playerButton !== false,
   };
 }
 
+// storage.local ui, checked; never pinged (nothing stored) -> both switches on.
+async function readUI() {
+  const u = (await chrome.storage.local.get(UI_KEY))[UI_KEY];
+  return isObject(u) && typeof u.fullClipButton === "boolean" && typeof u.playerButton === "boolean"
+    ? { fullClipButton: u.fullClipButton, playerButton: u.playerButton }
+    : { fullClipButton: true, playerButton: true };
+}
+
+// After a pong: saves the switches when they changed and sends them to every tab.
+async function updateUI(settings) {
+  const ui = { fullClipButton: settings.fullClipButton, playerButton: settings.playerButton };
+  const prev = await readUI();
+  if (prev.fullClipButton === ui.fullClipButton && prev.playerButton === ui.playerButton) return;
+  await chrome.storage.local.set({ [UI_KEY]: ui });
+  for (const tab of await chrome.tabs.query({})) {
+    if (Number.isInteger(tab.id) && tab.id >= 0) notifyAll(tab.id, { type: "ui", ui });
+  }
+}
+
 // -> {missing: [tool], protocol, settings} or {missing: [], appError}. Never
-// throws. Every pong sets the persistence gate (incognitoDefault).
+// throws. Every pong sets the persistence gate (incognitoDefault) and the
+// storage.local ui switches (updateUI).
 async function pingNative() {
   let reply;
   try {
@@ -1430,6 +1503,7 @@ async function pingNative() {
     const opened = incognitoDefault === null;
     incognitoDefault = settings.incognitoDefault;
     if (opened) persistHeldSegments().catch(hubWarn);
+    updateUI(settings).catch(hubWarn);
     const missing = [...new Set(reply.missing.filter((t) => typeof t === "string" && TOOLS.has(t)))];
     return { missing, protocol, settings };
   }
@@ -1665,8 +1739,9 @@ function appFailure(appError) {
 }
 
 async function onDownload(tabId, from, body) {
-  const segments = await withTab(tabId, () => readSegments(tabId));
-  if (!segments.length) return { ok: false, error: "no-segments" };
+  // A full clip never reads segs:<tabId>: its one segment comes from the plan below.
+  let segments = body.full ? null : await withTab(tabId, () => readSegments(tabId));
+  if (segments && !segments.length) return { ok: false, error: "no-segments" };
   // Settings, protocol and the incognito default come from a pong: without one
   // the job cannot follow the user's incognito choice.
   const app = await fetchDeps(true);
@@ -1675,6 +1750,13 @@ async function onDownload(tabId, from, body) {
   if (incognito && app.protocol < 2) return { ok: false, error: "app-outdated", message: INCOGNITO_NEEDS_UPDATE };
   const plan = await planSource(tabId, app.protocol); // own withTab turns; never nest
   if (!plan) return { ok: false, error: "no-source" };
+  if (body.full) {
+    // The end is the hub's own duration of the selected video, never the message's.
+    const d = plan.r.duration;
+    if (!isFiniteNum(d) || !(d > 0)) return { ok: false, error: "no-duration" };
+    if (app.settings.maxDuration !== null && d > app.settings.maxDuration) return { ok: false, error: "over-limit" };
+    segments = [{ start: 0, end: d }];
+  }
   const title = await tabTitle(tabId, from);
   const mode = body.mode || app.settings.mode;
   // precision is required on the wire, but the app replaces it with its own setting.
@@ -1962,13 +2044,14 @@ async function onView(tabId, from) {
     videoIndex: videoIndex >= 0 ? videoIndex : null,
     incognito: { on: inc.on, forced: inc.forced },
     mode: settings.mode,
+    fullClip: settings.fullClipButton,
     overLimit,
+    maxDuration: settings.maxDuration, // null = no limit
     job: newest
       ? (({ id, state, segmentIndex, segmentCount, fraction, bytes, message, fallbackUsed }) =>
           ({ id, state, segmentIndex, segmentCount, fraction, bytes, message, fallbackUsed }))(newest)
       : null,
   };
-  if (overLimit) reply.maxDuration = settings.maxDuration;
   const problem = depsProblem(app.missing, plan);
   if (problem) reply.depsProblem = problem;
   if (app.appError) reply.appError = app.appError;
@@ -2003,6 +2086,8 @@ function route(tabId, frameId, type, body, from) {
       return toSelected(tabId, { type, ...body });
     case "select":
       return onSelect(tabId, body);
+    case "openOverlay":
+      return onOpenOverlay(tabId, frameId, body);
     case "getState":
       return onGetState(tabId, frameId);
     case "setPanelOpen":

@@ -19,7 +19,8 @@
 //     {"type": "pong", "version": "1.0", "missing": ["yt-dlp", "deno"],    // missing tools, may be []
 //      "protocol": 2,                                                    // absent → 1
 //      "settings": {"mode": "separate", "incognitoDefault": false,       // optional
-//                   "maxDuration": 600}}                                 // maxDuration optional
+//                   "maxDuration": 600,                                  // maxDuration optional
+//                   "fullClipButton": true, "playerButton": true}}       // absent → true
 //     {"type": "enqueued", "id": "…"}
 //     {"type": "status", "jobs": [{…JobStatus…}]}
 //     {"type": "cancelled", "id": "…"}
@@ -81,16 +82,41 @@ extension IPCRequest: Codable {
 }
 
 /// The app settings an extension needs, sent in `pong` (protocol 2). `maxDuration` is the max total
-/// duration of a job's segments in seconds; `nil` means no limit.
+/// duration of a job's segments in seconds; `nil` means no limit. `fullClipButton` and
+/// `playerButton` turn on the overlay's Full clip button and the button on video players; an older
+/// app's missing keys decode to `true`.
 public struct ClientSettings: Codable, Sendable, Hashable {
     public var mode: OutputMode
     public var incognitoDefault: Bool
     public var maxDuration: Double?
+    public var fullClipButton: Bool
+    public var playerButton: Bool
 
-    public init(mode: OutputMode, incognitoDefault: Bool, maxDuration: Double? = nil) {
+    public init(
+        mode: OutputMode,
+        incognitoDefault: Bool,
+        maxDuration: Double? = nil,
+        fullClipButton: Bool = true,
+        playerButton: Bool = true
+    ) {
         self.mode = mode
         self.incognitoDefault = incognitoDefault
         self.maxDuration = maxDuration
+        self.fullClipButton = fullClipButton
+        self.playerButton = playerButton
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case mode, incognitoDefault, maxDuration, fullClipButton, playerButton
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try c.decode(OutputMode.self, forKey: .mode)
+        incognitoDefault = try c.decode(Bool.self, forKey: .incognitoDefault)
+        maxDuration = try c.decodeIfPresent(Double.self, forKey: .maxDuration)
+        fullClipButton = try c.decodeIfPresent(Bool.self, forKey: .fullClipButton) ?? true
+        playerButton = try c.decodeIfPresent(Bool.self, forKey: .playerButton) ?? true
     }
 }
 

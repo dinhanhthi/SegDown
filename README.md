@@ -15,7 +15,7 @@
 
 ## Features
 
-- A browser extension (Chrome, Chromium, Brave, Edge, Arc and Safari) puts a segment bar on the page's video: mark ranges with Mark start / Mark end or `[` / `]`.
+- A browser extension (Chrome, Chromium, Brave, Edge, Arc and Safari) puts a segment bar on the page's video: mark ranges with Mark start / Mark end or `[` / `]`, or take the whole video with Full clip.
 - The SegDown app on your Mac downloads only those ranges: direct mp4 and HLS (including clear-key AES-128) with `ffmpeg`, and pages that `yt-dlp` supports with `yt-dlp`.
 - One file per range, or all ranges merged into one mp4.
 - Precise cuts (re-encoded, exact times) or Fast cuts (no re-encoding, nearest keyframes).
@@ -63,12 +63,14 @@ After each update, replace the `SegDown-extension/` folder with the new release'
 ## Use
 
 1. Play the video, so the extension sees its media.
-2. Click the SegDown toolbar button, or press Alt+Shift+S.
+2. Click the SegDown icon at the top-left of the video (it shows while the pointer is over it), click the SegDown toolbar button, or press Alt+Shift+S.
 3. Mark the ranges: Mark start / Mark end, or `[` / `]`.
-4. Click Download. The ▾ menu picks separate or merged files, incognito, quality, source or video.
+4. Click Download. The ▾ menu picks separate or merged files, incognito, quality, source or video. Full clip downloads the whole video instead and leaves the ranges as they are (not for live video, or video longer than the Max total duration).
 5. Follow the progress on the overlay or in the app's Downloads page.
 
 Files land in `~/Downloads/SegDown/<page title>/` (change it in Settings).
+
+Settings › Browser turns off the Full clip button and the icon on videos. A change reaches the browser the next time you open the overlay.
 
 ## Not supported
 

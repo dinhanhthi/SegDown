@@ -44,13 +44,34 @@ struct WireCompatibilityTests {
             version: "1.0",
             missing: ["deno"],
             protocol: IPC.protocolVersion,
-            settings: ClientSettings(mode: .merged, incognitoDefault: true, maxDuration: 600)
+            settings: ClientSettings(
+                mode: .merged,
+                incognitoDefault: true,
+                maxDuration: 600,
+                fullClipButton: false,
+                playerButton: false
+            )
         )
 
         let line = try IPC.encodeLine(pong)
 
         #expect(String(decoding: line, as: UTF8.self).contains(#""protocol":2"#))
         #expect(try IPC.decodeLine(IPCResponse.self, from: line) == pong)
+    }
+
+    @Test func protocol2PongWithoutButtonKeysDecodesWithBothButtonsOn() throws {
+        let line = #"{"type":"pong","version":"0.2.1","missing":[],"protocol":2,"settings":{"mode":"separate","incognitoDefault":false}}"#
+
+        let response = try IPC.decodeLine(IPCResponse.self, from: Data(line.utf8))
+
+        guard case let .pong(_, _, _, settings) = response else {
+            Issue.record("expected .pong, got \(response)")
+            return
+        }
+        let decoded = try #require(settings)
+        #expect(decoded.fullClipButton)
+        #expect(decoded.playerButton)
+        #expect(decoded.maxDuration == nil)
     }
 
     @Test func statusWithoutBytesAndFallbackUsedDecodesAndNilKeysAreOmitted() throws {

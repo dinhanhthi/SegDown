@@ -96,6 +96,12 @@ struct SettingsView: View {
                 switchRow(isOn: setting(\.incognitoDefault), title: "Incognito by default",
                           hint: "Jobs are not kept in history; the browser does not keep their segments.")
             }
+            Section("Browser") {
+                switchRow(isOn: setting(\.fullClipButton), title: "Full clip button",
+                          hint: "Adds a Full clip button to the overlay that downloads the whole video.")
+                switchRow(isOn: setting(\.playerButton), title: "Button on video players",
+                          hint: "Shows a SegDown button on a video while the pointer is over it.")
+            }
             Section {
                 LabeledContent {
                     Button("Clear history…") { confirmClear = true }

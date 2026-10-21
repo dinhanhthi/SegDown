@@ -22,6 +22,10 @@ struct AppSettings: Codable, Equatable, Sendable {
     var incognitoDefault = false
     /// Re-encode each finished job's files to make them smaller.
     var compress = false
+    /// The extension shows a Full clip button in the overlay.
+    var fullClipButton = true
+    /// The extension shows a SegDown button on a video player under the pointer.
+    var playerButton = true
 
     /// The user's real home from the password database, like `IPC.socketURL()`.
     static let home = getpwuid(getuid()).flatMap { $0.pointee.pw_dir.map { String(cString: $0) } }
@@ -33,7 +37,8 @@ struct AppSettings: Codable, Equatable, Sendable {
 
     /// What the extension gets in `pong`.
     var clientSettings: ClientSettings {
-        ClientSettings(mode: mode, incognitoDefault: incognitoDefault, maxDuration: maxDuration)
+        ClientSettings(mode: mode, incognitoDefault: incognitoDefault, maxDuration: maxDuration,
+                       fullClipButton: fullClipButton, playerButton: playerButton)
     }
 
     var jobOptions: JobOptions {
@@ -49,6 +54,7 @@ struct AppSettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case outputFolder, mode, precision, autoFallback, maxBytes, maxDuration, incognitoDefault, compress
+        case fullClipButton, playerButton
     }
 }
 
@@ -64,6 +70,8 @@ extension AppSettings {
         maxDuration = try c.decodeIfPresent(Double.self, forKey: .maxDuration) ?? defaults.maxDuration
         incognitoDefault = try c.decodeIfPresent(Bool.self, forKey: .incognitoDefault) ?? defaults.incognitoDefault
         compress = try c.decodeIfPresent(Bool.self, forKey: .compress) ?? defaults.compress
+        fullClipButton = try c.decodeIfPresent(Bool.self, forKey: .fullClipButton) ?? defaults.fullClipButton
+        playerButton = try c.decodeIfPresent(Bool.self, forKey: .playerButton) ?? defaults.playerButton
     }
 }
 

@@ -4,6 +4,7 @@
 // 3.4: visible area, score and exclusions (the hub picks across frames).
 // 3.6: `[` / `]` mark keys while the overlay is open.
 // 5.3: shares the selected video and the hub's state with overlay.js (below).
+// Also shares the app's ui switches and the eligible videos with button.js.
 
 "use strict";
 
@@ -30,6 +31,7 @@
   let panelOpen = false; // from the hub's `state` broadcast; keys are live only while open
   let hubState = null; // last hub `state` (for overlay.js)
   let stateSeen = false; // a broadcast beats the boot getState reply
+  let ui = { fullClipButton: true, playerButton: true }; // the app's switches (getState, `ui` broadcast)
   const observedRoots = new WeakSet(); // open shadow roots already under the observer
 
   // Throws once the extension reloads ("Extension context invalidated"); ignore.
@@ -200,6 +202,13 @@
     }
   }
 
+  // Replaced whole, only by two booleans.
+  function applyUI(u) {
+    if (u && typeof u === "object" && typeof u.fullClipButton === "boolean" && typeof u.playerButton === "boolean") {
+      ui = { fullClipButton: u.fullClipButton, playerButton: u.playerButton };
+    }
+  }
+
   function applyHubState(state) {
     if (!state || typeof state !== "object") return;
     hubState = state;
@@ -210,10 +219,21 @@
   // Shared with overlay.js (same isolated world, loaded after this file; the page
   // cannot see it): the selected video of this frame and the hub's last `state`.
   // overlay.js sets onChange; it runs after a `select`, a `state` and when the
-  // selected video leaves the document.
+  // selected video leaves the document. button.js reads ui() and eligible():
+  // the tracked videos that are connected, not excluded and of a finite
+  // duration > 0, as [{videoKey, video}].
   const shared = {
     video: () => (selectedKey && videos.get(selectedKey)) || null,
     state: () => hubState,
+    ui: () => ui,
+    eligible: () => {
+      const out = [];
+      for (const [videoKey, video] of videos) {
+        if (!video.isConnected || exclusionOf(video) !== null) continue;
+        if (Number.isFinite(video.duration) && video.duration > 0) out.push({ videoKey, video });
+      }
+      return out;
+    },
     onChange: null,
   };
   globalThis.segdownAgent = shared;
@@ -227,6 +247,10 @@
     if (msg.to === "all" && msg.type === "state") {
       stateSeen = true;
       applyHubState(msg.state);
+      return undefined;
+    }
+    if (msg.to === "all" && msg.type === "ui") {
+      applyUI(msg.ui);
       return undefined;
     }
     if (msg.to !== "agent") return undefined;
@@ -249,7 +273,8 @@
   //   elements in practice. Known false positive: while a focusable light-DOM
   //   custom element has focus (e.g. <video-js tabindex="-1">), `[` / `]` are
   //   left to the page and do not mark.
-  // The SegDown overlay's host is exempt (its closed root has buttons only).
+  // The SegDown overlay's and player button's hosts are exempt (their closed
+  // roots have buttons only).
   function shadowRootOf(t) {
     try {
       return chrome.dom.openOrClosedShadowRoot(t) || null;
@@ -265,7 +290,7 @@
   function typingTarget(e) {
     let t = e.composedPath()[0] || e.target;
     if (!t || t.nodeType !== 1) return false;
-    if (t.localName === "segdown-overlay") return false;
+    if (t.localName === "segdown-overlay" || t.localName === "segdown-button") return false;
     const api = typeof chrome !== "undefined" && chrome.dom && typeof chrome.dom.openOrClosedShadowRoot === "function";
     if (!api) return (t.localName.includes("-") && !t.shadowRoot) || isTextField(t);
     for (let depth = 0; depth < 32; depth++) {
@@ -290,12 +315,15 @@
 
   window.addEventListener("keydown", onKeyDown, true);
 
-  // A frame that loads after the overlay opened missed the broadcast.
+  // A frame that loads after the overlay opened missed the broadcast. The ui
+  // switches are taken from every reply.
   function requestState() {
     try {
       chrome.runtime.sendMessage({ type: "getState" }).then(
         (r) => {
-          if (!stateSeen && r && r.ok) applyHubState(r.state);
+          if (!r || !r.ok) return;
+          applyUI(r.ui);
+          if (!stateSeen) applyHubState(r.state);
         },
         () => {}
       );

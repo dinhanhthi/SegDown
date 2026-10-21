@@ -1,8 +1,9 @@
 // SegDown overlay (5.3): runs in every frame and shows only in the frame of the
 // selected video while the overlay is open (hub state.panelOpen). A thin segment
-// bar on the video's bottom edge plus Mark start / Mark end / Download buttons, in
-// a closed shadow root shown in the top layer (popover="manual", spike 1.2), so it
-// stays above the page and every kind of fullscreen.
+// bar on the video's bottom edge plus Mark start / Mark end / Full clip / Download
+// buttons (Full clip only while the app's switch is on), in a closed shadow root
+// shown in the top layer (popover="manual", spike 1.2), so it stays above the page
+// and every kind of fullscreen.
 // Talks to the hub in background.js (the protocol is documented there) and reads
 // the video through agent.js (globalThis.segdownAgent, same isolated world).
 // Page data is untrusted: the DOM is built with textContent only, handlers act on
@@ -37,6 +38,8 @@
     "not-selected-frame": "The video changed; try again.",
     "no-segments": "Mark a segment first.",
     "no-source": "No video source found on this page.",
+    "no-duration": "The video's duration is unknown.",
+    "over-limit": "The video is longer than the Max total duration in SegDown Settings.",
     "incognito-forced": "Incognito is always on in a private window.",
     "no-reply": "SegDown did not answer. Reload the page.",
   };
@@ -82,7 +85,7 @@
       display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
     }
     .box { background: rgba(28, 28, 30, 0.9); border: 1px solid #3a3a3c; border-radius: 9px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4); }
-    .row { display: flex; gap: 4px; padding: 4px; pointer-events: auto; }
+    .row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; padding: 4px; pointer-events: auto; }
     button {
       all: unset; box-sizing: border-box; padding: 4px 9px; border-radius: 6px; background: #2c2c2e;
       color: inherit; font: inherit; white-space: nowrap; cursor: pointer;
@@ -97,7 +100,7 @@
     .split .more { border-radius: 0 6px 6px 0; padding: 4px 6px; border-left: 1px solid rgba(0, 0, 0, 0.3); }
     .close { background: transparent; padding: 4px 7px; color: #aeaeb2; }
     .lines { max-width: 340px; padding: 3px 8px; color: #aeaeb2; font-variant-numeric: tabular-nums; }
-    .lines div[hidden], .menu[hidden] { display: none; }
+    .lines div[hidden], .menu[hidden], button[hidden] { display: none; }
     .lines div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .warn { color: #ffd60a; }
     .err { color: #ff6961; }
@@ -429,13 +432,16 @@
     });
   }
 
-  function download() {
-    if (downloadBlock()) return;
+  // full: the Full clip button (one segment [0, duration], built by the hub).
+  function download(full) {
+    if (full ? fullBlock() : downloadBlock()) return;
     busy = true;
     note = "";
     render();
     const incognito = Boolean(view.incognito && view.incognito.on);
-    ask({ type: "download", mode: currentMode(), incognito }).then((r) => {
+    const msg = { type: "download", mode: currentMode(), incognito };
+    if (full) msg.full = true;
+    ask(msg).then((r) => {
       busy = false;
       if (!host) return;
       if (r.ok) {
@@ -456,6 +462,20 @@
     if (!list.length) return { text: "Mark a segment first: Mark start, then Mark end." };
     if (view.overLimit) {
       const text = `Total ${fmtTime(totalOf(list))} is over the ${fmtTime(view.maxDuration)} limit (Max total duration in SegDown Settings).`;
+      return { text, warn: true };
+    }
+    if (typeof view.depsProblem === "string") return { text: view.depsProblem, warn: true };
+    if (typeof view.appError === "string") return { text: view.appError, warn: true };
+    return null;
+  }
+
+  // -> {text, warn} when Full clip must stay disabled, else null.
+  function fullBlock() {
+    if (busy) return { text: "Sending…" };
+    if (!view) return { text: "Loading…" };
+    if (!(view.duration > 0)) return { text: "Duration unknown (live stream?)" };
+    if (view.maxDuration !== null && view.duration > view.maxDuration) {
+      const text = `Video ${fmtTime(view.duration)} is over the ${fmtTime(view.maxDuration)} limit (Max total duration in SegDown Settings).`;
       return { text, warn: true };
     }
     if (typeof view.depsProblem === "string") return { text: view.depsProblem, warn: true };
@@ -515,12 +535,15 @@
     const end = make("button", null, "Mark end");
     onClick(start, () => act({ type: "key", action: "markStart" }));
     onClick(end, () => act({ type: "key", action: "markEnd" }));
+    const full = make("button", null, "Full clip");
+    full.hidden = true;
+    onClick(full, () => download(true));
     const main = make("button", "main", "Download");
     const more = make("button", "more", "▾");
     more.setAttribute("aria-label", "Download options");
     more.setAttribute("aria-haspopup", "menu");
     more.setAttribute("aria-expanded", "false");
-    onClick(main, download);
+    onClick(main, () => download(false));
     onClick(more, () => setMenu(!menuOpen));
     const split = make("div", "split");
     split.append(main, more);
@@ -528,7 +551,7 @@
     close.setAttribute("aria-label", "Close SegDown");
     onClick(close, () => act({ type: "setPanelOpen", open: false }));
     const row = make("div", "box row");
-    row.append(start, end, split, close);
+    row.append(start, end, full, split, close);
 
     const menu = make("div", "box menu");
     menu.setAttribute("role", "menu");
@@ -544,7 +567,7 @@
     uiBox.append(bar, panel);
     wrap.append(uiBox);
     root.append(make("style", null, CSS), wrap);
-    return { wrap, bar, segs, pending, head, start, end, main, more, menu, panel, lines, jobLine, statusLine };
+    return { wrap, bar, segs, pending, head, start, end, full, main, more, menu, panel, lines, jobLine, statusLine };
   }
 
   function onBarClick(e) {
@@ -611,6 +634,10 @@
     const block = downloadBlock();
     ui.main.disabled = Boolean(block);
     ui.main.title = block ? block.text : "Download the marked segments";
+    ui.full.hidden = !(view && view.fullClip === true);
+    const fb = fullBlock();
+    ui.full.disabled = Boolean(fb);
+    ui.full.title = fb ? fb.text : "Download the whole video";
     renderBar();
     renderLines(block);
     ui.menu.hidden = !menuOpen;
