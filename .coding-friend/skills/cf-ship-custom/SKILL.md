@@ -113,22 +113,22 @@ gh repo view dinhanhthi/SegDown --json visibility --jq .visibility
 `X.Y.Z` is `MARKETING_VERSION` in `project.yml` at `HEAD`. Decide from the **remote** state
 (`git fetch origin` first; `HEAD` subject: `git log -1 --format=%s`), in this order:
 
-- **(a) Unpushed commits.** If `git rev-list origin/main..HEAD` is non-empty, push only when the
-  whole range is release commits. Check every commit:
+- **(a) Unpushed commits.** If `git rev-list origin/main..HEAD` is non-empty, push the range
+  (release commits and the maintainer's own feature commits alike) only when it has no merge
+  commit and every commit was authored and committed by you (`$me` from Step B0). Check every
+  commit:
 
   ```bash
   git rev-list --merges origin/main..HEAD          # must print nothing
   for c in $(git rev-list origin/main..HEAD); do
-    echo "$c $(git log -1 --format=%s "$c")"       # subject must start with "chore(release): "
-    git diff-tree --no-commit-id --name-only -r "$c" \
-      | grep -vxE 'CHANGELOG\.md|project\.yml|extension/manifest\.json|appcast\.xml'   # must print nothing
+    echo "$c $(git log -1 --format='%ae %ce %s' "$c")"   # both emails must be $me
   done
   ```
 
-  All pass → `git push origin main`, then keep evaluating (b)–(d). Any merge commit, other
-  subject or other file → stop: "origin/main..HEAD holds commits that are not release commits —
-  review and push them yourself, then run /cf-ship again." Never push such a range (this also
-  covers unpushed feature commits under a new release).
+  All pass → `git push origin main`, then keep evaluating (b)–(d); the pushed feature commits
+  are part of this release (Step B1 collects them). Any merge commit, or an author or committer
+  other than `$me` → stop: "origin/main..HEAD holds commits that are not yours (or a merge) —
+  review and push them yourself, then run /cf-ship again." Never push such a range.
 - **(b) Tag missing on origin.** `git ls-remote --tags origin refs/tags/vX.Y.Z` is empty and the
   `HEAD` subject is `chore(release): vX.Y.Z` → a previous run committed but did not ship. If a
   local tag exists (`git tag -l vX.Y.Z` non-empty, i.e. its push failed and no release exists),
