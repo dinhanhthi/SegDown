@@ -1,5 +1,6 @@
-// segdown-host: the Chrome native messaging host, embedded at SegDown.app/Contents/MacOS.
-// Chrome starts it with argv[1] = the caller origin. It relays each framed request on stdin to
+// segdown-host: the Chrome and Firefox native messaging host, embedded at SegDown.app/Contents/MacOS.
+// Chrome starts it with argv[1] = the caller origin; Firefox with argv[1] = the host manifest path and
+// argv[2] = the add-on id (`ExtensionID.isAllowedCaller`). It relays each framed request on stdin to
 // the menu bar app over the Unix socket (one connection per request) and writes the framed reply
 // to stdout, launching the app hidden when it is not running. stdout carries frames only; logs go
 // to stderr and never contain payloads.
@@ -85,7 +86,7 @@ func unavailable(_ error: any Error) -> IPCResponse {
 signal(SIGPIPE, SIG_IGN)
 
 let arguments = CommandLine.arguments
-guard arguments.count >= 2, arguments[1] == ExtensionID.chromeOrigin else {
+guard ExtensionID.isAllowedCaller(arguments) else {
     log("rejected caller")
     reply(.error(code: IPCResponse.ErrorCode.invalid, message: "Unknown caller"))
     exit(1)

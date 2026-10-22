@@ -14,6 +14,9 @@
 // Logs one line per new capture (frameId, kind, header names; never values or URLs).
 const DEBUG = true;
 
+// Only the Firefox build (scripts/build-firefox-addon.sh) has a gecko block in its manifest.
+const IS_FIREFOX = Boolean(chrome.runtime.getManifest().browser_specific_settings?.gecko);
+
 // Same canonical names as SegDownCore Validation.allowedHeaders.
 const ALLOWED_HEADERS = ["Referer", "Origin", "User-Agent", "Cookie"];
 const MAX_HEADER_VALUE_BYTES = 8 * 1024; // Validation.maxHeaderValueBytes
@@ -1608,8 +1611,10 @@ let downloadsInFlight = 0;
 // Browsers page), so an app version other than this one means newer files on disk:
 // reload to run them. Once per version pair, so a copy loaded from elsewhere (an
 // older release zip) or Safari's appex never loops. Never during a download: a
-// later ping (after DEPS_TTL_MS) reloads instead.
+// later ping (after DEPS_TTL_MS) reloads instead. Never on Firefox: the signed add-on
+// rereads the same package, and Firefox updates it from its update_url.
 async function reloadIfOutdated(appVersion) {
+  if (IS_FIREFOX) return;
   const own = chrome.runtime.getManifest().version;
   if (typeof appVersion !== "string" || appVersion === own || typeof chrome.runtime.reload !== "function") return;
   if (downloadsInFlight > 0) return;
@@ -2143,9 +2148,10 @@ function cleanJobStatus(s) {
 
 // The status port: one connectNative port, replies matched to requests in order.
 const statusPort = { port: null, pending: [], idleTimer: null, fallbackNext: false };
-// Safari (the only target with globalThis.browser) hands port messages to the appex but
-// never routes its replies back to the port, so status always uses sendNativeMessage there.
-const HAS_STATUS_PORT = typeof chrome.runtime.connectNative === "function" && typeof globalThis.browser === "undefined";
+// Safari (the only target besides Firefox with globalThis.browser) hands port messages to the
+// appex but never routes its replies back to the port, so status always uses sendNativeMessage there.
+const HAS_STATUS_PORT = typeof chrome.runtime.connectNative === "function"
+  && (typeof globalThis.browser === "undefined" || IS_FIREFOX);
 
 function openStatusPort() {
   const port = chrome.runtime.connectNative(NATIVE_HOST);

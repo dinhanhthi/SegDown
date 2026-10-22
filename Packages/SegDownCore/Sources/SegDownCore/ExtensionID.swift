@@ -6,4 +6,14 @@ public enum ExtensionID {
 
     /// The `allowed_origins` entry and the origin Chrome passes to the host as `argv[1]`.
     public static var chromeOrigin: String { "chrome-extension://\(chrome)/" }
+
+    /// The Firefox add-on's gecko id. Must equal the id scripts/build-firefox-addon.sh writes into the manifest.
+    public static let firefox = "me@dinhanhthi.com"
+
+    /// Whether segdown-host was started by SegDown's extension. Chrome passes its origin as `argv[1]`;
+    /// Firefox passes the host manifest path as `argv[1]` and the add-on's gecko id as `argv[2]`.
+    public static func isAllowedCaller(_ arguments: [String]) -> Bool {
+        (arguments.count >= 2 && arguments[1] == chromeOrigin)
+            || (arguments.count >= 3 && arguments[2] == firefox)
+    }
 }

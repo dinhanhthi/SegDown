@@ -1,6 +1,7 @@
 // The Browsers page: the native messaging host manifest of each Chromium browser (install or reinstall),
-// the folder Chromium browsers load the extension from, the state of the Safari extension, and when each
-// browser last reached the app.
+// the folder Chromium browsers load the extension from, the Firefox add-on (host manifest, then the signed
+// .xpi of this version from the GitHub release), the state of the Safari extension, and when each browser
+// last reached the app.
 import SafariServices
 import SegDownCore
 import SwiftUI
@@ -12,6 +13,7 @@ struct BrowsersView: View {
     /// The outcome of the last install.
     @State private var message: (text: String, isError: Bool)?
     @State private var safariError: String?
+    @State private var firefoxMessage: (text: String, isError: Bool)?
 
     static let safariExtensionID = "com.math2it.segdown.safari"
     static let safariBundleID = "com.apple.Safari"
@@ -31,7 +33,7 @@ struct BrowsersView: View {
     var body: some View {
         Form {
             Section {
-                ForEach(statuses) { status in
+                ForEach(chromiumStatuses) { status in
                     LabeledContent {
                         stateText(status)
                     } label: {
@@ -40,11 +42,11 @@ struct BrowsersView: View {
                     }
                 }
                 LabeledContent {
-                    Button(statuses.contains(where: \.installed) ? "Reinstall" : "Install", action: install)
+                    Button(chromiumStatuses.contains(where: \.installed) ? "Reinstall" : "Install", action: install)
                         .buttonStyle(RowTextButtonStyle(formRow: true))
                 } label: {
                     Text("Browser integration")
-                    Text("Installs the native messaging host for every Chromium browser found.")
+                    Text("Installs the native messaging host for every Chromium browser and Firefox found.")
                 }
                 if let message {
                     Text(message.text)
@@ -76,6 +78,31 @@ struct BrowsersView: View {
                     Spacer()
                     Button("Re-check", action: refresh)
                         .buttonStyle(RowTextButtonStyle(formRow: true))
+                }
+            }
+            Section("Firefox") {
+                if let firefoxStatus {
+                    LabeledContent {
+                        stateText(firefoxStatus)
+                    } label: {
+                        Text("Firefox")
+                        Text(lastConnected(HostManifestInstaller.firefoxBundleID))
+                    }
+                }
+                LabeledContent {
+                    Button("Install in Firefox", action: installInFirefox)
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
+                } label: {
+                    Text("SegDown add-on")
+                    Text("Installs the native messaging host, then opens the add-on in Firefox. Allow the install, "
+                        + "then let SegDown access all websites in about:addons (Permissions) if Firefox asks. "
+                        + "Private windows need \"Run in Private Windows\". Firefox keeps the add-on up to date.")
+                }
+                if let firefoxMessage {
+                    Text(firefoxMessage.text)
+                        .font(.caption)
+                        .foregroundStyle(firefoxMessage.isError ? .red : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Section("Safari") {
@@ -119,6 +146,21 @@ struct BrowsersView: View {
         }
     }
 
+    private var chromiumStatuses: [HostManifestInstaller.Status] {
+        statuses.filter { $0.bundleID != HostManifestInstaller.firefoxBundleID }
+    }
+
+    private var firefoxStatus: HostManifestInstaller.Status? {
+        statuses.first { $0.bundleID == HostManifestInstaller.firefoxBundleID }
+    }
+
+    /// The signed add-on of this version, a release asset made by `scripts/build-firefox-addon.sh`.
+    private static var firefoxAddonURL: URL? {
+        guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        else { return nil }
+        return URL(string: "https://github.com/dinhanhthi/SegDown/releases/download/v\(version)/SegDown-firefox-\(version).xpi")
+    }
+
     private func lastConnected(_ bundleID: String) -> String {
         store.lastConnected[bundleID].map { "Last connected \($0.formatted(.relative(presentation: .named)))" }
             ?? "Not connected yet"
@@ -150,12 +192,40 @@ struct BrowsersView: View {
         do {
             let installed = try HostManifestInstaller.install()
             message = installed.isEmpty
-                ? ("No Chromium browser found", true)
+                ? ("No supported browser found", true)
                 : ("Installed for \(installed.joined(separator: ", "))", false)
         } catch {
             message = ("Install failed: \(error.localizedDescription)", true)
         }
         statuses = HostManifestInstaller.status()
+    }
+
+    /// Writes the host manifest for Firefox (even before its first run), then hands the .xpi URL to Firefox,
+    /// which asks to install it.
+    private func installInFirefox() {
+        firefoxMessage = nil
+        guard let firefox = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: HostManifestInstaller.firefoxBundleID)
+        else {
+            firefoxMessage = ("Firefox is not installed", true)
+            return
+        }
+        do {
+            try HostManifestInstaller.install(forcing: HostManifestInstaller.firefoxBundleID)
+        } catch {
+            firefoxMessage = ("Install failed: \(error.localizedDescription)", true)
+            return
+        }
+        statuses = HostManifestInstaller.status()
+        guard let addon = Self.firefoxAddonURL else { return }
+        Task {
+            do {
+                try await NSWorkspace.shared.open(
+                    [addon], withApplicationAt: firefox, configuration: NSWorkspace.OpenConfiguration())
+            } catch {
+                firefoxMessage = ("Could not open Firefox: \(error.localizedDescription)", true)
+            }
+        }
     }
 
     /// The completion handler of `getStateOfSafariExtension` runs on the main actor, so its async form updates the
