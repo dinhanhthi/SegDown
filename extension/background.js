@@ -335,7 +335,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              only when a field the hub uses changes (the score in coarse
 //              buckets, so scrolling rarely re-sends), and
 //              send [] on pagehide (a removed iframe takes its videos with it).
-//              -> {ok}. The hub re-runs the auto-pick (below).
+//              -> {ok}. The hub re-runs the auto-pick (below). From an ignored
+//              tab (Ignored sites) the list counts as [].
 //   key        {action: "markStart" | "markEnd"} from any frame (3.6 keyboard:
 //              `[` / `]`) or from the overlay's buttons. The hub asks the
 //              selected agent for getTime. markStart stores pendingStart
@@ -367,16 +368,19 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              close button); sends state to "all" like the toggle. panelOpen
 //              stays false while nothing is selected.
 //   getState   any frame -> {ok, state, ui}, plus `segments` (segs:<tabId>, []
-//              if none) only in the selected video's frame. ui: the app's
-//              switches {fullClipButton, playerButton} from storage.local `ui`
-//              (both true when nothing is stored; then it also pings the app,
+//              if none) only in the selected video's frame. ui: {fullClipButton,
+//              playerButton, ignored}: the app's switches from storage.local `ui`
+//              and whether this tab is ignored (Ignored sites; the domain list
+//              never leaves the hub) (both switches true and ignored false when
+//              nothing is stored; then it also pings the app,
 //              not awaited, so the pong's `ui` broadcast follows once the app
 //              is reachable; onInstalled pings too). Agents send it once at load
 //              (and after a back/forward cache restore) for state.panelOpen and
 //              ui (a frame that loads after the overlay opened missed the
 //              `state` broadcast).
 //   openOverlay {videoKey} any frame, NOT [selected] (the player button):
-//              frameId is always the sender's, never the body's. videoKey must
+//              frameId is always the sender's, never the body's. An ignored tab
+//              (Ignored sites) -> {ok: false, error: "ignored"}. videoKey must
 //              be one of that frame's candidates with excluded null (else {ok:
 //              false, error: "no-video"}). Selects it like `select` (selectedBy
 //              "user"; its errors pass through), opens the panel like
@@ -443,6 +447,13 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              current segments when persistence is allowed. In a private
 //              window -> {ok: false, error: "incognito-forced", incognito: {on:
 //              true, forced: true}}.
+//
+//   Ignored sites. A tab is ignored when the host of top:<tabId> (webNavigation,
+//   never a content script) equals a domain of storage.local `ui`.ignoredDomains
+//   or is a subdomain of one (no top URL -> not ignored); its frames follow the
+//   top page. Content scripts only get the per-tab `ignored` in `ui` (getState,
+//   the `ui` broadcast), never the list. Gates: candidates, openOverlay and the
+//   Overlay toggle (below).
 //
 //   Source correlation (4.1). Content scripts only ever get a source summary
 //   {kind: "hls" | "mp4" | "page", host, file (last path component, no query),
@@ -547,7 +558,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "ping"}) ->
 //              {type: "pong", version, missing: [string], protocol?, settings?:
 //              {mode, incognitoDefault, maxDuration?, fullClipButton?,
-//              playerButton?, preferredHeight?}}, at most once per DEPS_TTL_MS (10 s; one cached
+//              playerButton?, ignoredDomains?, preferredHeight?}}, at most once
+//              per DEPS_TTL_MS (10 s; one cached
 //              answer for every tab, also for the settings; concurrent callers
 //              share one request). protocol: an integer >= 1, absent -> 1 (2:
 //              incognito and fallback, 3: maxHeight and the page probe).
@@ -555,13 +567,16 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              (else "separate"), incognitoDefault (true only when true, so an
 //              app without settings gives false), maxDuration (seconds, finite >
 //              0, else no limit), fullClipButton and playerButton (false only
-//              when false, so absent -> true), preferredHeight (an integer
-//              1...8640, else null = Best). Every pong sets the persistence
-//              gate to settings.incognitoDefault (Segment persistence) and keeps
-//              storage.local `ui` equal to the two switches (written, and sent
-//              as `ui` to "all" in every tab (below), only when they differ
-//              from the stored value). A ping without a pong leaves `ui` as it
-//              is (never pinged: both true). Any other reply or a failed call
+//              when false, so absent -> true), ignoredDomains (lowercased
+//              hostnames as the app's IgnoredDomain.normalize makes them, others
+//              dropped, deduped, at most MAX_IGNORED_DOMAINS; not an array -> []),
+//              preferredHeight (an integer 1...8640, else null = Best). Every
+//              pong sets the persistence gate to settings.incognitoDefault
+//              (Segment persistence) and keeps storage.local `ui` equal to the
+//              two switches and ignoredDomains (written, and sent as `ui` to
+//              "all" in every tab (below), only when they differ from the stored
+//              value). A ping without a pong leaves `ui` as it is (never pinged:
+//              both true, no ignored domains). Any other reply or a failed call
 //              -> missing [] and appError (APP_UNREACHABLE when the call fails),
 //              cached the same way. appError blocks nothing here; Download
 //              pings again when the cached answer is a failure and refuses
@@ -734,11 +749,15 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //     state {state} after the selection, selectedBy or pendingStart changes.
 //     Also sent after panelOpen changes: agents listen for `[` / `]` only while
 //     the overlay is open.
-//     ui {ui: {fullClipButton, playerButton}} to every tab (chrome.tabs.query)
-//     when a pong changed the stored switches (storage.local `ui`).
+//     ui {ui: {fullClipButton, playerButton, ignored}} to every tab
+//     (chrome.tabs.query; ignored: that tab's, Ignored sites) when a pong changed
+//     the stored switches or ignored domains (storage.local `ui`).
 //
 // Overlay toggle (3.5): the "toggle-panel" command and the toolbar button
-// (chrome.action.onClicked; fires once the manifest has no default_popup, 5.4)
+// (chrome.action.onClicked; fires once the manifest has no default_popup, 5.4).
+// On an ignored tab (Ignored sites) the hub first pings the app (deps; the pong's
+// list may have dropped the domain); still ignored -> panelOpen is left as it is
+// and the button shows an "off" badge for NO_VIDEO_BADGE_MS. Otherwise they
 // flip panelOpen for that tab, send state to "all", then send toggleOverlay to
 // the selected video's frame (a frame that gets the selection later reads
 // state.panelOpen). With nothing selected, panelOpen stays false and the button
@@ -793,9 +812,11 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // access level is set to trusted contexts where the browser supports that):
 //   seg:<url>    -> {segments (with done?), ts}   (at most 200, newest ts kept; entries saved by
 //                    older versions also carry mode and precision, ignored)
-//   ui           -> {fullClipButton, playerButton}   (the app's switches from the
-//                    last pong; absent -> both true; sent to content scripts only
-//                    through getState and the `ui` broadcast)
+//   ui           -> {fullClipButton, playerButton, ignoredDomains}   (the app's
+//                    switches and ignored domains from the last pong; absent ->
+//                    both true, []; stored without ignoredDomains -> []; content
+//                    scripts get only the switches and a per-tab `ignored`, through
+//                    getState and the `ui` broadcast)
 //   reload       -> "<own version>><app version>"   (the last version pair that
 //                    reloaded this extension; see reloadIfOutdated)
 // ---------------------------------------------------------------------------
@@ -808,7 +829,7 @@ const EXCLUSIONS = new Set(["small", "ad", "live"]);
 const MIN_MAIN_DURATION = 30; // seconds; shorter videos lose to a longer candidate
 const MAX_SEGMENTS = 100; // SegDownCore Validation
 const MAX_PAGES = 200; // seg:* entries kept in storage.local, most recent ts first
-const NO_VIDEO_BADGE_MS = 2000; // the toolbar's "none" badge after a toggle with nothing selected
+const NO_VIDEO_BADGE_MS = 2000; // the toolbar's "none" / "off" badge after a toggle with nothing selected / an ignored tab
 const MODES = new Set(["separate", "merged"]);
 const NATIVE_HOST = "com.math2it.segdown";
 const APP_UNREACHABLE = "SegDown app not reachable: install browser integration";
@@ -828,7 +849,11 @@ const MAX_OUTPUTS = 100; // output names per job
 const PORT_IDLE_MS = 5 * 1000;
 const STATUS_TIMEOUT_MS = 20 * 1000;
 const TITLES_KEY = "jobt";
-const UI_KEY = "ui"; // storage.local: the app's switches from the last pong
+const UI_KEY = "ui"; // storage.local: the app's switches and ignored domains from the last pong
+const MAX_IGNORED_DOMAINS = 200; // settings.ignoredDomains kept (the app's cap too)
+const MAX_DOMAIN_LENGTH = 253; // IgnoredDomain.maxLength
+// IgnoredDomain.normalize's hostname: labels of 1-63 [a-z0-9-], no "-" first or last.
+const DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const RELOAD_KEY = "reload"; // storage.local: the version pair of the last self-reload
 const DEPS_TTL_MS = 10 * 1000; // ping answers (missing tools, settings) are reused this long
 const TOOLS = new Set(["yt-dlp", "ffmpeg", "ffprobe", "deno"]); // SegDownCore Tool raw values
@@ -1088,7 +1113,9 @@ function dropFrame(tabId, frameId) {
 // --- handlers ---
 
 async function onCandidates(tabId, frameId, { videos }) {
-  announceCandidates(tabId, await setFrameCandidates(tabId, frameId, videos));
+  // An ignored tab reports nothing: the auto-pick drops to null and the overlay closes.
+  const ignored = await tabIgnored(tabId, (await readUI()).ignoredDomains);
+  announceCandidates(tabId, await setFrameCandidates(tabId, frameId, ignored ? [] : videos));
   return { ok: true };
 }
 
@@ -1212,6 +1239,7 @@ async function setPanelOpen(tabId, open) {
 // Player button: the sender frame (never the message) selects one of its own
 // non-excluded videos and opens the overlay on it. Not selected-frame gated.
 async function onOpenOverlay(tabId, frameId, { videoKey }) {
+  if (await tabIgnored(tabId, (await readUI()).ignoredDomains)) return { ok: false, error: "ignored" };
   const cands = await withTab(tabId, () => readCands(tabId));
   if (!(cands[frameId] || []).some((v) => v.videoKey === videoKey && v.excluded === null)) {
     return { ok: false, error: "no-video" };
@@ -1229,10 +1257,10 @@ async function onGetState(tabId, frameId) {
     hub: await readHub(tabId),
     segments: await readSegments(tabId),
   }));
-  const reply = { ok: true, state: hub, ui: await readUI() };
+  const reply = { ok: true, state: hub, ui: await uiFor(tabId, await readUI()) };
   if (hub.selected && hub.selected.frameId === frameId) reply.segments = segments;
   // No pong yet (e.g. the app's integration was installed after this extension):
-  // ask the app in the background; its pong broadcasts the switches.
+  // ask the app in the background; its pong broadcasts the switches and `ignored`.
   if (!(await hasStoredUI())) fetchDeps().catch(hubWarn);
   return reply;
 }
@@ -1574,16 +1602,49 @@ function cleanSettings(s) {
     maxDuration: isFiniteNum(o.maxDuration) && o.maxDuration > 0 ? o.maxDuration : null,
     fullClipButton: o.fullClipButton !== false,
     playerButton: o.playerButton !== false,
+    ignoredDomains: cleanDomains(o.ignoredDomains),
     preferredHeight: Number.isInteger(o.preferredHeight) && o.preferredHeight >= 1 && o.preferredHeight <= MAX_HEIGHT ? o.preferredHeight : null,
   };
 }
 
-// storage.local ui, checked; never pinged (nothing stored) -> both switches on.
+// Hostnames like IgnoredDomain.normalize's (lowercased first), deduped, at most
+// MAX_IGNORED_DOMAINS; anything but an array -> [].
+function cleanDomains(list) {
+  if (!Array.isArray(list)) return [];
+  const hosts = list
+    .filter((d) => typeof d === "string")
+    .map((d) => d.toLowerCase())
+    .filter((d) => d.length <= MAX_DOMAIN_LENGTH && DOMAIN_RE.test(d));
+  return [...new Set(hosts)].slice(0, MAX_IGNORED_DOMAINS);
+}
+
+// storage.local ui, checked; never pinged (nothing stored) -> both switches on, no
+// ignored domains. A value stored before ignoredDomains existed reads as [].
 async function readUI() {
   const u = (await chrome.storage.local.get(UI_KEY))[UI_KEY];
   return isObject(u) && typeof u.fullClipButton === "boolean" && typeof u.playerButton === "boolean"
-    ? { fullClipButton: u.fullClipButton, playerButton: u.playerButton }
-    : { fullClipButton: true, playerButton: true };
+    ? { fullClipButton: u.fullClipButton, playerButton: u.playerButton, ignoredDomains: cleanDomains(u.ignoredDomains) }
+    : { fullClipButton: true, playerButton: true, ignoredDomains: [] };
+}
+
+// Ignored tab: the host of top:<tabId> is one of domains or a subdomain of one
+// (no top URL -> false).
+async function tabIgnored(tabId, domains) {
+  if (domains.length === 0) return false;
+  const top = (await chrome.storage.session.get(topKey(tabId)))[topKey(tabId)];
+  let host;
+  try {
+    host = new URL(top).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return domains.some((d) => host === d || host.endsWith(`.${d}`));
+}
+
+// The `ui` content scripts of tabId get: the switches and whether the tab is
+// ignored, never the list.
+async function uiFor(tabId, { fullClipButton, playerButton, ignoredDomains }) {
+  return { fullClipButton, playerButton, ignored: await tabIgnored(tabId, ignoredDomains) };
 }
 
 // True once a pong has stored the switches (never cleared).
@@ -1591,16 +1652,19 @@ async function hasStoredUI() {
   return (await chrome.storage.local.get(UI_KEY))[UI_KEY] !== undefined;
 }
 
-// After a pong: saves the switches when they changed (or were never stored) and
-// sends them to every tab.
+// After a pong: saves the switches and ignored domains when they changed (or were
+// never stored) and sends every tab its own `ui` (uiFor).
 async function updateUI(settings) {
-  const ui = { fullClipButton: settings.fullClipButton, playerButton: settings.playerButton };
+  const { fullClipButton, playerButton, ignoredDomains } = settings;
+  const ui = { fullClipButton, playerButton, ignoredDomains };
   const stored = await hasStoredUI();
   const prev = await readUI();
-  if (stored && prev.fullClipButton === ui.fullClipButton && prev.playerButton === ui.playerButton) return;
+  const sameDomains =
+    prev.ignoredDomains.length === ignoredDomains.length && prev.ignoredDomains.every((d, i) => d === ignoredDomains[i]);
+  if (stored && prev.fullClipButton === fullClipButton && prev.playerButton === playerButton && sameDomains) return;
   await chrome.storage.local.set({ [UI_KEY]: ui });
   for (const tab of await chrome.tabs.query({})) {
-    if (Number.isInteger(tab.id) && tab.id >= 0) notifyAll(tab.id, { type: "ui", ui });
+    if (Number.isInteger(tab.id) && tab.id >= 0) notifyAll(tab.id, { type: "ui", ui: await uiFor(tab.id, ui) });
   }
 }
 
@@ -1627,8 +1691,8 @@ async function reloadIfOutdated(appVersion) {
 
 // -> {missing: [tool], protocol, settings} or {missing: [], appError}. Never
 // throws. Every pong sets the persistence gate (incognitoDefault) and the
-// storage.local ui switches (updateUI); an app version other than this one
-// reloads the extension (reloadIfOutdated).
+// storage.local ui switches and ignored domains (updateUI); an app version other
+// than this one reloads the extension (reloadIfOutdated).
 async function pingNative() {
   let reply;
   try {
@@ -2506,14 +2570,26 @@ try {
   hubWarn(err);
 }
 
+// A short toolbar badge on tabId, cleared after NO_VIDEO_BADGE_MS.
+function flashBadge(tabId, text) {
+  const badge = (t) => chrome.action.setBadgeText({ tabId, text: t }).catch(() => {});
+  badge(text);
+  setTimeout(() => badge(""), NO_VIDEO_BADGE_MS);
+}
+
 // Overlay toggle: the toolbar button and the "toggle-panel" shortcut (see the protocol).
 async function toggleOverlay(tabId) {
+  if (await tabIgnored(tabId, (await readUI()).ignoredDomains)) {
+    // The list may have changed in the app: ask it first. The pong's own settings,
+    // not storage.local (updateUI is not awaited by the ping).
+    const deps = await fetchDeps().catch(() => ({}));
+    const domains = deps.settings ? deps.settings.ignoredDomains : (await readUI()).ignoredDomains;
+    if (await tabIgnored(tabId, domains)) return flashBadge(tabId, "off");
+  }
   const { state } = await setPanelOpen(tabId, null);
   if (state.selected) return notifyOverlay(tabId, state.selected.frameId, { type: "toggleOverlay", open: state.panelOpen });
   // No video to open the overlay on: a short badge says so.
-  const badge = (text) => chrome.action.setBadgeText({ tabId, text }).catch(() => {});
-  badge("none");
-  setTimeout(() => badge(""), NO_VIDEO_BADGE_MS);
+  flashBadge(tabId, "none");
 }
 
 function toggleOverlayIn(tab) {

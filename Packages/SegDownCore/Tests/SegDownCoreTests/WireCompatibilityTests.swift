@@ -65,7 +65,8 @@ struct WireCompatibilityTests {
                 maxDuration: 600,
                 fullClipButton: false,
                 playerButton: false,
-                preferredHeight: 1080
+                preferredHeight: 1080,
+                ignoredDomains: ["example.com", "www.youtube.com"]
             )
         )
 
@@ -73,6 +74,7 @@ struct WireCompatibilityTests {
 
         #expect(String(decoding: line, as: UTF8.self).contains(#""protocol":\#(IPC.protocolVersion)"#))
         #expect(String(decoding: line, as: UTF8.self).contains(#""preferredHeight":1080"#))
+        #expect(String(decoding: line, as: UTF8.self).contains(#""ignoredDomains":["example.com","www.youtube.com"]"#))
         #expect(try IPC.decodeLine(IPCResponse.self, from: line) == pong)
     }
 
@@ -90,6 +92,7 @@ struct WireCompatibilityTests {
         #expect(decoded.playerButton)
         #expect(decoded.maxDuration == nil)
         #expect(decoded.preferredHeight == nil)
+        #expect(decoded.ignoredDomains == [])
     }
 
     @Test func formatsRoundTripsWithItsType() throws {

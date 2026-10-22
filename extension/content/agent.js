@@ -33,7 +33,7 @@
   let panelOpen = false; // from the hub's `state` broadcast; keys are live only while open
   let hubState = null; // last hub `state` (for overlay.js)
   let stateSeen = false; // a broadcast beats the boot getState reply
-  let ui = { fullClipButton: true, playerButton: true }; // the app's switches (getState, `ui` broadcast)
+  let ui = { fullClipButton: true, playerButton: true, ignored: false }; // the app's switches and this tab's Ignored sites flag (getState, `ui` broadcast)
   const observedRoots = new WeakSet(); // open shadow roots already under the observer
 
   // Throws once the extension reloads ("Extension context invalidated"); ignore.
@@ -147,6 +147,7 @@
 
   function scan() {
     scanTimer = null;
+    if (ui.ignored) return; // Ignored sites: nothing to report (applyUI sent [])
     for (const v of findVideos()) track(v);
     for (const [key, v] of videos) {
       if (!v.isConnected) {
@@ -210,10 +211,19 @@
     }
   }
 
-  // Replaced whole, only by two booleans.
+  // Replaced whole, only by three booleans. Becoming ignored reports no videos
+  // once; no longer ignored reports everything anew.
   function applyUI(u) {
-    if (u && typeof u === "object" && typeof u.fullClipButton === "boolean" && typeof u.playerButton === "boolean") {
-      ui = { fullClipButton: u.fullClipButton, playerButton: u.playerButton };
+    if (!u || typeof u !== "object") return;
+    if (typeof u.fullClipButton !== "boolean" || typeof u.playerButton !== "boolean" || typeof u.ignored !== "boolean") return;
+    const wasIgnored = ui.ignored;
+    ui = { fullClipButton: u.fullClipButton, playerButton: u.playerButton, ignored: u.ignored };
+    if (ui.ignored && !wasIgnored) {
+      lastReport = "[]";
+      send({ type: "candidates", videos: [] });
+    } else if (!ui.ignored && wasIgnored) {
+      lastReport = null;
+      scheduleScan();
     }
   }
 
@@ -227,7 +237,8 @@
   // Shared with overlay.js (same isolated world, loaded after this file; the page
   // cannot see it): the selected video of this frame and the hub's last `state`.
   // overlay.js sets onChange; it runs after a `select`, a `state` and when the
-  // selected video leaves the document. button.js reads ui() and eligible():
+  // selected video leaves the document. button.js reads ui() (it hides while
+  // playerButton is off or ignored is true) and eligible():
   // the tracked videos that are connected, not excluded and of a finite
   // duration > 0, as [{videoKey, video}].
   const shared = {

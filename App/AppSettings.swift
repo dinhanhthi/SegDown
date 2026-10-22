@@ -34,9 +34,14 @@ struct AppSettings: Codable, Equatable, Sendable {
     /// The extension takes the tallest quality up to this height when the user picks none (one of
     /// `preferredHeights`); `nil` = the best quality.
     var preferredHeight: Int?
+    /// The extension stays off on these sites and their subdomains, in the order added (each one
+    /// normalized by `IgnoredDomain.normalize`).
+    var ignoredDomains: [String] = []
 
     /// The heights Settings offers for `preferredHeight`.
     static let preferredHeights = [360, 480, 720, 1080, 1440, 2160]
+    /// The most entries Settings lets the user add to `ignoredDomains`.
+    static let maxIgnoredDomains = 200
 
     /// The user's real home from the password database, like `IPC.socketURL()`.
     static let home = getpwuid(getuid()).flatMap { $0.pointee.pw_dir.map { String(cString: $0) } }
@@ -49,7 +54,8 @@ struct AppSettings: Codable, Equatable, Sendable {
     /// What the extension gets in `pong`.
     var clientSettings: ClientSettings {
         ClientSettings(mode: mode, incognitoDefault: incognitoDefault, maxDuration: maxDuration,
-                       fullClipButton: fullClipButton, playerButton: playerButton, preferredHeight: preferredHeight)
+                       fullClipButton: fullClipButton, playerButton: playerButton, preferredHeight: preferredHeight,
+                       ignoredDomains: ignoredDomains)
     }
 
     var jobOptions: JobOptions {
@@ -67,7 +73,7 @@ struct AppSettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case outputFolder, mode, precision, autoFallback, maxBytes, maxDuration, incognitoDefault, compress
-        case flattenOutput, snakeCaseNames, fullClipButton, playerButton, preferredHeight
+        case flattenOutput, snakeCaseNames, fullClipButton, playerButton, preferredHeight, ignoredDomains
     }
 }
 
@@ -88,6 +94,7 @@ extension AppSettings {
         fullClipButton = try c.decodeIfPresent(Bool.self, forKey: .fullClipButton) ?? defaults.fullClipButton
         playerButton = try c.decodeIfPresent(Bool.self, forKey: .playerButton) ?? defaults.playerButton
         preferredHeight = try c.decodeIfPresent(Int.self, forKey: .preferredHeight) ?? defaults.preferredHeight
+        ignoredDomains = try c.decodeIfPresent([String].self, forKey: .ignoredDomains) ?? defaults.ignoredDomains
     }
 }
 

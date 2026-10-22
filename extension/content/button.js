@@ -4,8 +4,8 @@
 // video through the hub's `openOverlay` (the protocol is documented in
 // background.js). One host per frame, in a closed shadow root shown in the top
 // layer (popover="manual"), so it stays above the page and every kind of
-// fullscreen. Hidden while the app's playerButton switch is off and on the video
-// whose overlay is open.
+// fullscreen. Hidden while the app's playerButton switch is off, on an ignored
+// site (Ignored sites) and on the video whose overlay is open.
 // Page data is untrusted: the DOM is built from constants only (SVG via
 // createElementNS, no page strings), handlers act on trusted events only, and
 // the hub gets a videoKey only (the frame comes from the sender).
@@ -179,7 +179,7 @@
   function onHideTick() {
     hideTimer = null;
     if (!shown) return;
-    if (!agent.ui().playerButton || !target.video.isConnected || overlayOn(target.video)) return hide();
+    if (!agent.ui().playerButton || agent.ui().ignored || !target.video.isConnected || overlayOn(target.video)) return hide();
     if (button.matches(":hover")) {
       hideTimer = setTimeout(onHideTick, MIN_TICK_MS);
       return;
@@ -210,7 +210,7 @@
 
   function onFrame() {
     frame = 0;
-    if (!agent.ui().playerButton) return hide();
+    if (!agent.ui().playerButton || agent.ui().ignored) return hide();
     const hit = hitTest(pointX, pointY);
     if (!hit) {
       if (shown && overlayOn(target.video)) hide();

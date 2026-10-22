@@ -12,6 +12,8 @@ struct SettingsView: View {
     @State private var sizeError: String?
     @State private var durationText = ""
     @State private var durationError: String?
+    @State private var domainText = ""
+    @State private var domainError: String?
     @State private var confirmClear = false
     @FocusState private var focus: Field?
 
@@ -118,6 +120,29 @@ struct SettingsView: View {
                         .fixedSize()
                     }
                 }
+                LabeledContent {
+                    HStack(spacing: 6) {
+                        TextField("Ignored site", text: $domainText, prompt: Text("example.com"))
+                            .labelsHidden()
+                            .frame(width: 160)
+                            .onSubmit(addDomain)
+                        Button("Add", action: addDomain)
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
+                            .disabled(domainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || settings.settings.ignoredDomains.count >= AppSettings.maxIgnoredDomains)
+                    }
+                } label: {
+                    Text("Ignored sites")
+                    Text("SegDown stays off on these sites and their subdomains.")
+                }
+                if let domainError { InlineError(text: domainError) }
+                ForEach(settings.settings.ignoredDomains, id: \.self) { domain in
+                    LabeledContent(domain) {
+                        Button("Remove") { removeDomain(domain) }
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
+                            .accessibilityLabel("Remove \(domain)")
+                    }
+                }
             }
             Section {
                 LabeledContent {
@@ -141,6 +166,7 @@ struct SettingsView: View {
             if old == .size { commitSize() }
             if old == .duration { commitDuration() }
         }
+        .onChange(of: domainText) { domainError = nil }
         .alert("Remove all finished downloads from the list and history?", isPresented: $confirmClear) {
             Button("Clear History", role: .destructive) { store.clearHistory() }
             Button("Cancel", role: .cancel) {}
@@ -232,6 +258,28 @@ struct SettingsView: View {
         Binding(get: { settings.settings.preferredHeight ?? 1080 }, set: { height in
             settings.update { $0.preferredHeight = height }
         })
+    }
+
+    /// Adds the field's domain, normalized; an invalid or listed one shows an error and keeps the text.
+    private func addDomain() {
+        let list = settings.settings.ignoredDomains
+        guard list.count < AppSettings.maxIgnoredDomains,
+              !domainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard let domain = IgnoredDomain.normalize(domainText) else {
+            domainError = "Enter a domain like example.com."
+            return
+        }
+        guard !list.contains(domain) else {
+            domainError = "Already in the list."
+            return
+        }
+        settings.update { $0.ignoredDomains.append(domain) }
+        domainText = ""
+        domainError = nil
+    }
+
+    private func removeDomain(_ domain: String) {
+        settings.update { $0.ignoredDomains.removeAll { $0 == domain } }
     }
 
     /// 1440 -> "2K (1440p)", 2160 -> "4K (2160p)", else "720p".

@@ -67,6 +67,8 @@ If the buttons hide the player's controls, drag them by their ⋮⋮ handle.
 
 Files go to `Downloads/SegDown/`. Change this and more in SegDown's Settings.
 
+To keep SegDown off on some sites, add them under Settings › Browser › Ignored sites.
+
 ## Not supported
 
 Protected video (DRM, such as Netflix), live streams and DASH. If a site stops working, update yt-dlp on SegDown's Dependencies page.
