@@ -48,7 +48,9 @@ The extension comes with the app: each SegDown update also updates the extension
 2. Firefox opens the add-on: click **Continue to Installation** if Firefox asks, then **Add**. To use SegDown in private windows, tick **Allow extension to run in private windows** before clicking Add.
 3. Reload the pages that were already open.
 
-Firefox keeps the add-on up to date. If the button only downloads the file, open `about:addons`, click the gear and **Install Add-on From File…**, and choose `SegDown-firefox-X.Y.Z.xpi` from the release page.
+Firefox keeps the add-on up to date. To turn on private windows later, open `about:addons` › SegDown and set **Run in Private Windows** to Allow.
+
+If the button only downloads the file, open `about:addons`, click the gear and **Install Add-on From File…**, and choose `SegDown-firefox-X.Y.Z.xpi` from the release page. Clicking **Install in Firefox** once is still needed: it is what connects Firefox to SegDown.
 
 **Safari**
 
