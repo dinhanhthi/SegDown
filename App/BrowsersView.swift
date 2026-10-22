@@ -41,6 +41,7 @@ struct BrowsersView: View {
                 }
                 LabeledContent {
                     Button(statuses.contains(where: \.installed) ? "Reinstall" : "Install", action: install)
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
                 } label: {
                     Text("Browser integration")
                     Text("Installs the native messaging host for every Chromium browser found.")
@@ -74,6 +75,7 @@ struct BrowsersView: View {
                     Text("Chromium browsers")
                     Spacer()
                     Button("Re-check", action: refresh)
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
                 }
             }
             Section("Safari") {
@@ -85,6 +87,7 @@ struct BrowsersView: View {
                 }
                 LabeledContent {
                     Button("Open Safari Settings", action: openSafariSettings)
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
                 } label: {
                     Text("Extensions")
                     Text("Turn SegDown on in Safari's Extensions settings.")

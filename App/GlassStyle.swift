@@ -107,6 +107,7 @@ struct RowTextButtonStyle: ButtonStyle {
         let configuration: ButtonStyleConfiguration
         let formRow: Bool
         @State private var hovered = false
+        @Environment(\.isEnabled) private var isEnabled
 
         var body: some View {
             configuration.label
@@ -118,8 +119,9 @@ struct RowTextButtonStyle: ButtonStyle {
                     Capsule()
                         .fill(Palette.inputSurface)
                         .overlay(Capsule().fill(
-                            configuration.isPressed ? Color.black.opacity(0.2) : hovered ? Palette.hoverFill : .clear)))
+                            configuration.isPressed ? Color.black.opacity(0.2) : hovered && isEnabled ? Palette.hoverFill : .clear)))
                 .contentShape(Capsule())
+                .opacity(isEnabled ? 1 : 0.45)
                 .animation(.easeOut(duration: 0.12), value: hovered)
                 .onHover { hovered = $0 }
         }

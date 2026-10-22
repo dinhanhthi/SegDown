@@ -36,6 +36,7 @@ struct DependenciesView: View {
                     Text("Tools")
                     Spacer()
                     Button("Re-check", action: recheck)
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
                 }
             }
             Section {
@@ -64,6 +65,7 @@ struct DependenciesView: View {
                             Button("Upgrade") {
                                 Task { await store.upgrade(item.name) }
                             }
+                            .buttonStyle(RowTextButtonStyle(formRow: true))
                             .disabled(store.hasActiveJobs || store.upgrading != nil || store.checkingUpdates)
                         }
                     } label: {
