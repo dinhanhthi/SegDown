@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The Dependencies page no longer runs Homebrew every time it opens. Updates are checked when a download fails with "The site refused the download (HTTP 403/410)", or with Re-check.
+
 ## [0.6.3] - 2026-10-22
 
 ### Added

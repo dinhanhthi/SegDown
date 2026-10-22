@@ -1,5 +1,6 @@
 // The Dependencies page: each Homebrew tool SegDown runs, found (with its path) or missing, its
 // outdated formulas with an Upgrade button, and the `brew install …` line for the missing ones.
+// Updates are checked only by Re-check or after a download fails with yt-dlp's HTTP 403/410.
 import SegDownCore
 import SwiftUI
 
@@ -47,6 +48,9 @@ struct DependenciesView: View {
                     Text(error)
                         .foregroundStyle(.red)
                         .textSelection(.enabled)
+                } else if !store.updatesChecked {
+                    Text("Checked when a download fails with HTTP 403/410, or with Re-check.")
+                        .foregroundStyle(.secondary)
                 } else if store.outdated.isEmpty {
                     Text("All up to date").foregroundStyle(.secondary)
                 }
@@ -83,7 +87,6 @@ struct DependenciesView: View {
             }
         }
         .formStyle(.grouped)
-        .task { await store.checkForUpdates(force: false) }
         .scrollContentBackground(.hidden)
         .contentMargins(.top, 12, for: .scrollContent)
     }

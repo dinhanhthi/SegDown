@@ -64,6 +64,8 @@ final class JobStore {
     private(set) var outdated: [Brew.Outdated] = []
     /// `true` while `brew outdated` runs.
     private(set) var checkingUpdates = false
+    /// `true` once `brew outdated` has run; until then `outdated` is unknown, not empty.
+    private(set) var updatesChecked = false
     /// The formula `brew upgrade` is running for.
     private(set) var upgrading: String?
     /// The last check's or upgrade's error, shown on the Dependencies page.
@@ -109,7 +111,10 @@ final class JobStore {
             return
         }
         checkingUpdates = true
-        defer { checkingUpdates = false }
+        defer {
+            checkingUpdates = false
+            updatesChecked = true
+        }
         do {
             outdated = try await Brew.outdated(brew: brew, forceUpdate: force)
             updateError = nil
@@ -275,7 +280,8 @@ final class JobStore {
     }
 
     /// Updates the job's item. On its end, records it in the history (unless incognito). A job
-    /// removed while running is gone from `items`, so it is never recorded.
+    /// removed while running is gone from `items`, so it is never recorded. A job the site refused
+    /// (yt-dlp's HTTP 403/410, often an old yt-dlp) checks for updates, the only automatic check.
     private func apply(_ status: JobStatus) {
         guard let index = items.firstIndex(where: { $0.id == status.id }) else { return }
         items[index].status = status
@@ -284,6 +290,9 @@ final class JobStore {
         if status.fallbackUsed == true { items[index].fallbackUsed = true }
         guard status.state.isFinished, items[index].finishedAt == nil else { return }
         items[index].finishedAt = Date()
+        if status.state == .failed, status.message == JobRunner.siteRefusedMessage {
+            Task { await checkForUpdates(force: true) }
+        }
         let item = items[index]
         do {
             try history.append(Self.record(from: item), incognito: item.incognito)
