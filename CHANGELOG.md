@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-10-22
+
 ### Added
 
 - Firefox add-on. Browsers › Firefox › Install in Firefox sets up the connection to SegDown and opens the signed add-on, which then updates itself.
+
+### Changed
+
+- The buttons on the Browsers and Dependencies pages (Re-check, Install, Reinstall, Open Safari Settings, Upgrade) now have the same capsule look as the rest of Settings.
 
 ## [0.6.4] - 2026-10-22
 
