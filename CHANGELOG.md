@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-10-22
+
+### Added
+
+- Turn SegDown off for a site right from the browser. Choose "Ignore this site" in the overlay's ▾ menu, or right-click the SegDown toolbar button and pick "Turn off SegDown on ...". The site shows up under Settings › Browser › Ignored sites at once. Right-click the toolbar button again to turn it back on. Needs the updated app.
+
 ## [0.6.6] - 2026-10-22
 
 ### Added
