@@ -1,8 +1,9 @@
 name: Deploy appcast
 
-# Publishes the Sparkle feed (appcast.xml) to GitHub Pages.
-# The app's Sparkle feed (SUFeedURL) points at https://dinhanhthi.github.io/SegDown/appcast.xml.
-# Each Pages deploy replaces the whole site, so appcast.xml is the only file staged.
+# Publishes the Sparkle feed (appcast.xml) and the Firefox add-on update manifest (firefox-updates.json)
+# to GitHub Pages. The app's Sparkle feed (SUFeedURL) points at https://dinhanhthi.github.io/SegDown/appcast.xml,
+# the add-on's update_url at https://dinhanhthi.github.io/SegDown/firefox-updates.json.
+# Each Pages deploy replaces the whole site, so both files are staged every time.
 # Requires Settings > Pages > Source = "GitHub Actions".
 
 on:
@@ -10,6 +11,7 @@ on:
     branches: [main]
     paths:
       - 'appcast.xml'
+      - 'firefox-updates.json'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -38,6 +40,8 @@ jobs:
           mkdir -p _site
           [ -f appcast.xml ] || { echo "::error::appcast.xml is missing"; exit 1; }
           cp appcast.xml _site/appcast.xml
+          [ -f firefox-updates.json ] || { echo "::error::firefox-updates.json is missing"; exit 1; }
+          cp firefox-updates.json _site/firefox-updates.json
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:

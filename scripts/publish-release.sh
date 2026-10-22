@@ -10,8 +10,9 @@
 #   - notes   : the `## [X.Y.Z]` section of CHANGELOG.md, written to a sibling
 #               SegDown-X.Y.Z.md next to the zip and used as the release body
 #   - release : `gh release create` with that tag, the zip asset, and the notes;
-#               the sibling .dmg (manual-download asset) and SegDown-extension-X.Y.Z.zip
-#               (Chromium extension, Load unpacked) are uploaded when present
+#               the sibling .dmg (manual-download asset), SegDown-extension-X.Y.Z.zip
+#               (Chromium extension, Load unpacked) and SegDown-firefox-X.Y.Z.xpi (signed
+#               Firefox add-on, scripts/build-firefox-addon.sh) are uploaded when present
 #
 # This does NOT build/sign/notarize (build-and-notarize.sh), generate the appcast
 # (publish-appcast.sh), or commit anything. It only creates + pushes the tag and the
@@ -186,6 +187,18 @@ if [[ -f "$EXT_ZIP" ]]; then
 else
   echo "warning: extension zip not found at $EXT_ZIP - attach it manually:" >&2
   echo "         gh release upload $TAG release/export/SegDown-extension-${VERSION}.zip --repo $GH_REPO" >&2
+fi
+
+# Upload the signed Firefox add-on (scripts/build-firefox-addon.sh). The app's "Install in Firefox"
+# button and firefox-updates.json point at this asset. Missing is only a warning: the signed .xpi is
+# kept in release/firefox/ and can be attached later.
+XPI="$(dirname "$ZIP")/SegDown-firefox-${VERSION}.xpi"
+if [[ -f "$XPI" ]]; then
+  echo "==> Uploading Firefox add-on: $XPI"
+  gh release upload "$TAG" "$XPI" --repo "$GH_REPO"
+else
+  echo "warning: Firefox add-on not found at $XPI - run scripts/build-firefox-addon.sh, then:" >&2
+  echo "         gh release upload $TAG release/export/SegDown-firefox-${VERSION}.xpi --repo $GH_REPO" >&2
 fi
 
 echo

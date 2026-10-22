@@ -4,10 +4,11 @@
 #
 # Run this AFTER the version-bump commit (project.yml + extension/manifest.json + CHANGELOG.md)
 # is pushed to main.
-# It chains the three release scripts in sequence with no interactive prompts.
+# It chains the four release scripts in sequence with no interactive prompts.
 # Before building it requires: branch main, HEAD == origin/main (only pushed commits ship),
 # a clean tree of tracked files, gh authenticated, extension/manifest.json "version" ==
-# MARKETING_VERSION, a `## [X.Y.Z]` CHANGELOG.md section and no existing tag vX.Y.Z.
+# MARKETING_VERSION, a `## [X.Y.Z]` CHANGELOG.md section, no existing tag vX.Y.Z, the AMO
+# Keychain items, jq, npx and node >= 20.
 # The notary profile env (SEGDOWN_NOTARY_PROFILE) passes through to build-and-notarize.sh.
 #
 # Prereqs (one-time - docs/RELEASING.md):
@@ -16,6 +17,8 @@
 #   - Sparkle EdDSA key (generate_keys --account SegDown) + SUPublicEDKey in Info.plist
 #   - Xcode 27+ selected (required for the Icon Composer .icon) and xcodegen installed
 #   - gh CLI authenticated
+#   - AMO API key in the login Keychain (segdown-amo-jwt-issuer, segdown-amo-jwt-secret), jq and
+#     node >= 20 (npx) for the Firefox add-on (scripts/build-firefox-addon.sh)
 #
 # Usage:
 #   scripts/ship.sh
@@ -74,6 +77,16 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
   exit 1
 fi
 
+# The Firefox add-on is signed after notarization: check its credentials and tools now.
+for item in segdown-amo-jwt-issuer segdown-amo-jwt-secret; do
+  security find-generic-password -s "$item" >/dev/null 2>&1 \
+    || { echo "error: Keychain item $item not found (AMO API key, docs/RELEASING.md)." >&2; exit 1; }
+done
+command -v jq >/dev/null && command -v npx >/dev/null \
+  || { echo "error: jq and npx (node >= 20) are required for the Firefox add-on." >&2; exit 1; }
+(( $(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0) >= 20 )) \
+  || { echo "error: node >= 20 is required for the Firefox add-on (web-ext)." >&2; exit 1; }
+
 ZIP="release/export/SegDown-$VERSION.zip"
 
 echo "========================================"
@@ -82,20 +95,27 @@ echo "========================================"
 echo
 
 # Step 1 - Build, sign, notarize, DMG (Keychain prompt -> Always Allow)
-echo "==> Step 1/3: build + notarize"
+echo "==> Step 1/4: build + notarize"
 scripts/build-and-notarize.sh
 
 if [[ "$(git rev-parse HEAD)" != "$release_sha" || -n "$(git status --porcelain --untracked-files=no)" ]]; then
   echo "error: source changed during build; release was not published" >&2
   exit 1
 fi
+# Step 1 and the guard passed: the Firefox step may now fail without spending another notarization
+# (docs/RELEASING.md and the /cf-ship guide resume from here when this holds HEAD).
+echo "$release_sha" > release/export/.ship-built
 
-# Step 2 - Tag + GitHub Release (zip + DMG uploaded)
-echo "==> Step 2/3: tag + GitHub Release"
+# Step 2 - Sign the Firefox add-on on AMO (unlisted) into release/export/
+echo "==> Step 2/4: Firefox add-on"
+scripts/build-firefox-addon.sh
+
+# Step 3 - Tag + GitHub Release (zip, DMG, extension zip and Firefox .xpi uploaded)
+echo "==> Step 3/4: tag + GitHub Release"
 scripts/publish-release.sh --yes "$ZIP"
 
-# Step 3 - Generate + commit + push the appcast
-echo "==> Step 3/3: appcast"
+# Step 4 - Generate + commit + push the appcast and firefox-updates.json
+echo "==> Step 4/4: appcast"
 scripts/publish-appcast.sh "$ZIP"
 
 echo

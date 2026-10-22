@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Firefox add-on. Browsers › Firefox › Install in Firefox sets up the connection to SegDown and opens the signed add-on, which then updates itself.
+
 ## [0.6.4] - 2026-10-22
 
 ### Changed

@@ -19,6 +19,11 @@
 #     `codesign --verify --deep --strict`, is "Notarized Developer ID" (spctl), and its
 #     CFBundleShortVersionString equals the X.Y.Z of the zip name.
 #
+# When release/export/SegDown-firefox-X.Y.Z.xpi exists (scripts/build-firefox-addon.sh), its
+# version, release asset URL and SHA-256 replace or join the entry for X.Y.Z in the repo-root
+# firefox-updates.json (Firefox's update_url, deployed by the same Pages workflow), which is
+# committed with appcast.xml.
+#
 # Prereqs (one-time - docs/RELEASING.md):
 #   - Sparkle EdDSA key in the login Keychain under the account "SegDown"
 #     (generate_keys --account SegDown); click "Always Allow" on the Keychain prompt
@@ -130,9 +135,27 @@ ITEM_SIG="$(xmllint --xpath "string(//item/enclosure[@url = '$ITEM_URL']/@*[loca
   || { echo "error: appcast item for v$VERSION has no sparkle:edSignature - check the SegDown Keychain key" >&2; exit 1; }
 cp "$ARCHIVES/appcast.xml" appcast.xml
 
-echo "==> Committing and pushing appcast.xml"
-git add -- appcast.xml
-git commit -m "chore(release): appcast v$VERSION" -- appcast.xml
+# --- Firefox add-on update manifest ------------------------------------------
+# The key must equal the gecko id in scripts/build-firefox-addon.sh (ExtensionID.firefox).
+XPI="release/export/SegDown-firefox-$VERSION.xpi"
+if [[ -f "$XPI" ]]; then
+  command -v jq >/dev/null || { echo "error: jq not found (ships with macOS 15+)" >&2; exit 1; }
+  XPI_SHA="$(shasum -a 256 "$XPI" | awk '{print $1}')"
+  jq --arg id "me@dinhanhthi.com" --arg v "$VERSION" --arg hash "sha256:$XPI_SHA" \
+    --arg link "https://github.com/$GH_REPO/releases/download/v$VERSION/SegDown-firefox-$VERSION.xpi" '
+    .addons[$id].updates = ([(.addons[$id].updates // [])[] | select(.version != $v)]
+      + [{version: $v, update_link: $link, update_hash: $hash}])' \
+    firefox-updates.json > firefox-updates.json.tmp \
+    || { rm -f firefox-updates.json.tmp; echo "error: cannot update firefox-updates.json" >&2; exit 1; }
+  mv firefox-updates.json.tmp firefox-updates.json
+  echo "==> firefox-updates.json: v$VERSION (sha256 $XPI_SHA)"
+else
+  echo "warning: $XPI not found - firefox-updates.json not updated, Firefox stays on its version." >&2
+fi
+
+echo "==> Committing and pushing appcast.xml and firefox-updates.json"
+git add -- appcast.xml firefox-updates.json
+git commit -m "chore(release): appcast v$VERSION" -- appcast.xml firefox-updates.json
 git push origin main
 
 echo

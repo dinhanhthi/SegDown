@@ -16,7 +16,7 @@
 ## What it does
 
 - Mark the parts of a video you want, right on the page. SegDown downloads only those parts.
-- Works in Chrome, Brave, Edge, Arc and Safari, on YouTube and most video sites.
+- Works in Chrome, Brave, Edge, Arc, Firefox and Safari, on YouTube and most video sites.
 - One file per part, or all parts merged into one file.
 - Pick the quality per video, or set a preferred resolution once.
 
@@ -41,6 +41,14 @@ Needs macOS 15 or later. SegDown updates itself; its Dependencies page shows a m
 3. Reload the pages that were already open.
 
 The extension comes with the app: each SegDown update also updates the extension. Just reload the pages that were open. The `SegDown-extension-X.Y.Z.zip` on the release page is only a spare copy; you don't need it.
+
+**Firefox** (once, Firefox 140 or later)
+
+1. In SegDown, open **Browsers** and click **Install in Firefox**.
+2. Firefox opens the add-on: click **Continue to Installation**, then **Add**. If Firefox asks, let SegDown access all websites (about:addons › SegDown › Permissions). For private windows, turn on **Run in Private Windows** there.
+3. Reload the pages that were already open.
+
+Firefox keeps the add-on up to date. If the button only downloads the file, open `about:addons`, click the gear and **Install Add-on From File…**, and choose `SegDown-firefox-X.Y.Z.xpi` from the release page.
 
 **Safari**
 
@@ -70,7 +78,7 @@ xcodegen generate
 xcodebuild -project SegDown.xcodeproj -scheme SegDown -configuration Debug build
 ```
 
-To sign with your own team, change `DEVELOPMENT_TEAM` and `CODE_SIGN_IDENTITY` in `project.yml`. While developing the extension, load `extension/` from the clone instead.
+To sign with your own team, change `DEVELOPMENT_TEAM` and `CODE_SIGN_IDENTITY` in `project.yml`. While developing the extension, load `extension/` from the clone instead. For Firefox, run `scripts/build-firefox-addon.sh --dev` and load `release/firefox/dev/manifest.json` in `about:debugging` › This Firefox › **Load Temporary Add-on**.
 
 ## License
 

@@ -7,9 +7,10 @@ user's own messages direct the flow.
 
 This is a **version bump + changelog + ship** workflow for SegDown. The release runs
 **entirely on this machine** (`docs/RELEASING.md`, a local-only setup manual): XcodeGen →
-universal archive → Developer ID sign → notarize → zip + DMG + extension zip → GitHub Release →
-Sparkle appcast → GitHub Pages. There is no CI release workflow; the only workflow is
-`pages.yml`, which publishes `appcast.xml` to Pages (nothing else).
+universal archive → Developer ID sign → notarize → zip + DMG + extension zip → AMO-signed
+Firefox add-on → GitHub Release → Sparkle appcast + `firefox-updates.json` → GitHub Pages. There
+is no CI release workflow; the only workflow is `pages.yml`, which publishes `appcast.xml` and
+`firefox-updates.json` to Pages (nothing else).
 
 This **Before** section handles prep (commits → version → changelog → file updates). The
 **After** section runs the actual local release.
@@ -37,7 +38,7 @@ Run every check before touching any file. If one fails, stop and print the fix f
 git fetch origin
 me="$(git config user.email)"; echo "maintainer: <$me>"
 for ref in HEAD origin/main; do
-  for p in .coding-friend/skills/cf-ship-custom/SKILL.md scripts/ project.yml appcast.xml .github/ \
+  for p in .coding-friend/skills/cf-ship-custom/SKILL.md scripts/ project.yml appcast.xml firefox-updates.json .github/ \
       App/Info.plist App/SegDown.entitlements SafariExtension/Info.plist \
       SafariExtension/SegDownSafari.entitlements extension/manifest.json CHANGELOG.md; do
     echo "$ref $p: $(git log -1 --format='%an <%ae>' "$ref" -- "$p")"
@@ -65,6 +66,11 @@ gh api repos/dinhanhthi/SegDown/pages --jq .build_type
 
 # 6. Repo visibility
 gh repo view dinhanhthi/SegDown --json visibility --jq .visibility
+
+# 7. Firefox add-on signing: AMO API key in the Keychain, jq, node >= 20
+security find-generic-password -s segdown-amo-jwt-issuer >/dev/null
+security find-generic-password -s segdown-amo-jwt-secret >/dev/null
+command -v jq && command -v npx && node -p 'process.versions.node.split(".")[0]'
 ```
 
 - Check 0, integrity (runs first): `me` must be non-empty, and every line must end in `<$me>` or
@@ -79,18 +85,18 @@ gh repo view dinhanhthi/SegDown --json visibility --jq .visibility
   branches yourself.
 - Check 1, sync: `git merge --ff-only origin/main` fast-forwards when local `main` is behind
   (e.g. a PR merged on GitHub) and does nothing when it is ahead (Resume (a) pushes). If it fails
-  only because of leftover changes in the four files of the next bullet, handle them as described
+  only because of leftover changes in the five files of the next bullet, handle them as described
   there and retry. Otherwise (local and origin diverged), stop: "local main and origin/main
   diverged — rebase or merge by hand, then run /cf-ship again." Never `pull --rebase` or force-push.
 - Check 1, dirty tree: if the only tracked changes (staged or not) are in `CHANGELOG.md`,
-  `project.yml`, `extension/manifest.json` and/or `appcast.xml`, they may be leftovers of an
+  `project.yml`, `extension/manifest.json`, `appcast.xml` and/or `firefox-updates.json`, they may be leftovers of an
   earlier `/cf-ship` that stopped before its commit, or the user's own edits. Do this only
-  **after checks 2–6 pass**. Never discard them: set them aside recoverably with
+  **after checks 2–7 pass**. Never discard them: set them aside recoverably with
   `git stash push -m "cf-ship leftover $(date +%F)" -- <only the listed files that have tracked
   changes>` (covers staged and unstaged changes). Immediately print the stash name and "restore
   with `git stash pop`", and repeat that line in every later stop message and in the Step A2
   summary. Then re-run the sync and clean-tree checks (stop if still dirty) and redo the release
-  from scratch (Resume (c) regenerates `appcast.xml`). Never commit leftovers under another
+  from scratch (Resume (c) regenerates `appcast.xml` and `firefox-updates.json`). Never commit leftovers under another
   subject (that would bump the version twice). Any other tracked change: stop and tell the user
   to commit or stash it.
 - Check 3: both commands must print the same non-empty value (this pins only the key; the exact
@@ -107,6 +113,9 @@ gh repo view dinhanhthi/SegDown --json visibility --jq .visibility
 - Check 5: the Pages check must print `workflow` (Settings > Pages > Source = GitHub Actions).
 - Check 6: must print `PUBLIC` (release assets, the appcast and Pages must be reachable without
   auth). Anything else → stop: "make the repo public first".
+- Check 7: both Keychain lookups succeed, `jq` and `npx` are found and node prints 20 or more. Otherwise
+  stop with `docs/RELEASING.md §0` "Firefox add-on signing (AMO)". Never print the secrets
+  (no `-w` here).
 
 ### Resume (check right after B0)
 
@@ -134,6 +143,16 @@ gh repo view dinhanhthi/SegDown --json visibility --jq .visibility
   local tag exists (`git tag -l vX.Y.Z` non-empty, i.e. its push failed and no release exists),
   delete it first: `git tag -d vX.Y.Z`. Skip B1–B5 and go to After (`scripts/ship.sh`).
   `ship.sh` refuses unless `HEAD` == `origin/main`, so this only proceeds once (a) pushed.
+  - Exception: `test "$(cat release/export/.ship-built 2>/dev/null)" = "$(git rev-parse HEAD)"`
+    succeeds. `ship.sh` writes that marker only after step 1 finished AND its "source changed
+    during build" guard passed, and `build-and-notarize.sh` deletes it with `release/export/` on
+    every new build; so it means the Firefox step (or a later one) stopped the run → do NOT re-run `ship.sh`
+    (it would wipe `release/export/` and notarize again). Resume by hand from the repo root:
+    `scripts/build-firefox-addon.sh` (HEAD is the release commit; it reuses an already signed
+    `.xpi`), then `scripts/publish-release.sh --yes release/export/SegDown-X.Y.Z.zip`, then
+    `scripts/publish-appcast.sh release/export/SegDown-X.Y.Z.zip`. If the Firefox script fails
+    again, still run the other two (they only warn without the `.xpi`) and report the Firefox
+    failure in the summary.
 - **(c) Half-shipped release.** Tag `vX.Y.Z` exists on origin AND
   `git show origin/main:appcast.xml 2>/dev/null | grep -qF '/vX.Y.Z/'` fails (also when
   `appcast.xml` is absent). This is decided from remote state only, whatever the `HEAD` subject is
@@ -155,6 +174,17 @@ gh repo view dinhanhthi/SegDown --json visibility --jq .visibility
     `git tag -l vX.Y.Z` is empty):
     `mkdir -p release/export && git archive --format=zip --prefix=SegDown-extension/ -o release/export/SegDown-extension-X.Y.Z.zip vX.Y.Z:extension`,
     then upload it as above.
+  - The Firefox add-on is never a stop reason either: if the Release lacks
+    `SegDown-firefox-X.Y.Z.xpi`, run `scripts/build-firefox-addon.sh` on the release commit (it
+    signs `HEAD:extension`, so with other commits on top first `git switch --detach vX.Y.Z`, after
+    `git fetch origin tag vX.Y.Z` when `git tag -l vX.Y.Z` is empty, and
+    `git switch main` after; it reuses `release/firefox/SegDown-firefox-X.Y.Z.xpi` when AMO
+    already signed it), then upload
+    `release/export/SegDown-firefox-X.Y.Z.xpi` as above. If it fails, report it in the summary and
+    continue; `publish-appcast.sh` then only warns and leaves `firefox-updates.json` unchanged.
+  - The Release has `SegDown-firefox-X.Y.Z.xpi` but `release/export/` does not → download it
+    before `publish-appcast.sh` (never re-sign: AMO refuses a version it already signed):
+    `gh release download vX.Y.Z --repo dinhanhthi/SegDown --pattern 'SegDown-firefox-X.Y.Z.xpi' --dir release/export`.
   - A local app zip or DMG needed above is missing → STOP: "The notarized build of vX.Y.Z is
     gone. Delete the tag (docs/RELEASING.md §2 rollback) and run /cf-ship again."
   - Then ALWAYS fetch the published zip, into its own fresh dir (never over
@@ -305,8 +335,9 @@ With a notary profile override, put it on the same command line:
 
 Before building it refuses: a branch other than `main`, `HEAD` != `origin/main`, `gh` not
 authenticated, a dirty tree of tracked files, an `extension/manifest.json` `"version"` (at
-`HEAD`) other than `MARKETING_VERSION`, no `## [X.Y.Z]` section in `CHANGELOG.md`, or an
-existing tag `vX.Y.Z`, locally or on origin (use Resume). Then it chains:
+`HEAD`) other than `MARKETING_VERSION`, no `## [X.Y.Z]` section in `CHANGELOG.md`, an
+existing tag `vX.Y.Z`, locally or on origin (use Resume), missing AMO Keychain items, or no
+`jq` / `npx` / node 20+. Then it chains:
 
 1. `build-and-notarize.sh` — guards (Xcode 27+, one Developer ID identity of team `86H6CNLN4C`,
    `SUPublicEDKey`, exact `SUFeedURL`, notary profile, manifest version) → `xcodegen generate` →
@@ -314,11 +345,16 @@ existing tag `vX.Y.Z`, locally or on origin (use Resume). Then it chains:
    app, `segdown-host` and the Safari appex) → Sparkle/nested-code re-sign → notarize + staple →
    zip + DMG in `release/export/` → Chromium extension zip
    `release/export/SegDown-extension-X.Y.Z.zip` (`git archive` of `HEAD:extension`).
-2. `publish-release.sh --yes` — tag `vX.Y.Z` + GitHub Release with the zip, then uploads the DMG
-   and the extension zip (a missing one is only a warning; attach it via Resume (c)).
-3. `publish-appcast.sh` — verifies the zip (see Resume (c)), `generate_appcast --account SegDown`,
-   checks the new item's GitHub URL and EdDSA signature, commits
-   `chore(release): appcast vX.Y.Z` and pushes `appcast.xml` (Pages deploys it in ~1 min).
+2. `build-firefox-addon.sh` — stages `HEAD:extension` with a Firefox manifest, lints it and signs
+   it on AMO as an unlisted add-on (`web-ext sign`, AMO key from the Keychain) into
+   `release/firefox/SegDown-firefox-X.Y.Z.xpi`, copied to `release/export/`.
+3. `publish-release.sh --yes` — tag `vX.Y.Z` + GitHub Release with the zip, then uploads the DMG,
+   the extension zip and the Firefox `.xpi` (a missing one is only a warning; attach it via
+   Resume (c)).
+4. `publish-appcast.sh` — verifies the zip (see Resume (c)), `generate_appcast --account SegDown`,
+   checks the new item's GitHub URL and EdDSA signature, adds the `.xpi` to
+   `firefox-updates.json`, commits `chore(release): appcast vX.Y.Z` and pushes `appcast.xml` and
+   `firefox-updates.json` (Pages deploys them in ~1 min).
 
 If Keychain prompts appear (codesign, notarytool, generate_appcast), the user clicks **Always Allow**.
 
@@ -326,9 +362,10 @@ If Keychain prompts appear (codesign, notarytool, generate_appcast), the user cl
 
 ```
 Shipped (local flow):
-  SegDown vX.Y.Z — notarized zip + dmg + extension zip on the GitHub Release
+  SegDown vX.Y.Z — notarized zip + dmg + extension zip + Firefox xpi on the GitHub Release
   GitHub Release: https://github.com/dinhanhthi/SegDown/releases/tag/vX.Y.Z
   Appcast: https://dinhanhthi.github.io/SegDown/appcast.xml
+  Firefox updates: https://dinhanhthi.github.io/SegDown/firefox-updates.json
 ```
 
 ---
@@ -347,7 +384,7 @@ Shipped (local flow):
   `chore(release): …`, never `release:`. No co-author or AI attribution lines.
 - **Only commit these files per release:** `CHANGELOG.md`, `project.yml`,
   `extension/manifest.json` in the release commit (only those that changed on the first
-  release), and `appcast.xml`, committed by `publish-appcast.sh`. The only other allowed commit
+  release), and `appcast.xml` and `firefox-updates.json`, committed by `publish-appcast.sh`. The only other allowed commit
   is the optional separate `docs(skill): <summary>` commit of this SKILL.md (below). Never stage
   `release/`, keys, anything under `docs/`, or untracked files.
 - **Always print the changelog section** in the chat (Step B3) — for the record, not for review.
