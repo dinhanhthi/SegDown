@@ -12,8 +12,8 @@ settings:
     CODE_SIGN_IDENTITY: "Developer ID Application"
     CODE_SIGN_STYLE: Manual
     DEVELOPMENT_TEAM: 86H6CNLN4C
-    MARKETING_VERSION: 0.6.3
-    CURRENT_PROJECT_VERSION: 10
+    MARKETING_VERSION: 0.6.4
+    CURRENT_PROJECT_VERSION: 11
 packages:
   SegDownCore:
     path: Packages/SegDownCore

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-22
+
+### Changed
+
+- Browsers › Extension folder now explains how to reach the hidden Library folder when you load the extension.
+
 ### Fixed
 
 - The Dependencies page no longer runs Homebrew every time it opens. Updates are checked when a download fails with "The site refused the download (HTTP 403/410)", or with Re-check.
