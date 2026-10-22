@@ -46,6 +46,14 @@ struct WireCompatibilityTests {
         #expect(String(decoding: try IPC.encodeLine(request), as: UTF8.self).contains(#""maxHeight":720"#))
     }
 
+    @Test func setIgnoredDecodesHostAndFlag() throws {
+        let line = #"{"type":"setIgnored","host":"www.youtube.com","ignored":true}"#
+
+        let request = try IPC.decodeLine(IPCRequest.self, from: Data(line.utf8))
+
+        #expect(request == .setIgnored(host: "www.youtube.com", ignored: true))
+    }
+
     @Test func pongFromProtocol1AppDecodesAsProtocol1WithoutSettings() throws {
         let line = #"{"type":"pong","version":"0.1.0","missing":[]}"#
 

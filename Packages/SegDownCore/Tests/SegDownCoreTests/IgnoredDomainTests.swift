@@ -15,4 +15,15 @@ struct IgnoredDomainTests {
         #expect(IgnoredDomain.normalize("not a domain") == nil)
         #expect(IgnoredDomain.normalize("") == nil)
     }
+
+    @Test func siteDropsWwwUnlessThatLeavesNoDot() {
+        #expect(IgnoredDomain.site(forHost: "www.YouTube.com") == "youtube.com")
+        #expect(IgnoredDomain.site(forHost: "www.com") == "www.com")
+    }
+
+    @Test func coversTheDomainAndItsSubdomainsOnly() {
+        #expect(IgnoredDomain.covers("youtube.com", host: "m.youtube.com"))
+        #expect(IgnoredDomain.covers("youtube.com", host: "youtube.com"))
+        #expect(!IgnoredDomain.covers("youtube.com", host: "notyoutube.com"))
+    }
 }

@@ -43,6 +43,7 @@
     "over-limit": "The video is longer than the Max total duration in SegDown Settings.",
     "incognito-forced": "Incognito is always on in a private window.",
     "no-reply": "SegDown did not answer. Reload the page.",
+    "no-site": "SegDown can't be turned off on this page.",
   };
   // Undoes the page's and the popover UA styles on the host; the UI inside opts
   // back into pointer events, so the player's controls stay clickable elsewhere.
@@ -825,6 +826,9 @@
       ui.menu.append(row);
     });
     item("Clear all segments", null, () => act({ type: "clearSegments" }), !list.length);
+
+    heading("Site");
+    item("Ignore this site", null, () => act({ type: "ignoreSite" }));
   }
 
   // --- hub messages (to "overlay") ---

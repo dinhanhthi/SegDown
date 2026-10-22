@@ -67,7 +67,7 @@ If the buttons hide the player's controls, drag them by their ⋮⋮ handle.
 
 Files go to `Downloads/SegDown/`. Change this and more in SegDown's Settings.
 
-To keep SegDown off on some sites, add them under Settings › Browser › Ignored sites.
+To keep SegDown off on a site, choose **Ignore this site** in the ▾ menu or right-click the SegDown toolbar button. Turn it back on from the same toolbar menu or under Settings › Browser › Ignored sites.
 
 ## Not supported
 

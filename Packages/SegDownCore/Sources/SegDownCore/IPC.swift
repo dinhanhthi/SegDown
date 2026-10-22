@@ -14,11 +14,12 @@
 //     {"type": "cancel", "id": "…"}
 //     {"type": "probe", "source": {…Source…}}
 //     {"type": "probe", "source": {"type": "page", "url": "…"}}   // protocol 3
+//     {"type": "setIgnored", "host": "www.example.com", "ignored": true}  // protocol 4; → pong
 //
 // Responses
 //
 //     {"type": "pong", "version": "1.0", "missing": ["yt-dlp", "deno"],    // missing tools, may be []
-//      "protocol": 3,                                                    // absent → 1
+//      "protocol": 4,                                                    // absent → 1
 //      "settings": {"mode": "separate", "incognitoDefault": false,       // optional
 //                   "maxDuration": 600,                                  // maxDuration optional
 //                   "fullClipButton": true, "playerButton": true,        // absent → true
@@ -42,15 +43,18 @@ public enum IPCRequest: Sendable, Hashable {
     case status(ids: [String]?)
     case cancel(id: String)
     case probe(Source)
+    /// Adds the site of `host` to the ignored sites (`ignored: true`) or removes every listed domain
+    /// that covers it (`false`). `host` is the top page's raw hostname; the app answers with `pong`.
+    case setIgnored(host: String, ignored: Bool)
 }
 
 extension IPCRequest: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, job, ids, id, source
+        case type, job, ids, id, source, host, ignored
     }
 
     private enum RequestType: String, Codable {
-        case ping, enqueue, status, cancel, probe
+        case ping, enqueue, status, cancel, probe, setIgnored
     }
 
     public init(from decoder: any Decoder) throws {
@@ -61,6 +65,11 @@ extension IPCRequest: Codable {
         case .status: self = .status(ids: try c.decodeIfPresent([String].self, forKey: .ids))
         case .cancel: self = .cancel(id: try c.decode(String.self, forKey: .id))
         case .probe: self = .probe(try c.decode(Source.self, forKey: .source))
+        case .setIgnored:
+            self = .setIgnored(
+                host: try c.decode(String.self, forKey: .host),
+                ignored: try c.decode(Bool.self, forKey: .ignored)
+            )
         }
     }
 
@@ -81,6 +90,10 @@ extension IPCRequest: Codable {
         case let .probe(source):
             try c.encode(RequestType.probe, forKey: .type)
             try c.encode(source, forKey: .source)
+        case let .setIgnored(host, ignored):
+            try c.encode(RequestType.setIgnored, forKey: .type)
+            try c.encode(host, forKey: .host)
+            try c.encode(ignored, forKey: .ignored)
         }
     }
 }
@@ -261,8 +274,9 @@ public enum IPC {
     /// (`incognito`, `fallback`, `mediaDuration`), `JobStatus.bytes`, `JobStatus.fallbackUsed` and
     /// `pong.settings`. The optional `JobRequest.pageURL` came later without a bump: older apps ignore it.
     /// 3 adds `JobRequest.maxHeight` and the page probe's `formats` reply. The optional
-    /// `ClientSettings.preferredHeight` came later without a bump: older extensions ignore it.
-    public static let protocolVersion = 3
+    /// `ClientSettings.preferredHeight` came later without a bump: older extensions ignore it, as
+    /// did `ClientSettings.ignoredDomains`. 4 adds the `setIgnored` request.
+    public static let protocolVersion = 4
     /// Same cap as a native messaging frame.
     public static let maxLineBytes = 1024 * 1024
     public static let defaultTimeout: TimeInterval = 30

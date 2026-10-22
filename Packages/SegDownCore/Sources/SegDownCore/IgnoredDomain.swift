@@ -29,6 +29,20 @@ public enum IgnoredDomain {
         return host
     }
 
+    /// The site to ignore for the page `host`: `normalize(host)` without a leading `www.` when the
+    /// rest still has a dot (`www.com` stays); `nil` when `host` is not a hostname.
+    public static func site(forHost host: String) -> String? {
+        guard let host = normalize(host) else { return nil }
+        let rest = host.dropFirst(4)
+        return host.hasPrefix("www.") && rest.contains(".") ? String(rest) : host
+    }
+
+    /// Whether the listed `domain` covers `host`: the same host or a subdomain of it, the rule the
+    /// extension's `tabIgnored` applies.
+    public static func covers(_ domain: String, host: String) -> Bool {
+        host == domain || host.hasSuffix("." + domain)
+    }
+
     private static func isLabel(_ label: Substring) -> Bool {
         (1...63).contains(label.count)
             && label.first != "-" && label.last != "-"

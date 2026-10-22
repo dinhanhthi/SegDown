@@ -153,15 +153,14 @@ final class JobStore {
     /// - `probe(source)` → validates, then the variants of an HLS master playlist (`[]` for a media
     ///   playlist or an mp4); fetch failures → `error("unavailable")` or `error("invalid")`. A page
     ///   → `formats(heights)` from yt-dlp (`[]` on any failure).
+    /// - `setIgnored(host, ignored)` → adds the host's site to (or removes every domain covering the
+    ///   host from) `ignoredDomains`, then `pong` like `ping` (without re-checking the tools); not a
+    ///   hostname or a full list → `error("invalid")`.
     func handle(_ request: IPCRequest) async -> IPCResponse {
         switch request {
         case .ping:
-            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
             recheckDependencies()
-            return .pong(
-                version: version, missing: missing.map(\.rawValue),
-                protocol: IPC.protocolVersion, settings: settings.settings.clientSettings
-            )
+            return pong()
         case let .enqueue(job):
             return await enqueue(job)
         case let .status(ids):
@@ -175,7 +174,35 @@ final class JobStore {
             return .cancelled(id: id)
         case let .probe(source):
             return await probe(source)
+        case let .setIgnored(host, ignored):
+            return setIgnored(host: host, ignored: ignored)
         }
+    }
+
+    private func pong() -> IPCResponse {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+        return .pong(
+            version: version, missing: missing.map(\.rawValue),
+            protocol: IPC.protocolVersion, settings: settings.settings.clientSettings
+        )
+    }
+
+    /// Ignoring a host a listed domain already covers changes nothing. Turning a host back on
+    /// removes every listed domain covering it (the same host or a parent domain).
+    private func setIgnored(host: String, ignored: Bool) -> IPCResponse {
+        guard let site = IgnoredDomain.site(forHost: host), let normalized = IgnoredDomain.normalize(host) else {
+            return .error(code: IPCResponse.ErrorCode.invalid, message: "SegDown can't be turned off on this page.")
+        }
+        let domains = settings.settings.ignoredDomains
+        if !ignored {
+            settings.update { $0.ignoredDomains.removeAll { IgnoredDomain.covers($0, host: normalized) } }
+        } else if !domains.contains(where: { IgnoredDomain.covers($0, host: normalized) }) {
+            guard domains.count < AppSettings.maxIgnoredDomains else {
+                return .error(code: IPCResponse.ErrorCode.invalid, message: "The Ignored sites list is full.")
+            }
+            settings.update { $0.ignoredDomains.append(site) }
+        }
+        return pong()
     }
 
     // MARK: - Jobs

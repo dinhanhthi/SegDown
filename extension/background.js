@@ -3,7 +3,7 @@
 // overlay toggle 3.5, marking 3.6, hub-owned segments and their persistence,
 // selected-frame gating, source correlation 4.1, HLS variant picker 4.2, page
 // resolution picker, send the job 4.3, progress + cancel 4.4, app settings,
-// incognito and the overlay view 5.2).
+// ignored sites, incognito and the overlay view 5.2, toolbar menu).
 
 "use strict";
 
@@ -285,7 +285,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.webNavigation.onCommitted.addListener((details) => {
   if (details.frameId !== 0) return;
   clearTab(details.tabId).catch(logError);
-  setTopURL(details.tabId, details.url).catch(logError);
+  setTopURL(details.tabId, details.url)
+    .then(() => refreshActionMenu().catch(hubWarn))
+    .catch(logError);
   restoreSegments(details.tabId).catch(logError);
 });
 
@@ -454,6 +456,14 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   top page. Content scripts only get the per-tab `ignored` in `ui` (getState,
 //   the `ui` broadcast), never the list. Gates: candidates, openOverlay and the
 //   Overlay toggle (below).
+//   ignoreSite {} [selected] (the overlay's "Ignore this site") ->
+//              setSiteIgnored(tabId, true): the host of top:<tabId> (none ->
+//              {ok: false, error: "no-site"}), then the app's pong (deps; failing
+//              -> the app-unreachable / app-error replies of Send the job; protocol
+//              < 4 -> {ok: false, error: "app-outdated", message: "Update the
+//              SegDown app to turn sites off from the browser"}), then the native
+//              setIgnored (deps, below) -> {ok, ignored}. The Toolbar menu (below)
+//              uses the same setter, also with ignored false.
 //
 //   Source correlation (4.1). Content scripts only ever get a source summary
 //   {kind: "hls" | "mp4" | "page", host, file (last path component, no query),
@@ -562,7 +572,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              per DEPS_TTL_MS (10 s; one cached
 //              answer for every tab, also for the settings; concurrent callers
 //              share one request). protocol: an integer >= 1, absent -> 1 (2:
-//              incognito and fallback, 3: maxHeight and the page probe).
+//              incognito and fallback, 3: maxHeight and the page probe, 4:
+//              setIgnored).
 //              settings are checked field by field: mode "separate" | "merged"
 //              (else "separate"), incognitoDefault (true only when true, so an
 //              app without settings gives false), maxDuration (seconds, finite >
@@ -581,6 +592,24 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              cached the same way. appError blocks nothing here; Download
 //              pings again when the cached answer is a failure and refuses
 //              while the app still does not answer (below).
+//              setIgnored (Ignored sites; protocol >= 4):
+//              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "setIgnored",
+//              host: the raw hostname of top:<tabId> (never a body), ignored}) ->
+//                a pong (as above; the app added the host's site without a
+//                  leading "www." when the rest has a dot, or removed every
+//                  domain covering the host; already covered is no change) ->
+//                  handled like a ping's pong, cached in its place, and `ui` is
+//                  updated before the reply;
+//                {type: "error", code, message} (e.g. "The Ignored sites list
+//                  is full.") -> {ok: false, error: "app-error", code, message}
+//                  (message capped at MAX_MESSAGE_CHARS), the cache unchanged;
+//                the native call fails -> {ok: false, error: "app-unreachable",
+//                  message: APP_UNREACHABLE}; any other reply -> app-error
+//                  "internal".
+//              It waits for a ping in flight, then is the shared request itself
+//              (fetchDeps callers whose cache is stale wait for it; a fresh
+//              cache answers first, as always), so an older pong never lands
+//              after it.
 //
 //   Send the job (4.3).
 //   download {mode?: "separate" | "merged", incognito?: boolean, full?: boolean}
@@ -691,9 +720,10 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   STATUS_TIMEOUT_MS closes the port (a late reply would resolve the wrong
 //   request) and fails every pending one; so does onDisconnect. After either,
 //   the next status goes through sendNativeMessage and the one after reopens
-//   the port. enqueue, cancel, probe and ping always use sendNativeMessage. Jobs run
-//   in the app: closing the port never affects them. Safari never opens the port:
-//   every status there is its own sendNativeMessage (a short appex call).
+//   the port. enqueue, cancel, probe, ping and setIgnored always use
+//   sendNativeMessage. Jobs run in the app: closing the port never affects them.
+//   Safari never opens the port: every status there is its own
+//   sendNativeMessage (a short appex call).
 //
 //   Overlay view (5.2).
 //   view [selected] -> everything the overlay draws, summaries only (no URLs,
@@ -750,8 +780,9 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //     Also sent after panelOpen changes: agents listen for `[` / `]` only while
 //     the overlay is open.
 //     ui {ui: {fullClipButton, playerButton, ignored}} to every tab
-//     (chrome.tabs.query; ignored: that tab's, Ignored sites) when a pong changed
-//     the stored switches or ignored domains (storage.local `ui`).
+//     (chrome.tabs.query; ignored: that tab's, Ignored sites) when a pong (ping
+//     or setIgnored) changed the stored switches or ignored domains
+//     (storage.local `ui`).
 //
 // Overlay toggle (3.5): the "toggle-panel" command and the toolbar button
 // (chrome.action.onClicked; fires once the manifest has no default_popup, 5.4).
@@ -764,6 +795,18 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // shows a "none" badge for NO_VIDEO_BADGE_MS. The selection becoming null also
 // sets panelOpen false. Top-frame navigation clears hub:<tabId>, so the overlay
 // is closed again on the next page.
+//
+// Toolbar menu: only where chrome.contextMenus exists (feature-detected; a
+// browser that refuses the "action" context simply has no menu). Two items on
+// the toolbar button, created hidden on install / update / browser start:
+// "site-off" "Turn off SegDown on <host without a leading www. when the rest has
+// a dot>" when the active tab (last-focused window) has an http(s) top:<tabId>
+// that is not ignored, "site-on" "Turn on SegDown on <the first listed domain
+// covering the host>" when it is ignored, neither without a top URL. Refreshed
+// on tab activation, window focus, a top-frame commit or same-document URL change
+// (after top:<tabId>), a `ui` change and a setIgnored success. A click ->
+// setSiteIgnored(tab, item is "site-off") (Ignored sites); the badge shows "off"
+// / "on" on success, "!" on any failure, for NO_VIDEO_BADGE_MS.
 //
 // Same-document URL changes (webNavigation.onHistoryStateUpdated, frame 0) update
 // top:<tabId>. When the URL, without its hash, differs from the key in
@@ -813,7 +856,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   seg:<url>    -> {segments (with done?), ts}   (at most 200, newest ts kept; entries saved by
 //                    older versions also carry mode and precision, ignored)
 //   ui           -> {fullClipButton, playerButton, ignoredDomains}   (the app's
-//                    switches and ignored domains from the last pong; absent ->
+//                    switches and ignored domains from the last pong, ping or
+//                    setIgnored; absent ->
 //                    both true, []; stored without ignoredDomains -> []; content
 //                    scripts get only the switches and a per-tab `ignored`, through
 //                    getState and the `ui` broadcast)
@@ -829,7 +873,7 @@ const EXCLUSIONS = new Set(["small", "ad", "live"]);
 const MIN_MAIN_DURATION = 30; // seconds; shorter videos lose to a longer candidate
 const MAX_SEGMENTS = 100; // SegDownCore Validation
 const MAX_PAGES = 200; // seg:* entries kept in storage.local, most recent ts first
-const NO_VIDEO_BADGE_MS = 2000; // the toolbar's "none" / "off" badge after a toggle with nothing selected / an ignored tab
+const NO_VIDEO_BADGE_MS = 2000; // the toolbar's "none" / "off" badge after a toggle with nothing selected / an ignored tab; also the Toolbar menu's "off" / "on" / "!"
 const MODES = new Set(["separate", "merged"]);
 const NATIVE_HOST = "com.math2it.segdown";
 const APP_UNREACHABLE = "SegDown app not reachable: install browser integration";
@@ -858,6 +902,7 @@ const RELOAD_KEY = "reload"; // storage.local: the version pair of the last self
 const DEPS_TTL_MS = 10 * 1000; // ping answers (missing tools, settings) are reused this long
 const TOOLS = new Set(["yt-dlp", "ffmpeg", "ffprobe", "deno"]); // SegDownCore Tool raw values
 const INCOGNITO_NEEDS_UPDATE = "Update the SegDown app to download incognito";
+const IGNORE_NEEDS_UPDATE = "Update the SegDown app to turn sites off from the browser";
 const MAX_VIDEO_SIDE = 100000; // candidate width/height in px
 
 const isFiniteNum = (n) => typeof n === "number" && Number.isFinite(n);
@@ -949,6 +994,7 @@ const HUB_VALIDATORS = new Map([
   ["deps", () => ({})],
   ["setIncognito", (m) => (typeof m.on === "boolean" ? { on: m.on } : null)],
   ["view", () => ({})],
+  ["ignoreSite", () => ({})],
 ]);
 
 // Accepted only from the frame that holds the selected video (see the protocol).
@@ -971,6 +1017,7 @@ const SELECTED_FRAME_TYPES = new Set([
   "deps",
   "setIncognito",
   "view",
+  "ignoreSite",
 ]);
 
 // Control characters become spaces, then at most MAX_TITLE_CHARS code points (never splits
@@ -1666,6 +1713,7 @@ async function updateUI(settings) {
   for (const tab of await chrome.tabs.query({})) {
     if (Number.isInteger(tab.id) && tab.id >= 0) notifyAll(tab.id, { type: "ui", ui: await uiFor(tab.id, ui) });
   }
+  refreshActionMenu().catch(hubWarn);
 }
 
 // Downloads between the click and the app's reply: a reload then would drop the job.
@@ -1689,10 +1737,27 @@ async function reloadIfOutdated(appVersion) {
   chrome.runtime.reload();
 }
 
+const isPong = (reply) => isObject(reply) && reply.type === "pong" && Array.isArray(reply.missing);
+
+// A pong (ping or setIgnored) -> {result: {missing: [tool], protocol, settings},
+// ui: the running updateUI (never rejects)}. Sets the persistence gate
+// (incognitoDefault) and the storage.local ui switches and ignored domains
+// (updateUI); an app version other than this one reloads the extension
+// (reloadIfOutdated).
+function applyPong(reply) {
+  const settings = cleanSettings(reply.settings);
+  const protocol = Number.isInteger(reply.protocol) && reply.protocol >= 1 ? reply.protocol : 1;
+  const opened = incognitoDefault === null;
+  incognitoDefault = settings.incognitoDefault;
+  if (opened) persistHeldSegments().catch(hubWarn);
+  const ui = updateUI(settings).catch(hubWarn);
+  reloadIfOutdated(reply.version).catch(hubWarn);
+  const missing = [...new Set(reply.missing.filter((t) => typeof t === "string" && TOOLS.has(t)))];
+  return { result: { missing, protocol, settings }, ui };
+}
+
 // -> {missing: [tool], protocol, settings} or {missing: [], appError}. Never
-// throws. Every pong sets the persistence gate (incognitoDefault) and the
-// storage.local ui switches and ignored domains (updateUI); an app version other
-// than this one reloads the extension (reloadIfOutdated).
+// throws. Every pong goes through applyPong (updateUI not awaited).
 async function pingNative() {
   let reply;
   try {
@@ -1700,17 +1765,7 @@ async function pingNative() {
   } catch {
     return { missing: [], appError: APP_UNREACHABLE };
   }
-  if (isObject(reply) && reply.type === "pong" && Array.isArray(reply.missing)) {
-    const settings = cleanSettings(reply.settings);
-    const protocol = Number.isInteger(reply.protocol) && reply.protocol >= 1 ? reply.protocol : 1;
-    const opened = incognitoDefault === null;
-    incognitoDefault = settings.incognitoDefault;
-    if (opened) persistHeldSegments().catch(hubWarn);
-    updateUI(settings).catch(hubWarn);
-    reloadIfOutdated(reply.version).catch(hubWarn);
-    const missing = [...new Set(reply.missing.filter((t) => typeof t === "string" && TOOLS.has(t)))];
-    return { missing, protocol, settings };
-  }
+  if (isPong(reply)) return applyPong(reply).result;
   return { missing: [], appError: "Unexpected reply from the SegDown app." };
 }
 
@@ -1755,6 +1810,69 @@ async function onDeps() {
   const reply = { ok: true, missing: [...missing] };
   if (appError) reply.appError = appError;
   return reply;
+}
+
+// --- ignored sites from the browser (rules under "Ignored sites" in the protocol) ---
+
+// The hostname of top:<tabId> (webNavigation, never a content script), or null.
+async function topHost(tabId) {
+  const top = (await chrome.storage.session.get(topKey(tabId)))[topKey(tabId)];
+  try {
+    return new URL(top).hostname.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+// Sends setIgnored once no ping is in flight, and is the shared depsCache.run while
+// it runs, so a ping that answers later cannot overwrite the new list. fetchDeps
+// callers that find the cache stale meanwhile share it and get a deps result: the
+// pong's (also cached), else deps (the cache is left as it is). -> the hub reply.
+async function setIgnoredNative(host, ignored, deps) {
+  while (depsCache.run) await depsCache.run;
+  let reply = null;
+  const shared = (async () => {
+    let answer;
+    try {
+      answer = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "setIgnored", host, ignored });
+    } catch {
+      reply = appFailure(APP_UNREACHABLE);
+      return deps;
+    }
+    if (isPong(answer)) {
+      const { result, ui } = applyPong(answer);
+      Object.assign(depsCache, { ts: Date.now(), result });
+      await ui; // the `ui` broadcast before the reply
+      reply = { ok: true, ignored };
+      return result;
+    }
+    if (isObject(answer) && answer.type === "error" && typeof answer.code === "string") {
+      const text = typeof answer.message === "string" ? answer.message.slice(0, MAX_MESSAGE_CHARS) : "";
+      reply = { ok: false, error: "app-error", code: answer.code.slice(0, 32), message: text || "SegDown could not change the Ignored sites." };
+    } else {
+      reply = { ok: false, error: "app-error", code: "internal", message: "Unexpected reply from the SegDown app." };
+    }
+    return deps;
+  })().finally(() => {
+    if (depsCache.run === shared) depsCache.run = null;
+  });
+  depsCache.run = shared;
+  await shared;
+  return reply;
+}
+
+// Turns the site of tabId's top page off (ignored) or back on in the app's list.
+// -> {ok, ignored} or {ok: false, error, message?}.
+async function setSiteIgnored(tabId, ignored) {
+  const host = await topHost(tabId);
+  if (!host) return { ok: false, error: "no-site" };
+  const deps = await fetchDeps(true);
+  if (deps.appError) return appFailure(deps.appError);
+  if (deps.protocol < 4) return { ok: false, error: "app-outdated", message: IGNORE_NEEDS_UPDATE };
+  const result = await setIgnoredNative(host, ignored, deps);
+  hubLog(`setIgnored tab=${tabId} ${ignored} ${result.ok ? "ok" : `error=${result.code || result.error}`}`);
+  if (result.ok) refreshActionMenu().catch(hubWarn); // updateUI skips it when nothing changed
+  return result;
 }
 
 // --- HLS variant picker (4.2; rules under "HLS variant picker" in the protocol) ---
@@ -2516,6 +2634,8 @@ function route(tabId, frameId, type, body, from) {
       return onSetIncognito(tabId, from, body);
     case "view":
       return onView(tabId, from);
+    case "ignoreSite":
+      return setSiteIgnored(tabId, true);
     default:
       return Promise.resolve({ ok: false, error: "bad-message" });
   }
@@ -2546,6 +2666,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // when the overlay first opens. Not on a browser update ("chrome_update"): the
 // ping launches the app.
 chrome.runtime.onInstalled.addListener(({ reason }) => {
+  setupActionMenu();
   if (reason === "install" || reason === "update") fetchDeps().catch(hubWarn);
 });
 
@@ -2558,7 +2679,9 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // Safari has no onHistoryStateUpdated: SPA navigations there keep the old page key.
 chrome.webNavigation.onHistoryStateUpdated?.addListener((details) => {
   if (details.frameId !== 0) return;
-  setTopURL(details.tabId, details.url).catch(hubWarn);
+  setTopURL(details.tabId, details.url)
+    .then(() => refreshActionMenu())
+    .catch(hubWarn);
   onPageChanged(details.tabId, details.url).catch(hubWarn);
 });
 
@@ -2608,6 +2731,72 @@ chrome.commands.onCommand.addListener((command, tab) => {
 
 // Fires only without a default_popup in the manifest (removed in 5.4).
 chrome.action.onClicked.addListener(toggleOverlayIn);
+
+// Toolbar menu (see the protocol). Safari may have no contextMenus or no "action"
+// context: then there is no menu (lastError is read, never thrown).
+const ACTION_MENU = typeof chrome.contextMenus?.create === "function";
+const MENU_IDS = ["site-off", "site-on"];
+const menuDone = () => void chrome.runtime.lastError; // read, so Chrome does not report it as unchecked
+
+// The two items, hidden until refreshActionMenu shows the active tab's one.
+function setupActionMenu() {
+  if (!ACTION_MENU) return;
+  try {
+    chrome.contextMenus.removeAll(() => {
+      menuDone();
+      try {
+        for (const id of MENU_IDS) {
+          const title = id === "site-off" ? "Turn off SegDown on this site" : "Turn on SegDown on this site";
+          chrome.contextMenus.create({ id, title, contexts: ["action"], visible: false }, menuDone);
+        }
+        refreshActionMenu().catch(hubWarn);
+      } catch (err) {
+        hubWarn(err);
+      }
+    });
+  } catch (err) {
+    hubWarn(err);
+  }
+}
+
+function updateMenuItem(id, props) {
+  try {
+    chrome.contextMenus.update(id, props, menuDone);
+  } catch (err) {
+    hubWarn(err);
+  }
+}
+
+// IgnoredDomain.site: without a leading "www." when the rest still has a dot.
+const siteOf = (host) => (host.startsWith("www.") && host.slice(4).includes(".") ? host.slice(4) : host);
+
+// Shows the item for the active tab of the last-focused window: none without an
+// http(s) top URL, else "Turn off" (not ignored) or "Turn on" (ignored).
+async function refreshActionMenu() {
+  if (!ACTION_MENU) return;
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const host = tab && Number.isInteger(tab.id) && tab.id >= 0 ? await topHost(tab.id) : null;
+  const domain = host && (await readUI()).ignoredDomains.find((d) => host === d || host.endsWith(`.${d}`));
+  updateMenuItem("site-off", host && !domain ? { visible: true, title: `Turn off SegDown on ${siteOf(host)}` } : { visible: false });
+  updateMenuItem("site-on", domain ? { visible: true, title: `Turn on SegDown on ${domain}` } : { visible: false });
+}
+
+chrome.runtime.onStartup.addListener(setupActionMenu);
+
+if (ACTION_MENU) {
+  chrome.contextMenus.onClicked.addListener((info, tab) => {
+    if (!MENU_IDS.includes(info.menuItemId) || !tab || !Number.isInteger(tab.id) || tab.id < 0) return;
+    const tabId = tab.id;
+    setSiteIgnored(tabId, info.menuItemId === "site-off")
+      .then((r) => flashBadge(tabId, r.ok ? (r.ignored ? "off" : "on") : "!"))
+      .catch((err) => {
+        hubWarn(err);
+        flashBadge(tabId, "!");
+      });
+  });
+  chrome.tabs.onActivated.addListener(() => refreshActionMenu().catch(hubWarn));
+  chrome.windows?.onFocusChanged?.addListener(() => refreshActionMenu().catch(hubWarn));
+}
 
 // --- debug (service-worker console only) ---
 
