@@ -94,9 +94,9 @@ struct BrowsersView: View {
                         .buttonStyle(RowTextButtonStyle(formRow: true))
                 } label: {
                     Text("SegDown add-on")
-                    Text("Installs the native messaging host, then opens the add-on in Firefox. Allow the install, "
-                        + "then let SegDown access all websites in about:addons (Permissions) if Firefox asks. "
-                        + "Private windows need \"Run in Private Windows\". Firefox keeps the add-on up to date.")
+                    Text("Installs the native messaging host, then opens the add-on in Firefox. Allow the install and "
+                        + "click Add; tick \"Allow extension to run in private windows\" there to use it in private "
+                        + "windows. Firefox keeps the add-on up to date.")
                 }
                 if let firefoxMessage {
                     Text(firefoxMessage.text)
