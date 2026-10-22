@@ -6,6 +6,11 @@
           "version": "0.6.5",
           "update_link": "https://github.com/dinhanhthi/SegDown/releases/download/v0.6.5/SegDown-firefox-0.6.5.xpi",
           "update_hash": "sha256:d93791f2212a6da06a1b219703dd2852b21d2769afbe68f9cd9a11139d85bfea"
+        },
+        {
+          "version": "0.6.6",
+          "update_link": "https://github.com/dinhanhthi/SegDown/releases/download/v0.6.6/SegDown-firefox-0.6.6.xpi",
+          "update_hash": "sha256:deb35118706efec8a57198c5c4541173d54d2d4b27a1c15fd195f9c7fd35a80e"
         }
       ]
     }
