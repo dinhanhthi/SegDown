@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-10-22
+
+### Added
+
+- Ignored sites. Settings › Browser › Ignored sites lists the websites where SegDown stays off: no video detection, no button on players, and the toolbar button shows "off". Subdomains are included.
+
 ## [0.6.5] - 2026-10-22
 
 ### Added
