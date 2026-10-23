@@ -108,7 +108,7 @@
     button:hover:not(:disabled) { background: #3a3a3c; }
     button:disabled { opacity: 0.4; cursor: default; }
     button:focus-visible { outline: 2px solid #0a84ff; }
-    button.icon { min-width: 28px; text-align: center; font-family: ui-monospace, Menlo, monospace; font-weight: 700; }
+    button.icon { min-width: 40px; padding: 4px 14px; text-align: center; font-family: ui-monospace, Menlo, monospace; font-weight: 700; }
     button.next { background: rgba(48, 209, 88, 0.22); color: #7ee398; }
     button.next:hover:not(:disabled) { background: rgba(48, 209, 88, 0.34); }
     button.cancel { background: rgba(255, 69, 58, 0.22); color: #ff8a80; }
