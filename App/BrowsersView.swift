@@ -135,8 +135,12 @@ struct BrowsersView: View {
 
     @ViewBuilder
     private func stateText(_ status: HostManifestInstaller.Status) -> some View {
-        if status.stale {
-            Text("Re-install: the app moved since the browser integration was installed")
+        if let otherApp = status.otherApp {
+            Text("Points to another copy of SegDown: \((otherApp as NSString).abbreviatingWithTildeInPath)")
+                .foregroundStyle(.orange)
+                .multilineTextAlignment(.trailing)
+        } else if status.stale {
+            Text("Re-install: the browser integration is out of date")
                 .foregroundStyle(.orange)
                 .multilineTextAlignment(.trailing)
         } else if status.installed {

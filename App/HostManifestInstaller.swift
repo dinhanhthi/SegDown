@@ -37,6 +37,9 @@ enum HostManifestInstaller {
         /// The existing manifest is unreadable, or its `path` or allowed callers differ from the
         /// running bundle's (e.g. the app moved since it was installed).
         let stale: Bool
+        /// The app whose host the manifest points to, when it is not the running bundle (the app moved, or another
+        /// copy such as a Debug build is running).
+        let otherApp: String?
 
         var id: String { browser }
     }
@@ -98,7 +101,7 @@ enum HostManifestInstaller {
             )
             guard let data = FileManager.default.contents(atPath: file.path) else {
                 return Status(browser: browser.name, bundleID: browser.bundleID, manifestPath: file.path,
-                              installed: false, stale: false)
+                              installed: false, stale: false, otherApp: nil)
             }
             let expected = currentManifest(for: browser.bundleID)
             let manifest = try? JSONDecoder().decode(Manifest.self, from: data)
@@ -106,9 +109,16 @@ enum HostManifestInstaller {
                 $0.path != expected.path || $0.allowedOrigins != expected.allowedOrigins
                     || $0.allowedExtensions != expected.allowedExtensions
             } ?? true
+            let otherApp = manifest.flatMap { $0.path == expected.path ? nil : appPath(ofHost: $0.path) }
             return Status(browser: browser.name, bundleID: browser.bundleID, manifestPath: file.path,
-                          installed: true, stale: stale)
+                          installed: true, stale: stale, otherApp: otherApp)
         }
+    }
+
+    /// "/Applications/SegDown.app/Contents/MacOS/segdown-host" -> "/Applications/SegDown.app"; any other path as is.
+    private static func appPath(ofHost path: String) -> String {
+        let suffix = "/Contents/MacOS/segdown-host"
+        return path.hasSuffix(suffix) ? String(path.dropLast(suffix.count)) : path
     }
 
     private static var supportDirectory: URL {
