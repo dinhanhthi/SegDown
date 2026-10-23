@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-10-23
+
 ### Changed
 
 - The overlay's Mark start and Mark end buttons are now icons (`[` and `]`, like the keys), with tooltips. The next step to take is green.
