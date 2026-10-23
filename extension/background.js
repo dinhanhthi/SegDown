@@ -354,6 +354,9 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              `mark`. Failures ("no-selection", "selection-changed", agent
 //              errors and the three above) -> {ok: false, error}, also relayed
 //              there as `markError`.
+//   cancelStart [selected] (the overlay's Cancel, which replaces Mark start
+//              while a start is pending): clears pendingStart (no-op when none)
+//              and sends state to "all" -> {ok, state}.
 //
 //   Overlay (the selected video's frame), all aimed at the selected video, so
 //   they carry no target:
@@ -568,7 +571,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "ping"}) ->
 //              {type: "pong", version, missing: [string], protocol?, settings?:
 //              {mode, incognitoDefault, maxDuration?, fullClipButton?,
-//              playerButton?, ignoredDomains?, preferredHeight?}}, at most once
+//              fullClipConfirm?, playerButton?, ignoredDomains?,
+//              preferredHeight?}}, at most once
 //              per DEPS_TTL_MS (10 s; one cached
 //              answer for every tab, also for the settings; concurrent callers
 //              share one request). protocol: an integer >= 1, absent -> 1 (2:
@@ -577,8 +581,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              settings are checked field by field: mode "separate" | "merged"
 //              (else "separate"), incognitoDefault (true only when true, so an
 //              app without settings gives false), maxDuration (seconds, finite >
-//              0, else no limit), fullClipButton and playerButton (false only
-//              when false, so absent -> true), ignoredDomains (lowercased
+//              0, else no limit), fullClipButton, fullClipConfirm and
+//              playerButton (false only when false, so absent -> true), ignoredDomains (lowercased
 //              hostnames as the app's IgnoredDomain.normalize makes them, others
 //              dropped, deduped, at most MAX_IGNORED_DOMAINS; not an array -> []),
 //              preferredHeight (an integer 1...8640, else null = Best). Every
@@ -747,6 +751,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //                mode (settings.mode, "separate" without settings),
 //                fullClip (settings.fullClipButton: show Full clip; true
 //                  without settings),
+//                fullClipConfirm (settings.fullClipConfirm: Full clip asks
+//                  before it downloads; true without settings),
 //                overLimit (the segments' total duration > settings.maxDuration),
 //                maxDuration (seconds, or null = no limit; always present),
 //                depsProblem (only when Download must be disabled: ffmpeg
@@ -962,6 +968,7 @@ const HUB_VALIDATORS = new Map([
   ["key", (m) => (MARK_ACTIONS.has(m.action) ? { action: m.action } : null)],
   ["removeSegment", (m) => (isIndex(m.index, MAX_SEGMENTS) ? { index: m.index } : null)],
   ["clearSegments", () => ({})],
+  ["cancelStart", () => ({})],
   ["seek", (m) => (isTime(m.time) ? { time: m.time } : null)],
   ["getTime", () => ({})],
   ["play", () => ({})],
@@ -1001,6 +1008,7 @@ const HUB_VALIDATORS = new Map([
 const SELECTED_FRAME_TYPES = new Set([
   "removeSegment",
   "clearSegments",
+  "cancelStart",
   "seek",
   "getTime",
   "play",
@@ -1267,6 +1275,20 @@ async function onKey(tabId, { action }) {
   notifyAll(tabId, { type: "state", state: hub });
   hubLog(`${action} tab=${tabId} time=${time}`);
   return { ok: true, ...mark };
+}
+
+async function onCancelStart(tabId) {
+  const hub = await withTab(tabId, async () => {
+    const h = await readHub(tabId);
+    if (h.pendingStart !== null) {
+      h.pendingStart = null;
+      await writeHub(tabId, h);
+    }
+    return h;
+  });
+  notifyAll(tabId, { type: "state", state: hub });
+  hubLog(`cancelStart tab=${tabId}`);
+  return { ok: true, state: hub };
 }
 
 // open: true/false sets panelOpen, null flips it; it stays false with nothing
@@ -1648,6 +1670,7 @@ function cleanSettings(s) {
     incognitoDefault: o.incognitoDefault === true,
     maxDuration: isFiniteNum(o.maxDuration) && o.maxDuration > 0 ? o.maxDuration : null,
     fullClipButton: o.fullClipButton !== false,
+    fullClipConfirm: o.fullClipConfirm !== false,
     playerButton: o.playerButton !== false,
     ignoredDomains: cleanDomains(o.ignoredDomains),
     preferredHeight: Number.isInteger(o.preferredHeight) && o.preferredHeight >= 1 && o.preferredHeight <= MAX_HEIGHT ? o.preferredHeight : null,
@@ -2564,6 +2587,7 @@ async function onView(tabId, from) {
     incognito: { on: inc.on, forced: inc.forced },
     mode: settings.mode,
     fullClip: settings.fullClipButton,
+    fullClipConfirm: settings.fullClipConfirm,
     overLimit,
     maxDuration: settings.maxDuration, // null = no limit
     job: newest
@@ -2598,6 +2622,8 @@ function route(tabId, frameId, type, body, from) {
       return onRemoveSegment(tabId, body);
     case "clearSegments":
       return onClearSegments(tabId);
+    case "cancelStart":
+      return onCancelStart(tabId);
     case "seek":
     case "getTime":
     case "play":

@@ -1,7 +1,8 @@
 // SegDown overlay (5.3): runs in every frame and shows only in the frame of the
 // selected video while the overlay is open (hub state.panelOpen). A thin segment
-// bar on the video's bottom edge plus Mark start / Mark end / Full clip / Download
-// buttons (Full clip only while the app's switch is on), in a closed shadow root
+// bar on the video's bottom edge plus Mark start (Cancel while a start is pending)
+// / Mark end / Full clip / Download buttons (Full clip only while the app's switch
+// is on; it asks to confirm unless the app turns that off), in a closed shadow root
 // shown in the top layer (popover="manual", spike 1.2), so it stays above the page
 // and every kind of fullscreen. The buttons' panel moves by its grip, inside the
 // video (the spot is kept until the page reloads).
@@ -21,6 +22,8 @@
   const PLACE_MS = 500; // re-place tick (parent-frame scroll, layout changes)
   const POLL_MS = 1000; // `jobs` while a job is queued or running
   const REFRESH_MS = 100; // coalesces `view` calls (a mark brings several messages)
+  const CONFIRM_MS = 4000; // Full clip's confirm step reverts after this
+  const DOUBLE_CLICK_MS = 400; // a click this soon after Full clip asked is a double click, not a yes
   const ACTIVE = new Set(["queued", "running"]);
   const VIDEO_EVENTS = ["timeupdate", "seeked", "durationchange", "loadedmetadata", "resize", "emptied"];
   // Players toggle play/pause or fullscreen on clicks and keys: keep them out.
@@ -105,6 +108,11 @@
     button:hover:not(:disabled) { background: #3a3a3c; }
     button:disabled { opacity: 0.4; cursor: default; }
     button:focus-visible { outline: 2px solid #0a84ff; }
+    button.icon { min-width: 28px; text-align: center; font-family: ui-monospace, Menlo, monospace; font-weight: 700; }
+    button.next { background: rgba(48, 209, 88, 0.22); color: #7ee398; }
+    button.next:hover:not(:disabled) { background: rgba(48, 209, 88, 0.34); }
+    button.cancel { background: rgba(255, 69, 58, 0.22); color: #ff8a80; }
+    button.cancel:hover:not(:disabled) { background: rgba(255, 69, 58, 0.34); }
     .split { display: flex; }
     .split button { background: #0a84ff; }
     .split button:hover:not(:disabled) { background: #2f95ff; }
@@ -137,6 +145,8 @@
   let note = ""; // the last action's error
   let busy = false; // a download call is in flight
   let menuOpen = false;
+  let fullArmed = 0; // Date.now() when Full clip asked to confirm; 0 = not asking
+  let fullTimer = null;
   let panelPos = null; // {right, bottom} px in the host once the panel was dragged; null = the CSS spot
   let drag = null; // {x, y, right, bottom} at the grip's pointerdown while dragging
   let lastMove = 0;
@@ -256,6 +266,7 @@
     host = ui = rect = view = job = drag = null;
     menuOpen = false;
     note = "";
+    disarmFull();
     detach();
     window.removeEventListener("scroll", schedulePlace, { capture: true });
     window.removeEventListener("resize", schedulePlace);
@@ -429,11 +440,46 @@
   }
 
   function onOutside(e) {
-    if (e.isTrusted && menuOpen && !e.composedPath().includes(host)) setMenu(false);
+    if (!e.isTrusted || e.composedPath().includes(host)) return;
+    if (fullArmed) {
+      disarmFull();
+      render();
+    }
+    if (menuOpen) setMenu(false);
   }
 
   function onEscape(e) {
-    if (e.isTrusted && menuOpen && e.key === "Escape") setMenu(false);
+    if (!e.isTrusted || e.key !== "Escape") return;
+    if (fullArmed) {
+      disarmFull();
+      render();
+    }
+    if (menuOpen) setMenu(false);
+  }
+
+  // --- Full clip confirm ---
+
+  function disarmFull() {
+    clearTimeout(fullTimer);
+    fullTimer = null;
+    fullArmed = 0;
+  }
+
+  // The first click asks (unless the app's switch is off), the second downloads.
+  function onFull() {
+    if (view && view.fullClipConfirm === false) return download(true);
+    if (!fullArmed) {
+      note = ""; // else an old error hides the question
+      fullArmed = Date.now();
+      fullTimer = setTimeout(() => {
+        disarmFull();
+        render();
+      }, CONFIRM_MS);
+      return render();
+    }
+    if (Date.now() - fullArmed < DOUBLE_CLICK_MS) return;
+    disarmFull();
+    download(true);
   }
 
   // --- data flow ---
@@ -518,7 +564,7 @@
     if (busy) return { text: "Sending…" };
     if (!view) return { text: "Loading…" };
     const list = segments();
-    if (!list.length) return { text: "Mark a segment first: Mark start, then Mark end." };
+    if (!list.length) return { text: "Mark a segment first: Mark start ([), then Mark end (])." };
     if (view.overLimit) {
       const text = `Total ${fmtTime(totalOf(list))} is over the ${fmtTime(view.maxDuration)} limit (Max total duration in SegDown Settings).`;
       return { text, warn: true };
@@ -579,6 +625,13 @@
     // Clicks must not move the keyboard focus into the overlay: Space and the
     // `[` / `]` keys stay with the page and its player.
     wrap.addEventListener("mousedown", (e) => e.preventDefault());
+    // A press anywhere else in the overlay takes back Full clip's question.
+    wrap.addEventListener("pointerdown", (e) => {
+      if (e.isTrusted && fullArmed && e.target !== full) {
+        disarmFull();
+        render();
+      }
+    });
 
     const bar = make("div", "bar");
     const track = make("div", "track");
@@ -590,13 +643,16 @@
     bar.setAttribute("aria-label", "SegDown timeline");
     onClick(bar, onBarClick);
 
-    const start = make("button", null, "Mark start");
-    const end = make("button", null, "Mark end");
-    onClick(start, () => act({ type: "key", action: "markStart" }));
+    // Icons only (render sets them): `[` and `]` are also the keys that mark.
+    const start = make("button");
+    const end = make("button", "icon", "]");
+    end.title = "Mark end (])";
+    end.setAttribute("aria-label", "Mark end");
+    onClick(start, () => act(pendingStart() === null ? { type: "key", action: "markStart" } : { type: "cancelStart" }));
     onClick(end, () => act({ type: "key", action: "markEnd" }));
     const full = make("button", null, "Full clip");
     full.hidden = true;
-    onClick(full, () => download(true));
+    onClick(full, onFull);
     const main = make("button", "main", "Download");
     const more = make("button", "more", "▾");
     more.setAttribute("aria-label", "Download options");
@@ -691,6 +747,7 @@
     ui.jobLine.className = job && job.state === "failed" ? "err" : "";
     let text = note;
     let cls = note ? "err" : "";
+    if (!text && fullArmed) text = "Download the whole video? Click Confirm full clip; Esc cancels.";
     if (!text && block && !busy) [text, cls] = [block.text, block.warn ? "warn" : ""];
     if (!text) {
       const list = segments();
@@ -708,15 +765,26 @@
     if (!ui) return;
     const ps = pendingStart();
     const live = Boolean(video && video.duration === Infinity);
-    ui.start.disabled = live || ps !== null;
-    ui.end.disabled = live || ps === null;
+    // The next step is green; a pending start turns Mark start into a red Cancel.
+    const pending = ps !== null;
+    ui.start.disabled = live && !pending;
+    ui.start.className = pending ? "cancel" : "icon";
+    ui.start.classList.toggle("next", !pending && !ui.start.disabled);
+    ui.start.textContent = pending ? "Cancel" : "[";
+    ui.start.title = pending ? `Cancel the start at ${fmtTime(ps, true)}` : "Mark start ([)";
+    ui.start.setAttribute("aria-label", pending ? "Cancel the start" : "Mark start");
+    ui.end.disabled = live || !pending;
+    ui.end.classList.toggle("next", !ui.end.disabled);
     const block = downloadBlock();
     ui.main.disabled = Boolean(block);
     ui.main.title = block ? block.text : "Download the marked segments";
     ui.full.hidden = !(view && view.fullClip === true);
     const fb = fullBlock();
+    if (fullArmed && (fb || ui.full.hidden)) disarmFull();
     ui.full.disabled = Boolean(fb);
-    ui.full.title = fb ? fb.text : "Download the whole video";
+    ui.full.className = fullArmed ? "next" : "";
+    ui.full.textContent = fullArmed ? "Confirm full clip" : "Full clip";
+    ui.full.title = fb ? fb.text : fullArmed ? "Click again to download the whole video" : "Download the whole video";
     renderBar();
     renderLines(block);
     ui.menu.hidden = !menuOpen;

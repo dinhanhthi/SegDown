@@ -72,6 +72,7 @@ struct WireCompatibilityTests {
                 incognitoDefault: true,
                 maxDuration: 600,
                 fullClipButton: false,
+                fullClipConfirm: false,
                 playerButton: false,
                 preferredHeight: 1080,
                 ignoredDomains: ["example.com", "www.youtube.com"]
@@ -97,6 +98,7 @@ struct WireCompatibilityTests {
         }
         let decoded = try #require(settings)
         #expect(decoded.fullClipButton)
+        #expect(decoded.fullClipConfirm)
         #expect(decoded.playerButton)
         #expect(decoded.maxDuration == nil)
         #expect(decoded.preferredHeight == nil)

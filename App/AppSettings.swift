@@ -29,6 +29,8 @@ struct AppSettings: Codable, Equatable, Sendable {
     var snakeCaseNames = false
     /// The extension shows a Full clip button in the overlay.
     var fullClipButton = true
+    /// The overlay's Full clip button asks before it downloads.
+    var fullClipConfirm = true
     /// The extension shows a SegDown button on a video player under the pointer.
     var playerButton = true
     /// The extension takes the tallest quality up to this height when the user picks none (one of
@@ -54,8 +56,8 @@ struct AppSettings: Codable, Equatable, Sendable {
     /// What the extension gets in `pong`.
     var clientSettings: ClientSettings {
         ClientSettings(mode: mode, incognitoDefault: incognitoDefault, maxDuration: maxDuration,
-                       fullClipButton: fullClipButton, playerButton: playerButton, preferredHeight: preferredHeight,
-                       ignoredDomains: ignoredDomains)
+                       fullClipButton: fullClipButton, fullClipConfirm: fullClipConfirm, playerButton: playerButton,
+                       preferredHeight: preferredHeight, ignoredDomains: ignoredDomains)
     }
 
     var jobOptions: JobOptions {
@@ -73,7 +75,7 @@ struct AppSettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case outputFolder, mode, precision, autoFallback, maxBytes, maxDuration, incognitoDefault, compress
-        case flattenOutput, snakeCaseNames, fullClipButton, playerButton, preferredHeight, ignoredDomains
+        case flattenOutput, snakeCaseNames, fullClipButton, fullClipConfirm, playerButton, preferredHeight, ignoredDomains
     }
 }
 
@@ -92,6 +94,7 @@ extension AppSettings {
         flattenOutput = try c.decodeIfPresent(Bool.self, forKey: .flattenOutput) ?? defaults.flattenOutput
         snakeCaseNames = try c.decodeIfPresent(Bool.self, forKey: .snakeCaseNames) ?? defaults.snakeCaseNames
         fullClipButton = try c.decodeIfPresent(Bool.self, forKey: .fullClipButton) ?? defaults.fullClipButton
+        fullClipConfirm = try c.decodeIfPresent(Bool.self, forKey: .fullClipConfirm) ?? defaults.fullClipConfirm
         playerButton = try c.decodeIfPresent(Bool.self, forKey: .playerButton) ?? defaults.playerButton
         preferredHeight = try c.decodeIfPresent(Int.self, forKey: .preferredHeight) ?? defaults.preferredHeight
         ignoredDomains = try c.decodeIfPresent([String].self, forKey: .ignoredDomains) ?? defaults.ignoredDomains

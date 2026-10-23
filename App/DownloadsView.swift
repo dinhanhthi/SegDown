@@ -81,17 +81,24 @@ struct DownloadsView: View {
             trashFailures = pendingFailures
             pendingFailures = []
         }) {
-            TrashSheet(count: trashIDs.count, remove: {
-                pendingFailures = store.remove(ids: trashIDs, trashFiles: true)
-                selection.subtract(trashIDs)
-                confirmTrash = false
-            }, cancel: { confirmTrash = false })
+            DialogSheet(
+                title: trashIDs.count == 1 ? "Move 1 download to the Trash?" : "Move \(trashIDs.count) downloads to the Trash?",
+                message: "Running downloads are cancelled, the downloads leave the list and their files go to the Trash.",
+                actionTitle: "Move to Trash", destructive: true,
+                action: {
+                    pendingFailures = store.remove(ids: trashIDs, trashFiles: true)
+                    selection.subtract(trashIDs)
+                    confirmTrash = false
+                },
+                cancel: { confirmTrash = false })
         }
-        .alert("Some files were not moved to the Trash", isPresented: failuresShown) {
-            Button("OK") {}
-        } message: {
-            Text(trashFailures.map { "\(URL(filePath: $0.path).lastPathComponent): \($0.message)" }
-                .joined(separator: "\n"))
+        .sheet(isPresented: failuresShown) {
+            DialogSheet(
+                title: "Some files were not moved to the Trash",
+                message: trashFailures.map { "\(URL(filePath: $0.path).lastPathComponent): \($0.message)" }
+                    .joined(separator: "\n"),
+                actionTitle: "OK",
+                action: { trashFailures = [] })
         }
     }
 
@@ -554,33 +561,6 @@ private struct StateBadge: View {
             .padding(.horizontal, 10)
             .frame(height: 26)
             .background(Capsule().fill(solid ? color : color.opacity(0.15)))
-    }
-}
-
-/// The confirmation before the files go to the Trash.
-private struct TrashSheet: View {
-    let count: Int
-    let remove: () -> Void
-    let cancel: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(count == 1 ? "Move 1 download to the Trash?" : "Move \(count) downloads to the Trash?")
-                .font(.headline)
-            Text("Running downloads are cancelled, the downloads leave the list and their files go to the Trash.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Spacer()
-                Button("Cancel", action: cancel)
-                    .keyboardShortcut(.cancelAction)
-                Button("Move to Trash", role: .destructive, action: remove)
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(20)
-        .frame(width: 360)
     }
 }
 

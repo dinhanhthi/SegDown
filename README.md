@@ -60,7 +60,7 @@ Open SegDown once. In Safari › Settings › Extensions, tick SegDown and allow
 
 1. Play the video.
 2. Click the SegDown icon on the video, the SegDown toolbar button, or press Alt+Shift+S.
-3. Mark the parts with **Mark start** and **Mark end** (or the `[` and `]` keys).
+3. Mark the parts with the **[** (Mark start) and **]** (Mark end) buttons, or the `[` and `]` keys. While a start is marked, **Cancel** drops it.
 4. Click **Download**. The ▾ menu has more choices: separate or merged files, quality, incognito. **Full clip** downloads the whole video.
 
 If the buttons hide the player's controls, drag them by their ⋮⋮ handle.

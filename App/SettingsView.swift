@@ -106,6 +106,10 @@ struct SettingsView: View {
             Section("Browser") {
                 switchRow(isOn: setting(\.fullClipButton), title: "Full clip button",
                           hint: "Adds a Full clip button to the overlay that downloads the whole video.")
+                if settings.settings.fullClipButton {
+                    switchRow(isOn: setting(\.fullClipConfirm), title: "Confirm Full clip",
+                              hint: "Full clip asks before it downloads, in case of a click by mistake.")
+                }
                 switchRow(isOn: setting(\.playerButton), title: "Button on video players",
                           hint: "Shows a SegDown button on a video while the pointer is over it.")
                 switchRow(isOn: heightPreferred, title: "Preferred resolution",
@@ -167,11 +171,16 @@ struct SettingsView: View {
             if old == .duration { commitDuration() }
         }
         .onChange(of: domainText) { domainError = nil }
-        .alert("Remove all finished downloads from the list and history?", isPresented: $confirmClear) {
-            Button("Clear History", role: .destructive) { store.clearHistory() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Files stay on disk.")
+        .sheet(isPresented: $confirmClear) {
+            DialogSheet(
+                title: "Remove all finished downloads from the list and history?",
+                message: "Files stay on disk.",
+                actionTitle: "Clear History", destructive: true,
+                action: {
+                    store.clearHistory()
+                    confirmClear = false
+                },
+                cancel: { confirmClear = false })
         }
     }
 

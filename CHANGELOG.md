@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The overlay's Mark start and Mark end buttons are now icons (`[` and `]`, like the keys), with tooltips. The next step to take is green.
+- While a start is marked, Mark start turns into a red Cancel button that drops the start, so a start marked by mistake no longer needs a Mark end.
+- Full clip asks to confirm before it downloads the whole video. Turn this off in Settings › Browser › Confirm Full clip.
+- The Move to Trash and Clear history confirmations, and the message about files not moved to the Trash, now have the same capsule buttons as the rest of the window.
+
 ## [0.6.7] - 2026-10-22
 
 ### Added

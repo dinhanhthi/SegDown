@@ -23,6 +23,7 @@
 //      "settings": {"mode": "separate", "incognitoDefault": false,       // optional
 //                   "maxDuration": 600,                                  // maxDuration optional
 //                   "fullClipButton": true, "playerButton": true,        // absent → true
+//                   "fullClipConfirm": true,                             // absent → true
 //                   "preferredHeight": 720,                              // optional; absent → Best
 //                   "ignoredDomains": ["example.com"]}}                  // absent → []
 //     {"type": "enqueued", "id": "…"}
@@ -100,8 +101,9 @@ extension IPCRequest: Codable {
 
 /// The app settings an extension needs, sent in `pong` (protocol 2). `maxDuration` is the max total
 /// duration of a job's segments in seconds; `nil` means no limit. `fullClipButton` and
-/// `playerButton` turn on the overlay's Full clip button and the button on video players; an older
-/// app's missing keys decode to `true`. `preferredHeight` is the height the extension's quality
+/// `playerButton` turn on the overlay's Full clip button and the button on video players, and
+/// `fullClipConfirm` makes Full clip ask before it downloads; an older app's missing keys decode to
+/// `true`. `preferredHeight` is the height the extension's quality
 /// picker takes by default (the tallest quality up to it); `nil`, or absent from an older app, means
 /// the best quality. `ignoredDomains` lists the sites (and their subdomains) where the extension stays
 /// off, as `IgnoredDomain.normalize` output; an older app's missing key decodes to `[]`.
@@ -110,6 +112,7 @@ public struct ClientSettings: Codable, Sendable, Hashable {
     public var incognitoDefault: Bool
     public var maxDuration: Double?
     public var fullClipButton: Bool
+    public var fullClipConfirm: Bool
     public var playerButton: Bool
     public var preferredHeight: Int?
     public var ignoredDomains: [String]
@@ -119,6 +122,7 @@ public struct ClientSettings: Codable, Sendable, Hashable {
         incognitoDefault: Bool,
         maxDuration: Double? = nil,
         fullClipButton: Bool = true,
+        fullClipConfirm: Bool = true,
         playerButton: Bool = true,
         preferredHeight: Int? = nil,
         ignoredDomains: [String] = []
@@ -127,13 +131,15 @@ public struct ClientSettings: Codable, Sendable, Hashable {
         self.incognitoDefault = incognitoDefault
         self.maxDuration = maxDuration
         self.fullClipButton = fullClipButton
+        self.fullClipConfirm = fullClipConfirm
         self.playerButton = playerButton
         self.preferredHeight = preferredHeight
         self.ignoredDomains = ignoredDomains
     }
 
     private enum CodingKeys: String, CodingKey {
-        case mode, incognitoDefault, maxDuration, fullClipButton, playerButton, preferredHeight, ignoredDomains
+        case mode, incognitoDefault, maxDuration, fullClipButton, fullClipConfirm, playerButton, preferredHeight
+        case ignoredDomains
     }
 
     public init(from decoder: any Decoder) throws {
@@ -142,6 +148,7 @@ public struct ClientSettings: Codable, Sendable, Hashable {
         incognitoDefault = try c.decode(Bool.self, forKey: .incognitoDefault)
         maxDuration = try c.decodeIfPresent(Double.self, forKey: .maxDuration)
         fullClipButton = try c.decodeIfPresent(Bool.self, forKey: .fullClipButton) ?? true
+        fullClipConfirm = try c.decodeIfPresent(Bool.self, forKey: .fullClipConfirm) ?? true
         playerButton = try c.decodeIfPresent(Bool.self, forKey: .playerButton) ?? true
         preferredHeight = try c.decodeIfPresent(Int.self, forKey: .preferredHeight)
         ignoredDomains = try c.decodeIfPresent([String].self, forKey: .ignoredDomains) ?? []

@@ -128,6 +128,45 @@ struct RowTextButtonStyle: ButtonStyle {
     }
 }
 
+/// A modal sheet in place of a system alert, so its buttons are capsules like the rest of the window: a title, a
+/// message, then Cancel (Esc) and the main button (Return), tinted red when `destructive`. `cancel` nil: the main
+/// button only (an acknowledgement).
+struct DialogSheet: View {
+    let title: String
+    let message: String
+    let actionTitle: String
+    var destructive = false
+    let action: () -> Void
+    var cancel: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title)
+                .font(.headline)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Spacer()
+                if let cancel {
+                    Button("Cancel", action: cancel)
+                        .keyboardShortcut(.cancelAction)
+                        .buttonStyle(RaisedButtonStyle(horizontalPadding: 14))
+                }
+                Button(actionTitle, role: destructive ? .destructive : nil, action: action)
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(RaisedButtonStyle(horizontalPadding: 14, tint: destructive ? .red : nil))
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
+        // Esc closes a one-button sheet too (with Cancel, its shortcut handles Esc).
+        .onExitCommand(perform: cancel == nil ? action : nil)
+    }
+}
+
 /// The arrow of a menu button.
 struct MenuChevron: View {
     var body: some View {
