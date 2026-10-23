@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-10-23
+
+### Changed
+
+- Settings › Browser › Ignored sites now lists the sites in an indented box with its own background, so they no longer look like settings of SegDown.
+- The overlay's Mark start and Mark end buttons are wider and easier to hit.
+
+### Fixed
+
+- Browsers tab: when a browser's integration points to another copy of SegDown (for example a build run from Xcode), it now names that copy instead of saying the app moved.
+
 ## [0.6.8] - 2026-10-23
 
 ### Changed
