@@ -140,12 +140,8 @@ struct SettingsView: View {
                     Text("SegDown stays off on these sites and their subdomains.")
                 }
                 if let domainError { InlineError(text: domainError) }
-                ForEach(settings.settings.ignoredDomains, id: \.self) { domain in
-                    LabeledContent(domain) {
-                        Button("Remove") { removeDomain(domain) }
-                            .buttonStyle(RowTextButtonStyle(formRow: true))
-                            .accessibilityLabel("Remove \(domain)")
-                    }
+                if !settings.settings.ignoredDomains.isEmpty {
+                    IgnoredDomainList(domains: settings.settings.ignoredDomains, remove: removeDomain)
                 }
             }
             Section {
@@ -360,6 +356,36 @@ struct SettingsView: View {
         let (hours, minutes, secs) = (total / 3600, total / 60 % 60, total % 60)
         let ss = String(format: "%02d", secs)
         return hours > 0 ? "\(hours):\(String(format: "%02d", minutes)):\(ss)" : "\(minutes):\(ss)"
+    }
+}
+
+/// The Ignored sites list: an indented inset box under its row, so the domains read as that setting's values.
+private struct IgnoredDomainList: View {
+    let domains: [String]
+    let remove: (String) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(domains.enumerated()), id: \.element) { index, domain in
+                if index > 0 { Divider() }
+                HStack {
+                    Image(systemName: "globe")
+                        .foregroundStyle(.secondary)
+                    Text(domain)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Button("Remove") { remove(domain) }
+                        .buttonStyle(RowTextButtonStyle(formRow: true))
+                        .accessibilityLabel("Remove \(domain)")
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.2)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.surfaceBorder))
+        .padding(.leading, 16)
     }
 }
 
