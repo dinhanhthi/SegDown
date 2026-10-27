@@ -4,6 +4,15 @@
         <title>SegDown</title>
         <link>https://dinhanhthi.github.io/SegDown/appcast.xml</link>
         <item>
+            <title>0.6.10</title>
+            <pubDate>Tue, 27 Oct 2026 13:51:40 +0100</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/dinhanhthi/SegDown/blob/main/CHANGELOG.md</sparkle:fullReleaseNotesLink>
+            <sparkle:version>17</sparkle:version>
+            <sparkle:shortVersionString>0.6.10</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/dinhanhthi/SegDown/releases/download/v0.6.10/SegDown-0.6.10.zip" length="7245446" type="application/octet-stream" sparkle:edSignature="qapGWfiBgzMRo7Jgy7TjkUjIVkrpWef+t4wavw719ViVcWi+SSwOEYV1WyojedJPTrEuVcvHyx3mTO1eNmRRCQ=="/>
+        </item>
+        <item>
             <title>0.6.9</title>
             <pubDate>Fri, 23 Oct 2026 17:56:46 +0200</pubDate>
             <sparkle:fullReleaseNotesLink>https://github.com/dinhanhthi/SegDown/blob/main/CHANGELOG.md</sparkle:fullReleaseNotesLink>
