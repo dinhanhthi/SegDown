@@ -34,6 +34,9 @@ final class JobStore {
         var finishedAt: Date?
         /// Listed in the Archived list instead of the main one; kept across launches.
         var archived: Bool
+        /// The validated request, kept in memory for `retry(_:)`; `nil` for jobs loaded from the
+        /// history (never recorded there: it holds the media URLs and headers).
+        let request: JobRequest?
     }
 
     /// A file `remove(ids:trashFiles:)` could not move to the Trash.
@@ -211,6 +214,17 @@ final class JobStore {
         Task { await runner.cancel(id: id) }
     }
 
+    /// Starts the finished job `id` again from its request, with the current settings and its
+    /// incognito flag, as a new job at the top; the old one stays listed. Returns `false` when it
+    /// has no request or the request no longer passes the limits.
+    func retry(_ id: String) async -> Bool {
+        guard let item = items.first(where: { $0.id == id }), item.status.state.isFinished,
+              var request = item.request else { return false }
+        request.incognito = item.incognito
+        guard case .enqueued = await enqueue(request) else { return false }
+        return true
+    }
+
     func noteConnection(bundleID: String) {
         lastConnected[bundleID] = Date()
     }
@@ -294,7 +308,7 @@ final class JobStore {
                  segmentCount: validated.segments.count,
                  totalDuration: validated.segments.reduce(0) { $0 + ($1.end - $1.start) },
                  sourceKind: sourceKind, fallbackUsed: false, pageURL: pageURL, incognito: incognito,
-                 createdAt: Date(), archived: false),
+                 createdAt: Date(), archived: false, request: validated),
             at: 0
         )
         trim()
@@ -358,7 +372,7 @@ final class JobStore {
             segmentCount: record.segmentCount, totalDuration: record.totalDuration,
             bytes: record.bytes, sourceKind: nil, fallbackUsed: record.fallbackUsed == true,
             pageURL: record.pageURL, incognito: false, createdAt: record.createdAt, finishedAt: record.finishedAt,
-            archived: record.archived == true
+            archived: record.archived == true, request: nil
         )
     }
 

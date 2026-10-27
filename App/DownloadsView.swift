@@ -348,7 +348,8 @@ struct DownloadsView: View {
 }
 
 /// One job: title and state, then segment, duration, size, progress, then the buttons: Play (once done), Open Page,
-/// Reveal in Finder, Archive or Unarchive, and Remove, with the message and Cancel on the right. Selected adds an accent
+/// Reveal in Finder, Retry (once finished, this session's jobs only), Archive or Unarchive, and Remove, with the message
+/// and Cancel on the right. Selected adds an accent
 /// fill and stroke.
 private struct DownloadCard: View {
     let item: JobStore.Item
@@ -431,6 +432,15 @@ private struct DownloadCard: View {
                     }
                     .buttonStyle(RaisedButtonStyle(height: 26))
                     .help("Reveal in Finder")
+                }
+                if status.state.isFinished, item.request != nil {
+                    Button(action: retry) {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(RaisedButtonStyle(height: 26))
+                    .help("Download again")
                 }
                 Button(action: archive) {
                     Group {
@@ -533,6 +543,13 @@ private struct DownloadCard: View {
             NSSound.beep()
         } else {
             urls.forEach { NSWorkspace.shared.open($0) }
+        }
+    }
+
+    /// Starts the job again as a new card at the top; a beep when its request no longer passes the limits.
+    private func retry() {
+        Task {
+            if !(await store.retry(item.id)) { NSSound.beep() }
         }
     }
 
