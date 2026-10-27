@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.10] - 2026-10-27
+
+### Added
+
+- Download cards have a Retry button that downloads the same segments again, whether the download finished, failed or was cancelled. It starts a new download and keeps the old card. It is available for downloads started since the app was opened.
+
+### Fixed
+
+- A download card now shows the name of the file saved on disk, so a file renamed because of a name clash shows as "name (2)" instead of "name".
+- Videos whose playlist is served as a web page (`text/html`) are now captured, and downloaded with the HLS demuxer.
+- HLS segments disguised as images (an image header in front of the MPEG-TS data) are now cleaned up and download correctly.
+
 ## [0.6.9] - 2026-10-23
 
 ### Changed
