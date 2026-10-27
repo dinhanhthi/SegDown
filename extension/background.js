@@ -32,6 +32,10 @@ const IGNORED_TYPES = new Set(["script", "stylesheet", "image", "font"]);
 const HLS_TYPES = new Set(["application/vnd.apple.mpegurl", "application/x-mpegurl"]);
 const MP4_TYPES = new Set(["video/mp4"]);
 const CHUNK_TYPES = new Set(["video/mp2t", "video/iso.segment"]);
+// A small fetch/XHR response with one of these types may be a disguised playlist (e.g.
+// master.html served as text/html): captured as kind "maybe" until the app's probe tells.
+const MAYBE_HLS_TYPES = new Set(["text/html", "text/plain", "application/octet-stream", ""]);
+const MAX_MAYBE_HLS_BYTES = 256 * 1024; // larger ones are segments, not playlists
 
 // ---------------------------------------------------------------------------
 // Media capture: pending request headers (memory only, short-lived)
@@ -79,15 +83,33 @@ function contentType(responseHeaders) {
   return h && typeof h.value === "string" ? h.value.split(";")[0].trim().toLowerCase() : "";
 }
 
-// Returns "hls" | "mp4" | "chunk" | null. A .ts/.m4s path wins over the Content-Type,
-// because fMP4 segments are often served as video/mp4.
-function classify(pathname, ctype) {
+// Content-Length in bytes, or null when missing or not a number.
+function contentLength(responseHeaders) {
+  const h = (responseHeaders || []).find((x) => String(x.name).toLowerCase() === "content-length");
+  const n = h ? Number(h.value) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+// Returns "hls" | "mp4" | "chunk" | "maybe" | null. A .ts/.m4s path wins over the Content-Type,
+// because fMP4 segments are often served as video/mp4. "maybe": a fetch/XHR response that
+// could be a playlist under another name (a GET with a body: MAYBE_HLS_TYPES, at most
+// MAX_MAYBE_HLS_BYTES; never a 204 or an empty body).
+function classify(pathname, ctype, type, length, method, status) {
   const path = pathname.toLowerCase();
   if (path.endsWith(".ts") || path.endsWith(".m4s") || CHUNK_TYPES.has(ctype)) return "chunk";
   if (HLS_TYPES.has(ctype)) return "hls";
   if (MP4_TYPES.has(ctype)) return "mp4";
   if (path.endsWith(".m3u8")) return "hls";
   if (path.endsWith(".mp4")) return "mp4";
+  if (
+    type === "xmlhttprequest" &&
+    method === "GET" &&
+    status !== 204 &&
+    MAYBE_HLS_TYPES.has(ctype) &&
+    (length === null || (length > 0 && length <= MAX_MAYBE_HLS_BYTES))
+  ) {
+    return "maybe";
+  }
   return null;
 }
 
@@ -99,10 +121,12 @@ function classify(pathname, ctype) {
 //       hub:<tabId>, cand:<tabId>, segs:<tabId>, page:<tabId>, src:<tabId>, probe:<tabId>, var:<tabId>,
 //       res:<tabId>, jobs:<tabId> and inc:<tabId> belong to the hub (see the hub section).
 // isMaster comes from the app's probe (4.2): set on every entry with the probed URL,
-// and on entries captured later from the probe:<tabId> cache.
-// At most MAX_ENTRIES_PER_FRAME entries per frame (that frame's oldest mp4 goes
-// first, then its oldest entry) and MAX_ENTRIES_PER_TAB per tab (taken from the
-// frame with the most entries, same order).
+// and on entries captured later from the probe:<tabId> cache. A "maybe" entry becomes
+// "hls" once the probe parses it as a playlist (also from that cache) and is removed
+// when the app says it is not one; until then only the probe run reads it.
+// At most MAX_ENTRIES_PER_FRAME entries per frame (that frame's newest maybe but the
+// one just captured goes first, then its oldest mp4, then its oldest entry) and
+// MAX_ENTRIES_PER_TAB per tab (taken from the frame with the most entries, same order).
 // Never call storage.session.setAccessLevel: Cookie values live here. (storage.local,
 // the saved segments and the app's ui switches, is owned by the hub; see the end
 // of its section.)
@@ -144,14 +168,27 @@ async function addEntry(tabId, entry) {
   const got = await chrome.storage.session.get({ [key]: [], [probeKey(tabId)]: {} });
   const entries = got[key];
   const probed = got[probeKey(tabId)][entry.url];
-  if (probed && Array.isArray(probed.variants)) entry.isMaster = probed.variants.length > 0;
+  // A refetch of a known non-playlist (a polled URL) is not probed again.
+  if (entry.kind === "maybe" && isObject(probed) && isObject(probed.error) && probed.error.code === "invalid") return;
+  if (probed && Array.isArray(probed.variants)) {
+    entry.isMaster = probed.variants.length > 0;
+    if (entry.kind === "maybe") entry.kind = "hls"; // a playlist refetch stays the playlist
+  }
   const index = entries.findIndex((e) => e.url === entry.url);
   const isNew = index < 0;
-  if (!isNew) entries.splice(index, 1); // dedupe by URL (mp4 Range requests, playlist refetches)
-  entries.push(entry);
+  // Also from the stored entry: its probe record may have left the cache (MAX_PROBE_CACHE).
+  if (!isNew && entry.kind === "maybe" && entries[index].kind === "hls") {
+    Object.assign(entry, { kind: "hls", isMaster: entries[index].isMaster }); // a probed playlist's refetch
+  }
+  if (!isNew && entry.kind === "maybe") {
+    entries[index] = entry; // keeps its place: eviction spares a frame's earliest maybes
+  } else {
+    if (!isNew) entries.splice(index, 1); // dedupe by URL (mp4 Range requests, playlist refetches)
+    entries.push(entry);
+  }
   const inFrame = () => entries.filter((e) => e.frameId === entry.frameId).length;
-  while (inFrame() > MAX_ENTRIES_PER_FRAME) dropOldest(entries, entry.frameId);
-  while (entries.length > MAX_ENTRIES_PER_TAB) dropOldest(entries, largestFrame(entries));
+  while (inFrame() > MAX_ENTRIES_PER_FRAME) dropOldest(entries, entry.frameId, entry);
+  while (entries.length > MAX_ENTRIES_PER_TAB) dropOldest(entries, largestFrame(entries), entry);
   await chrome.storage.session.set({ [key]: entries });
   if (DEBUG && isNew) {
     console.debug(
@@ -160,10 +197,14 @@ async function addEntry(tabId, entry) {
   }
 }
 
-// Removes one entry of frameId: its oldest mp4 first, so segment churn never
-// evicts a playlist, else its oldest entry.
-function dropOldest(entries, frameId) {
-  let i = entries.findIndex((e) => e.frameId === frameId && e.kind === "mp4");
+// Removes one entry of frameId: its newest maybe other than `added` (the entry just
+// stored), so a frame keeps its earliest maybes (a player fetches its disguised
+// playlists first, and a refetch keeps its place) and a page's other requests never
+// evict media, then its oldest mp4, so segment churn never evicts a playlist, else
+// its oldest entry.
+function dropOldest(entries, frameId, added) {
+  let i = entries.findLastIndex((e) => e.frameId === frameId && e.kind === "maybe" && e !== added);
+  if (i < 0) i = entries.findIndex((e) => e.frameId === frameId && e.kind === "mp4");
   if (i < 0) i = entries.findIndex((e) => e.frameId === frameId);
   entries.splice(i, 1);
 }
@@ -253,7 +294,14 @@ chrome.webRequest.onHeadersReceived.addListener(
     if (details.statusCode < 200 || details.statusCode > 299) return;
     const parsed = httpURL(url);
     if (!parsed) return;
-    const kind = classify(parsed.pathname, contentType(details.responseHeaders));
+    const kind = classify(
+      parsed.pathname,
+      contentType(details.responseHeaders),
+      details.type,
+      contentLength(details.responseHeaders),
+      details.method,
+      details.statusCode
+    );
     if (!kind) return;
     const ts = Date.now();
     if (kind === "chunk") {
@@ -513,11 +561,23 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   failure is retried after PROBE_RETRY_MS, a success is kept until the tab is
 //   cleared). When that source came from the capture order and is a media
 //   playlist (players fetch the variant playlists after the master), it then
-//   probes the same frame's other hls captures with unknown isMaster, oldest
-//   first, until one is a master; at most MAX_PROBES_PER_RUN probes, stopping at
-//   the first failure. Each result sets isMaster on the captures with that URL
-//   (variants non-empty), so the order above prefers the master. A run that
-//   stored anything sends `sourceChanged` to the selected video's frame.
+//   probes the same frame's other hls (and "maybe") captures with unknown
+//   isMaster, oldest first, until one is a master; at most MAX_PROBES_PER_RUN
+//   probes, stopping at the first failure other than "invalid" (that URL is not
+//   a playlist). Each result sets isMaster on the captures with that URL
+//   (variants non-empty), so the order above prefers the master. Before those,
+//   while the resolved source is not an hls capture of the selected video's frame, a run
+//   probes the selected video's frame's "maybe" captures (tab-wide when nothing
+//   is selected), oldest first: one that parses becomes an hls capture, one the
+//   app answers "invalid" (not a playlist) is dropped and the next is tried (such
+//   drops do not count toward MAX_PROBES_PER_RUN; at most MAX_ENTRIES_PER_FRAME
+//   per run), and a refetch of a dropped one is not captured again. A run that
+//   stored the resolved source's result or a new playlist sends `sourceChanged`
+//   to the selected video's frame. An "unavailable" maybe also lets the run go on
+//   (it counts toward MAX_PROBES_PER_RUN). A maybe probe makes the app GET that
+//   URL again with the captured headers (once: a non-playlist is not re-captured).
+//   Known limit: a disguised playlist fetched after its frame already holds
+//   MAX_ENTRIES_PER_FRAME unprobed maybes is evicted by the next one.
 //   Summary fields for an hls source (numbers only, never variant URLs):
 //     probe {state: "pending"} (not probed yet) | {state: "error", message}
 //       (message: "SegDown app not reachable: install browser integration" when
@@ -1957,14 +2017,37 @@ function nextProbe(tabId, r) {
     const rec = cache[r.source.url];
     if (!isFresh(rec, now)) return r.source;
     if (r.via !== "capture" || !Array.isArray(rec.variants) || rec.variants.length) return null;
+    // A "maybe" too: a disguised master is fetched before its (also disguised) variant playlist.
     const next = got[capKey(tabId)].find(
-      (e) => isMediaEntry(e) && e.kind === "hls" && e.frameId === r.frameId && e.isMaster === undefined && !isFresh(cache[e.url], now)
+      (e) =>
+        isObject(e) && (e.kind === "hls" || e.kind === "maybe") && typeof e.url === "string" &&
+        e.frameId === r.frameId && e.isMaster === undefined && !isFresh(cache[e.url], now)
     );
-    return next ? entrySource(next, "capture").source : null;
+    return next ? entrySource({ ...next, kind: "hls" }, "capture").source : null;
   });
 }
 
-// Writes one result and sets isMaster on the captures with that URL.
+// The next "maybe" capture to probe as HLS, oldest first (players fetch their
+// playlists first), or null: only while r is not already an hls source from the
+// selected video's frame (tab-wide when nothing is selected), and only from that frame.
+function nextMaybe(tabId, r) {
+  return withTab(tabId, async () => {
+    const { selected } = await readHub(tabId);
+    const frame = selected ? selected.frameId : null;
+    if (isHLS(r) && (frame === null || r.frameId === frame)) return null;
+    const got = await chrome.storage.session.get({ [probeKey(tabId)]: {}, [capKey(tabId)]: [] });
+    const cache = got[probeKey(tabId)];
+    const now = Date.now();
+    const next = got[capKey(tabId)].find(
+      (e) => isObject(e) && e.kind === "maybe" && (frame === null || e.frameId === frame) && !isFresh(cache[e.url], now)
+    );
+    return next ? entrySource({ ...next, kind: "hls" }, "capture").source : null;
+  });
+}
+
+// Writes one result and sets isMaster on the captures with that URL. A "maybe"
+// capture with that URL becomes "hls" when it parsed, and is removed when the app
+// says it is not a playlist ("invalid").
 function storeProbe(tabId, gen, url, result) {
   return withTab(tabId, async () => {
     if (tabGen(tabId) !== gen) return false; // the tab was cleared meanwhile
@@ -1974,8 +2057,13 @@ function storeProbe(tabId, gen, url, result) {
     cache[url] = { ts: Date.now(), ...result };
     const urls = Object.keys(cache).sort((a, b) => cache[a].ts - cache[b].ts);
     for (const old of urls.slice(0, Math.max(0, urls.length - MAX_PROBE_CACHE))) delete cache[old];
-    const entries = got[capKey(tabId)];
-    if (result.variants) for (const e of entries) if (isObject(e) && e.url === url) e.isMaster = result.variants.length > 0;
+    const notPlaylist = Boolean(result.error && result.error.code === "invalid");
+    const entries = got[capKey(tabId)].filter((e) => !(notPlaylist && isObject(e) && e.url === url && e.kind === "maybe"));
+    for (const e of entries) {
+      if (!(result.variants && isObject(e) && e.url === url)) continue;
+      e.isMaster = result.variants.length > 0;
+      if (e.kind === "maybe") e.kind = "hls";
+    }
     await chrome.storage.session.set({ [probeKey(tabId)]: cache, [capKey(tabId)]: entries });
     return true;
   });
@@ -1984,16 +2072,27 @@ function storeProbe(tabId, gen, url, result) {
 async function runProbes(tabId) {
   const gen = tabGen(tabId);
   let stored = false;
-  for (let n = 0; n < MAX_PROBES_PER_RUN; n++) {
+  let budget = MAX_PROBES_PER_RUN;
+  let drops = MAX_ENTRIES_PER_FRAME; // "maybe" captures that are not playlists, on top of the budget
+  while (budget > 0) {
     const r = await correlate(tabId);
-    if (!isHLS(r)) break;
-    const source = await nextProbe(tabId, r);
+    const maybe = await nextMaybe(tabId, r);
+    if (!maybe && !isHLS(r)) break;
+    const source = maybe || (await nextProbe(tabId, r));
     if (!source) break;
     const result = await probeNative({ type: "media", url: source.url, kind: "hls", headers: source.headers });
     if (!(await storeProbe(tabId, gen, source.url, result))) return;
-    stored = true;
-    hubLog(`probe tab=${tabId} ${result.error ? `error=${result.error.code}` : `variants=${result.variants.length}`}`);
-    if (result.error) break;
+    if (maybe && result.error && result.error.code === "invalid") {
+      if (--drops <= 0) break;
+    } else budget--;
+    // Only the resolved source's result or a new playlist changes what the overlay shows;
+    // notifying for anything else would start another run.
+    if (result.variants || source.url === (r && r.source.url)) stored = true;
+    hubLog(`probe tab=${tabId}${maybe ? " maybe" : ""} ${result.error ? `error=${result.error.code}` : `variants=${result.variants.length}`}`);
+    // "invalid" (not a playlist), and "unavailable" for a "maybe" (its refetch failed), are about
+    // that URL only: go on with the next one. Any other error is the app's or the host's.
+    const perURL = result.error && (result.error.code === "invalid" || (maybe && result.error.code === "unavailable"));
+    if (result.error && !perURL) break;
   }
   if (!stored) return;
   const { selected } = await withTab(tabId, () => readHub(tabId));
@@ -2038,12 +2137,13 @@ function variantIndex(list, choice) {
 }
 
 // summarizeSource plus the variant fields for an hls source; starts a probe run
-// only while the panel is open (a probe spawns the native host).
+// only while the panel is open (a probe spawns the native host), for any source
+// (a page or another frame's media may wait on a "maybe" capture).
 async function describeSource(tabId, r) {
   const summary = summarizeSource(r);
-  if (!isHLS(r)) return summary;
   const { panelOpen } = await withTab(tabId, () => readHub(tabId));
   if (panelOpen) startProbes(tabId);
+  if (!isHLS(r)) return summary;
   const { rec, list, choice } = await readVariants(tabId, r.source.url);
   if (!rec) summary.probe = { state: "pending" };
   else if (rec.error) summary.probe = { state: "error", message: String(rec.error.message) };

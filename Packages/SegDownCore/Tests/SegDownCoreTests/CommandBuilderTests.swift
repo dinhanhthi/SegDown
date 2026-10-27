@@ -68,12 +68,19 @@ struct CommandBuilderTests {
         #expect(zip(picky, inputs).allSatisfy { p, i in
             p < i && !hls[p..<i].contains("-i")
         })
+        // A playlist served as `master.html` (text/html) is only read as HLS when forced.
+        let format = hls.indices.filter { hls[$0] == "-f" && hls[$0 + 1] == "hls" }
+        #expect(format.count == 2)
+        #expect(zip(format, inputs).allSatisfy { f, i in
+            f < i && !hls[f..<i].contains("-i")
+        })
 
         let mp4 = CommandBuilder.ffmpegSegment(
             input: URL(string: "https://cdn.example.com/v.mp4")!, kind: .mp4, audio: nil, headers: [:],
             source: input, segment: Segment(start: 0, end: 1), precision: .fast, output: output
         )
         #expect(!mp4.contains("-extension_picky"))
+        #expect(!mp4.contains("-f"))
     }
 
     @Test func fastModeCopiesStreams() throws {

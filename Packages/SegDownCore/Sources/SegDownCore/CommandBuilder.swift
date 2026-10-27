@@ -25,7 +25,7 @@ public enum CommandBuilder {
     /// ffmpeg arguments that download one segment into `output` (`<tmp>/part-NNN.mp4`).
     ///
     /// - `input`: the media URL (for HLS the chosen variant playlist, never the master).
-    /// - `kind`: HLS inputs get `-extension_picky 0`, and in fast mode `-copypriorss 0` (see below).
+    /// - `kind`: HLS inputs get `-f hls -extension_picky 0`, and in fast mode `-copypriorss 0` (see below).
     /// - `audio`: the separate HLS audio rendition, if any. It is a second input with its own
     ///   whitelist/headers (ffmpeg input options apply only to the next `-i`) and the same `-ss`.
     /// - `headers`: validated, canonically cased headers (`Referer`, `Origin`, `User-Agent`, `Cookie`).
@@ -42,7 +42,8 @@ public enum CommandBuilder {
     /// ffmpeg 7.1+ rejects HLS segments whose extension is not a known media one (some sites serve
     /// MPEG-TS as `file-0000.png`); `-extension_picky 0` lets them through. It is safe because
     /// `-protocol_whitelist` excludes `file`. HLS inputs only: the mp4 demuxer has no such option
-    /// and ffmpeg exits on it.
+    /// and ffmpeg exits on it. `-f hls` because ffmpeg does not detect HLS from a playlist that has
+    /// neither an `.m3u8` name nor an HLS Content-Type (some sites serve it as `master.html`).
     public static func ffmpegSegment(
         input: URL,
         kind: MediaKind,
@@ -186,7 +187,7 @@ public enum CommandBuilder {
     ) -> [String] {
         var args = ["-protocol_whitelist", protocolWhitelist]
         if kind == .hls {
-            args += ["-extension_picky", "0"]
+            args += ["-f", "hls", "-extension_picky", "0"]
         }
         if let userAgent = headers["User-Agent"] {
             args += ["-user_agent", userAgent]
