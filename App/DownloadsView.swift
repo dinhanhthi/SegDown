@@ -372,11 +372,13 @@ private struct DownloadCard: View {
                         .accessibilityLabel("Incognito")
                 }
                 // Page titles are untrusted: plain text, never markdown.
-                Text(verbatim: item.title)
+                Text(verbatim: displayName)
                     .font(.headline)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .help(item.title)
+                    .help(status.outputs.count > 1
+                          ? status.outputs.map { URL(filePath: $0).lastPathComponent }.joined(separator: "\n")
+                          : displayName)
                 Spacer(minLength: 8)
                 StateBadge(state: status.state)
             }
@@ -497,6 +499,14 @@ private struct DownloadCard: View {
         .overlay {
             if selected { Self.shape.strokeBorder(Color.accentColor, lineWidth: 1.5).allowsHitTesting(false) }
         }
+    }
+
+    /// The saved file's name without its extension, so a renamed duplicate (`… (2)`) shows as saved; the title until
+    /// the job has one output, or when it has several.
+    private var displayName: String {
+        let outputs = item.status.outputs
+        guard outputs.count == 1 else { return item.title }
+        return URL(filePath: outputs[0]).deletingPathExtension().lastPathComponent
     }
 
     /// The `GlassCard` shape, for the selection.
