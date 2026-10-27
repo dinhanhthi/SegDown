@@ -862,6 +862,13 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // sets panelOpen false. Top-frame navigation clears hub:<tabId>, so the overlay
 // is closed again on the next page.
 //
+// Running badge: the toolbar button's global badge shows how many of the app's
+// jobs are queued or running (red, white text), none at 0. Set from every status
+// reply (overlay polls, and the poll below); a failed status clears it. While the
+// count is above 0 the hub asks status again ACTIVE_POLL_MS after the last reply,
+// and once after a Download is enqueued. A flash badge above is per tab and goes
+// back to this one when it clears.
+//
 // Toolbar menu: only where chrome.contextMenus exists (feature-detected; a
 // browser that refuses the "action" context simply has no menu). Two items on
 // the toolbar button, created hidden on install / update / browser start:
@@ -939,6 +946,8 @@ const EXCLUSIONS = new Set(["small", "ad", "live"]);
 const MIN_MAIN_DURATION = 30; // seconds; shorter videos lose to a longer candidate
 const MAX_SEGMENTS = 100; // SegDownCore Validation
 const MAX_PAGES = 200; // seg:* entries kept in storage.local, most recent ts first
+const ACTIVE_POLL_MS = 2 * 1000; // status poll while the running badge shows a count
+const ACTIVE_BADGE_COLOR = "#E5484D"; // the running badge's red
 const NO_VIDEO_BADGE_MS = 2000; // the toolbar's "none" / "off" badge after a toggle with nothing selected / an ignored tab; also the Toolbar menu's "off" / "on" / "!"
 const MODES = new Set(["separate", "merged"]);
 const NATIVE_HOST = "com.math2it.segdown";
@@ -2323,6 +2332,7 @@ async function onDownload(tabId, from, body) {
       await chrome.storage.session.set({ [key]: list.slice(-MAX_JOBS_PER_TAB) });
     });
     if (!incognito) await rememberJob(result.jobId, title, pageId ? { key: pageId, ranges: job.segments } : null);
+    fetchStatus(); // the running badge counts the new job
   }
   return result;
 }
@@ -2527,6 +2537,29 @@ function portRequest(msg) {
 let lastJobs = [];
 let statusRun = null;
 
+// Running badge (see the protocol): the global text, and the poll while it counts jobs.
+let activeBadge = null;
+let activePoll = null;
+
+function showActiveJobs(jobs) {
+  const count = jobs.filter((j) => j.state === "queued" || j.state === "running").length;
+  const text = count ? String(count) : "";
+  if (text !== activeBadge) {
+    activeBadge = text;
+    chrome.action.setBadgeText({ text }).catch(() => {});
+  }
+  clearTimeout(activePoll);
+  activePoll = count ? setTimeout(fetchStatus, ACTIVE_POLL_MS) : null;
+}
+
+// Not every browser has a badge color or text color: then the defaults stay.
+try {
+  chrome.action.setBadgeBackgroundColor({ color: ACTIVE_BADGE_COLOR }).catch(() => {});
+  chrome.action.setBadgeTextColor?.({ color: "#FFFFFF" }).catch(() => {});
+} catch {
+  // unsupported
+}
+
 // -> {jobs: [clean JobStatus]} or {error: message}. Concurrent callers share one request.
 function fetchStatus() {
   if (!statusRun) {
@@ -2548,13 +2581,16 @@ async function statusOnce() {
       reply = await portRequest(msg);
     }
   } catch {
+    showActiveJobs([]);
     return { error: APP_UNREACHABLE };
   }
   if (isObject(reply) && reply.type === "status" && Array.isArray(reply.jobs)) {
     lastJobs = reply.jobs.map(cleanJobStatus).filter(Boolean);
+    showActiveJobs(lastJobs);
     await applyDownloaded(lastJobs).catch(hubWarn);
     return { jobs: lastJobs };
   }
+  showActiveJobs([]);
   if (isObject(reply) && reply.type === "error" && typeof reply.message === "string" && reply.message) {
     return { error: reply.message.slice(0, MAX_MESSAGE_CHARS) };
   }
@@ -2819,11 +2855,12 @@ try {
   hubWarn(err);
 }
 
-// A short toolbar badge on tabId, cleared after NO_VIDEO_BADGE_MS.
+// A short toolbar badge on tabId, cleared after NO_VIDEO_BADGE_MS. null hands the
+// tab back to the global (running) badge; a browser that refuses null gets "".
 function flashBadge(tabId, text) {
-  const badge = (t) => chrome.action.setBadgeText({ tabId, text: t }).catch(() => {});
-  badge(text);
-  setTimeout(() => badge(""), NO_VIDEO_BADGE_MS);
+  const badge = (t) => chrome.action.setBadgeText({ tabId, text: t });
+  badge(text).catch(() => {});
+  setTimeout(() => badge(null).catch(() => badge("").catch(() => {})), NO_VIDEO_BADGE_MS);
 }
 
 // Overlay toggle: the toolbar button and the "toggle-panel" shortcut (see the protocol).
