@@ -24,7 +24,9 @@ public enum CommandBuilder {
 
     /// ffmpeg arguments that download one segment into `output` (`<tmp>/part-NNN.mp4`).
     ///
-    /// - `input`: the media URL (for HLS the chosen variant playlist, never the master).
+    /// - `input`: the media URL (for HLS the chosen variant playlist, never the master), or a file
+    ///   URL of a playlist the host wrote itself (`DisguisedHLS`), which gets only
+    ///   `-protocol_whitelist file -f hls`: no headers, cookies or `-extension_picky`.
     /// - `kind`: HLS inputs get `-f hls -extension_picky 0`, and in fast mode `-copypriorss 0` (see below).
     /// - `audio`: the separate HLS audio rendition, if any. It is a second input with its own
     ///   whitelist/headers (ffmpeg input options apply only to the next `-i`) and the same `-ss`.
@@ -40,9 +42,11 @@ public enum CommandBuilder {
     /// to the keyframe before `-ss`.
     ///
     /// ffmpeg 7.1+ rejects HLS segments whose extension is not a known media one (some sites serve
-    /// MPEG-TS as `file-0000.png`); `-extension_picky 0` lets them through. It is safe because
-    /// `-protocol_whitelist` excludes `file`. HLS inputs only: the mp4 demuxer has no such option
-    /// and ffmpeg exits on it. `-f hls` because ffmpeg does not detect HLS from a playlist that has
+    /// MPEG-TS as `file-0000.png`); `-extension_picky 0` lets them through. It is safe because a
+    /// remote input's `-protocol_whitelist` excludes `file`. HLS inputs only: the mp4 demuxer has no
+    /// such option and ffmpeg exits on it. The `file` protocol is allowed only for a playlist the
+    /// host wrote itself, whose segment names are its own (and which keeps `-extension_picky` on).
+    /// `-f hls` because ffmpeg does not detect HLS from a playlist that has
     /// neither an `.m3u8` name nor an HLS Content-Type (some sites serve it as `master.html`).
     public static func ffmpegSegment(
         input: URL,
@@ -181,10 +185,14 @@ public enum CommandBuilder {
 
     // MARK: - Helpers
 
-    /// Per-input options followed by `-ss S -i URL`.
+    /// Per-input options followed by `-ss S -i URL`. A file URL is a host-written HLS playlist:
+    /// headers and cookies would not apply to it, and its segments are local files too.
     private static func inputArguments(
         url: URL, kind: MediaKind, source: URL, start: String, headers: [String: String]
     ) -> [String] {
+        if url.isFileURL {
+            return ["-protocol_whitelist", "file", "-f", "hls", "-ss", start, "-i", url.path]
+        }
         var args = ["-protocol_whitelist", protocolWhitelist]
         if kind == .hls {
             args += ["-f", "hls", "-extension_picky", "0"]

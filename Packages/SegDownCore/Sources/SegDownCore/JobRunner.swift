@@ -383,21 +383,44 @@ public actor JobRunner {
         )
     }
 
-    /// One ffmpeg run per segment into `<tmp>/part-NNN.mp4`.
+    /// One ffmpeg run per segment into `<tmp>/part-NNN.mp4`. When the HLS segments are disguised
+    /// (`disguisedSegments`), each run reads a local playlist of the segments it needs instead
+    /// (`stageDisguised`), with the times shifted to that playlist. The size cap counts the staged
+    /// segments while they download, then they move out of its count before ffmpeg runs, so a
+    /// window is never counted twice beside its part. They are removed after the run, whether it
+    /// succeeds, fails or is cancelled, so only one segment's window is on disk at a time.
     private func downloadSegments(
         id: String, input: URL, kind: MediaKind, audio: URL?, headers: [String: String], source: URL,
         request: JobRequest, ffmpeg: URL, tempDirectory: URL, tracker: ProgressTracker
     ) async throws -> [URL] {
         let count = request.segments.count
+        let disguised = try await disguisedSegments(
+            id: id, input: input, kind: kind, audio: audio, headers: headers, source: source
+        )
         var parts: [URL] = []
         for (index, segment) in request.segments.enumerated() {
             let part = tempDirectory.appendingPathComponent(CommandBuilder.partFileName(index: index + 1))
+            tracker.begin(index: index, message: "Downloading segment \(index + 1) of \(count)")
+            var segmentInput = input
+            var shifted = segment
+            // The segments left in place if staging stops midway, and the folder they move to.
+            var staged: [URL] = []
+            defer { for file in staged { try? FileManager.default.removeItem(at: file) } }
+            if let disguised {
+                let window = DisguisedHLS.window(disguised, start: segment.start, end: segment.end)
+                let files = DisguisedHLS.stagedFiles(count: window.range.count, in: tempDirectory)
+                staged = files.segments + [files.folder]
+                segmentInput = try await stageDisguised(
+                    id: id, segments: disguised, range: window.range, files: files, headers: headers,
+                    source: source, tracker: tracker
+                )
+                shifted = Segment(start: segment.start - window.offset, end: segment.end - window.offset)
+            }
             let arguments = CommandBuilder.ffmpegSegment(
-                input: input, kind: kind, audio: audio, headers: headers, source: source, segment: segment,
+                input: segmentInput, kind: kind, audio: audio, headers: headers, source: source, segment: shifted,
                 precision: request.precision, output: part
             )
             let duration = segment.end - segment.start
-            tracker.begin(index: index, message: "Downloading segment \(index + 1) of \(count)")
             try await runProcess(.ffmpeg, executable: ffmpeg, arguments: arguments, jobID: id) { stream, line in
                 // Not `progress=end`: ffmpeg also prints it when interrupted by a cancel.
                 guard stream == .stdout, line.hasPrefix("out_time_us="),
@@ -410,6 +433,55 @@ public actor JobRunner {
             parts.append(part)
         }
         return parts
+    }
+
+    /// The segments of the HLS media playlist `input` when they are disguised
+    /// (`DisguisedHLS.isDisguised`), else nil: mp4, a separate audio rendition (left on ffmpeg's
+    /// path), or a failed detection, after which ffmpeg reports its own error. A cancel throws.
+    private func disguisedSegments(
+        id: String, input: URL, kind: MediaKind, audio: URL?, headers: [String: String], source: URL
+    ) async throws -> [HLSMediaSegment]? {
+        guard kind == .hls, audio == nil else { return nil }
+        do {
+            let playlist = try await HLSPlaylist.fetch(
+                input, headers: DisguisedHLS.scoped(headers, for: input, source: source)
+            )
+            let disguised = try await DisguisedHLS.isDisguised(playlist, headers: headers, source: source)
+            return disguised ? playlist.segments : nil
+        } catch {
+            // A cancel makes the requests throw too: end the job instead of falling back.
+            try checkCancelled(id)
+            return nil
+        }
+    }
+
+    /// Downloads `segments[range]` into `files.segments` (`DisguisedHLS.stagedFiles`) with their
+    /// prefix stripped, counted by the size cap meanwhile, then moves them into `files.folder`,
+    /// out of its count before ffmpeg writes the part, and writes `files.playlist` listing them.
+    /// The downloads fill the first 90% of the segment's progress. Returns the playlist's file URL.
+    private func stageDisguised(
+        id: String, segments: [HLSMediaSegment], range: Range<Int>,
+        files: (segments: [URL], folder: URL, playlist: URL), headers: [String: String],
+        source: URL, tracker: ProgressTracker
+    ) async throws -> URL {
+        for (position, index) in range.enumerated() {
+            try checkCancelled(id)
+            try await DisguisedHLS.download(
+                segments[index], number: index + 1, headers: headers, source: source, to: files.segments[position]
+            )
+            tracker.progress(0.9 * Double(position + 1) / Double(range.count))
+        }
+        try checkCancelled(id)
+        // A rename: the playlist lists bare names, so they resolve next to it.
+        try FileManager.default.createDirectory(at: files.folder, withIntermediateDirectories: true)
+        for file in files.segments {
+            try FileManager.default.moveItem(at: file, to: files.folder.appendingPathComponent(file.lastPathComponent))
+        }
+        let text = DisguisedHLS.playlist(
+            durations: range.map { segments[$0].duration }, fileNames: files.segments.map(\.lastPathComponent)
+        )
+        try text.write(to: files.playlist, atomically: true, encoding: .utf8)
+        return files.playlist
     }
 
     /// One yt-dlp run for all segments; it writes `<tmp>/part-NNN.<ext>` in segment order.

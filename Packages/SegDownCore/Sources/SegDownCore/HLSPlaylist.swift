@@ -1,6 +1,6 @@
 // Fetches and parses HLS playlists so a master playlist is never handed to ffmpeg (which would
 // probe every variant). Playlist text is untrusted data: it is only parsed, never interpreted, and
-// any variant or audio URI that does not resolve to http(s) is dropped.
+// any variant, audio or segment URI that does not resolve to http(s) is dropped.
 import Foundation
 
 /// A video resolution parsed from `RESOLUTION=<width>x<height>`.
@@ -45,6 +45,17 @@ public struct HLSAudioRendition: Codable, Sendable, Hashable {
     }
 }
 
+/// One media segment of a media playlist: its URI (absolute, http(s)) and `EXTINF` duration in seconds.
+public struct HLSMediaSegment: Codable, Sendable, Hashable {
+    public var url: URL
+    public var duration: Double
+
+    public init(url: URL, duration: Double) {
+        self.url = url
+        self.duration = duration
+    }
+}
+
 /// The variant to download plus its separate audio rendition, if any.
 public struct HLSSelection: Sendable, Hashable {
     public var variant: HLSVariant
@@ -64,11 +75,21 @@ public struct HLSPlaylist: Sendable, Hashable {
     public var isMaster: Bool
     public var variants: [HLSVariant]
     public var audioRenditions: [HLSAudioRendition]
+    /// The segments of a media playlist, in order. Empty for a master.
+    public var segments: [HLSMediaSegment]
+    /// False when the playlist has an `EXT-X-KEY` (METHOD other than NONE), `EXT-X-MAP` or
+    /// `EXT-X-BYTERANGE` tag: its segments are then never treated as disguised (`DisguisedHLS`).
+    public var isPlain: Bool
 
-    public init(isMaster: Bool, variants: [HLSVariant] = [], audioRenditions: [HLSAudioRendition] = []) {
+    public init(
+        isMaster: Bool, variants: [HLSVariant] = [], audioRenditions: [HLSAudioRendition] = [],
+        segments: [HLSMediaSegment] = [], isPlain: Bool = true
+    ) {
         self.isMaster = isMaster
         self.variants = variants
         self.audioRenditions = audioRenditions
+        self.segments = segments
+        self.isPlain = isPlain
     }
 
     // MARK: Fetch
@@ -125,6 +146,8 @@ public struct HLSPlaylist: Sendable, Hashable {
         var playlist = HLSPlaylist(isMaster: false)
         // Attributes of an EXT-X-STREAM-INF tag still waiting for its URI line.
         var pendingStream: [String: String]?
+        // Duration of an EXTINF tag still waiting for its segment URI line.
+        var pendingDuration: Double?
 
         for rawLine in lines.dropFirst() {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
@@ -138,12 +161,26 @@ public struct HLSPlaylist: Sendable, Hashable {
                 if let rendition = audioRendition(attributes(line.dropFirst(mediaTag.count)), baseURL: baseURL) {
                     playlist.audioRenditions.append(rendition)
                 }
+            } else if line.hasPrefix(extInfTag) {
+                pendingDuration = duration(line.dropFirst(extInfTag.count))
+            } else if line.hasPrefix(keyTag) {
+                if attributes(line.dropFirst(keyTag.count))["METHOD"]?.uppercased() != "NONE" {
+                    playlist.isPlain = false
+                }
+            } else if line.hasPrefix("#EXT-X-MAP:") || line.hasPrefix("#EXT-X-BYTERANGE:") {
+                playlist.isPlain = false
             } else if line.hasPrefix("#") {
                 continue
             } else if let stream = pendingStream {
                 pendingStream = nil
+                pendingDuration = nil
                 if let variant = variant(stream, uri: line, baseURL: baseURL) {
                     playlist.variants.append(variant)
+                }
+            } else if let duration = pendingDuration {
+                pendingDuration = nil
+                if let url = resolve(line, baseURL: baseURL) {
+                    playlist.segments.append(HLSMediaSegment(url: url, duration: duration))
                 }
             }
         }
@@ -178,6 +215,8 @@ public struct HLSPlaylist: Sendable, Hashable {
 
     private static let streamInfTag = "#EXT-X-STREAM-INF:"
     private static let mediaTag = "#EXT-X-MEDIA:"
+    private static let extInfTag = "#EXTINF:"
+    private static let keyTag = "#EXT-X-KEY:"
 
     private static func variant(_ attributes: [String: String], uri: String, baseURL: URL) -> HLSVariant? {
         guard let url = resolve(uri, baseURL: baseURL) else { return nil }
@@ -213,6 +252,14 @@ public struct HLSPlaylist: Sendable, Hashable {
             return nil
         }
         return url
+    }
+
+    /// The seconds of an `EXTINF` value (`<duration>[,<title>]`), else nil. Untrusted: only finite,
+    /// non-negative values pass.
+    private static func duration(_ value: Substring) -> Double? {
+        let number = value.prefix { $0 != "," }.trimmingCharacters(in: .whitespaces)
+        guard let seconds = Double(number), seconds.isFinite, seconds >= 0 else { return nil }
+        return seconds
     }
 
     /// `<width>x<height>` with positive integers, else nil.
