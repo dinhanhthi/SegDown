@@ -131,8 +131,12 @@ public struct HLSPlaylist: Sendable, Hashable {
 
     // MARK: Parse
 
+    /// Thrown for a media playlist whose segment list the site encrypted (an `#ENC-` tag, no
+    /// segments): only the site's own player can read it, and ffmpeg would fail with "End of file".
+    public static let encryptedError = JobError.invalid("This site encrypts its playlist, SegDown can't download it")
+
     /// Parses playlist text. Relative URIs resolve against `baseURL`; non-http(s) URIs are dropped.
-    /// Throws when the text does not start with `#EXTM3U`.
+    /// Throws when the text does not start with `#EXTM3U`, or `encryptedError`.
     public static func parse(_ text: String, baseURL: URL) throws -> HLSPlaylist {
         // "\r\n" is a single Character, so split on isNewline rather than on "\n".
         var lines = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
@@ -148,6 +152,7 @@ public struct HLSPlaylist: Sendable, Hashable {
         var pendingStream: [String: String]?
         // Duration of an EXTINF tag still waiting for its segment URI line.
         var pendingDuration: Double?
+        var encrypted = false
 
         for rawLine in lines.dropFirst() {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
@@ -169,6 +174,8 @@ public struct HLSPlaylist: Sendable, Hashable {
                 }
             } else if line.hasPrefix("#EXT-X-MAP:") || line.hasPrefix("#EXT-X-BYTERANGE:") {
                 playlist.isPlain = false
+            } else if line.hasPrefix("#ENC-") {
+                encrypted = true
             } else if line.hasPrefix("#") {
                 continue
             } else if let stream = pendingStream {
@@ -184,6 +191,7 @@ public struct HLSPlaylist: Sendable, Hashable {
                 }
             }
         }
+        if encrypted, !playlist.isMaster, playlist.segments.isEmpty { throw encryptedError }
         return playlist
     }
 

@@ -23,4 +23,18 @@ struct HLSPlaylistTests {
         // Untrusted playlist text: the file: variant is dropped, even though it has the highest bandwidth.
         #expect(!playlist.variants.contains { $0.url.scheme == "file" })
     }
+
+    /// A site-encrypted segment list (seen on streamc.xyz) fails with a clear error instead of
+    /// ffmpeg's "End of file".
+    @Test func rejectsSiteEncryptedPlaylist() {
+        let encrypted = """
+        #EXTM3U
+        #ENC-AESGCM;iv=229143bbaaf91d615d825f67
+        #EXT-X-B65:0-138
+        XWYeNGPYBUS+RBCKoo19UvND5D+lnszy1unDr74XifRzX++d0wQq0f8JShVhAXH
+        """
+        #expect(throws: HLSPlaylist.encryptedError) {
+            try HLSPlaylist.parse(encrypted, baseURL: URL(string: "https://embed.example.com/eyJ0/x")!)
+        }
+    }
 }

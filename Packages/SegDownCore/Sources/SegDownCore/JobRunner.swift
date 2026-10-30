@@ -437,7 +437,8 @@ public actor JobRunner {
 
     /// The segments of the HLS media playlist `input` when they are disguised
     /// (`DisguisedHLS.isDisguised`), else nil: mp4, a separate audio rendition (left on ffmpeg's
-    /// path), or a failed detection, after which ffmpeg reports its own error. A cancel throws.
+    /// path), or a failed detection, after which ffmpeg reports its own error. A cancel or an
+    /// encrypted playlist (`HLSPlaylist.encryptedError`) throws.
     private func disguisedSegments(
         id: String, input: URL, kind: MediaKind, audio: URL?, headers: [String: String], source: URL
     ) async throws -> [HLSMediaSegment]? {
@@ -451,6 +452,8 @@ public actor JobRunner {
         } catch {
             // A cancel makes the requests throw too: end the job instead of falling back.
             try checkCancelled(id)
+            // ffmpeg would only fail with "End of file" on it.
+            if let error = error as? JobError, error == HLSPlaylist.encryptedError { throw error }
             return nil
         }
     }
