@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.11] - 2026-10-30
+
+### Added
+
+- The browser extension's toolbar icon shows a badge with the number of downloads currently running.
+
+### Fixed
+
+- A playlist encrypted by the site itself now reports a clear error instead of failing with an ffmpeg "EOF" message.
+
 ## [0.6.10] - 2026-10-27
 
 ### Added
