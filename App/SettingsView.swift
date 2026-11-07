@@ -112,6 +112,8 @@ struct SettingsView: View {
                 }
                 switchRow(isOn: setting(\.playerButton), title: "Button on video players",
                           hint: "Shows a SegDown button on a video while the pointer is over it.")
+                switchRow(isOn: setting(\.fullDownloadButton), title: "Download full video button",
+                          hint: "Shows a button on a video while the pointer is over it, to download the whole video.")
                 switchRow(isOn: heightPreferred, title: "Preferred resolution",
                           hint: "Downloads the tallest quality up to this one, unless you pick another in the overlay.")
                 if settings.settings.preferredHeight != nil {

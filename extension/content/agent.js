@@ -33,7 +33,7 @@
   let panelOpen = false; // from the hub's `state` broadcast; keys are live only while open
   let hubState = null; // last hub `state` (for overlay.js)
   let stateSeen = false; // a broadcast beats the boot getState reply
-  let ui = { fullClipButton: true, playerButton: true, ignored: false }; // the app's switches and this tab's Ignored sites flag (getState, `ui` broadcast)
+  let ui = { fullClipButton: true, playerButton: true, fullDownloadButton: true, ignored: false }; // the app's switches and this tab's Ignored sites flag (getState, `ui` broadcast)
   const observedRoots = new WeakSet(); // open shadow roots already under the observer
 
   // Throws once the extension reloads ("Extension context invalidated"); ignore.
@@ -211,13 +211,24 @@
     }
   }
 
-  // Replaced whole, only by three booleans. Becoming ignored reports no videos
+  // Replaced whole, only by four booleans. Becoming ignored reports no videos
   // once; no longer ignored reports everything anew.
   function applyUI(u) {
     if (!u || typeof u !== "object") return;
-    if (typeof u.fullClipButton !== "boolean" || typeof u.playerButton !== "boolean" || typeof u.ignored !== "boolean") return;
+    if (
+      typeof u.fullClipButton !== "boolean" ||
+      typeof u.playerButton !== "boolean" ||
+      typeof u.fullDownloadButton !== "boolean" ||
+      typeof u.ignored !== "boolean"
+    )
+      return;
     const wasIgnored = ui.ignored;
-    ui = { fullClipButton: u.fullClipButton, playerButton: u.playerButton, ignored: u.ignored };
+    ui = {
+      fullClipButton: u.fullClipButton,
+      playerButton: u.playerButton,
+      fullDownloadButton: u.fullDownloadButton,
+      ignored: u.ignored,
+    };
     if (ui.ignored && !wasIgnored) {
       lastReport = "[]";
       send({ type: "candidates", videos: [] });
@@ -238,7 +249,8 @@
   // cannot see it): the selected video of this frame and the hub's last `state`.
   // overlay.js sets onChange; it runs after a `select`, a `state` and when the
   // selected video leaves the document. button.js reads ui() (it hides while
-  // playerButton is off or ignored is true) and eligible():
+  // playerButton is off or ignored is true; fullDownloadButton shows its Download
+  // full video button) and eligible():
   // the tracked videos that are connected, not excluded and of a finite
   // duration > 0, as [{videoKey, video}].
   const shared = {

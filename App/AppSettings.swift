@@ -33,6 +33,8 @@ struct AppSettings: Codable, Equatable, Sendable {
     var fullClipConfirm = true
     /// The extension shows a SegDown button on a video player under the pointer.
     var playerButton = true
+    /// The extension shows a Download full video button on a video player under the pointer.
+    var fullDownloadButton = true
     /// The extension takes the tallest quality up to this height when the user picks none (one of
     /// `preferredHeights`); `nil` = the best quality.
     var preferredHeight: Int?
@@ -57,7 +59,8 @@ struct AppSettings: Codable, Equatable, Sendable {
     var clientSettings: ClientSettings {
         ClientSettings(mode: mode, incognitoDefault: incognitoDefault, maxDuration: maxDuration,
                        fullClipButton: fullClipButton, fullClipConfirm: fullClipConfirm, playerButton: playerButton,
-                       preferredHeight: preferredHeight, ignoredDomains: ignoredDomains)
+                       fullDownloadButton: fullDownloadButton, preferredHeight: preferredHeight,
+                       ignoredDomains: ignoredDomains)
     }
 
     var jobOptions: JobOptions {
@@ -76,6 +79,7 @@ struct AppSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case outputFolder, mode, precision, autoFallback, maxBytes, maxDuration, incognitoDefault, compress
         case flattenOutput, snakeCaseNames, fullClipButton, fullClipConfirm, playerButton, preferredHeight, ignoredDomains
+        case fullDownloadButton
     }
 }
 
@@ -96,6 +100,8 @@ extension AppSettings {
         fullClipButton = try c.decodeIfPresent(Bool.self, forKey: .fullClipButton) ?? defaults.fullClipButton
         fullClipConfirm = try c.decodeIfPresent(Bool.self, forKey: .fullClipConfirm) ?? defaults.fullClipConfirm
         playerButton = try c.decodeIfPresent(Bool.self, forKey: .playerButton) ?? defaults.playerButton
+        fullDownloadButton = try c.decodeIfPresent(Bool.self, forKey: .fullDownloadButton)
+            ?? defaults.fullDownloadButton
         preferredHeight = try c.decodeIfPresent(Int.self, forKey: .preferredHeight) ?? defaults.preferredHeight
         ignoredDomains = try c.decodeIfPresent([String].self, forKey: .ignoredDomains) ?? defaults.ignoredDomains
     }

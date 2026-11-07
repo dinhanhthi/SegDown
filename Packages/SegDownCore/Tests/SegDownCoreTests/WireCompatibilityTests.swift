@@ -74,6 +74,7 @@ struct WireCompatibilityTests {
                 fullClipButton: false,
                 fullClipConfirm: false,
                 playerButton: false,
+                fullDownloadButton: false,
                 preferredHeight: 1080,
                 ignoredDomains: ["example.com", "www.youtube.com"]
             )
@@ -83,6 +84,7 @@ struct WireCompatibilityTests {
 
         #expect(String(decoding: line, as: UTF8.self).contains(#""protocol":\#(IPC.protocolVersion)"#))
         #expect(String(decoding: line, as: UTF8.self).contains(#""preferredHeight":1080"#))
+        #expect(String(decoding: line, as: UTF8.self).contains(#""fullDownloadButton":false"#))
         #expect(String(decoding: line, as: UTF8.self).contains(#""ignoredDomains":["example.com","www.youtube.com"]"#))
         #expect(try IPC.decodeLine(IPCResponse.self, from: line) == pong)
     }
@@ -100,6 +102,7 @@ struct WireCompatibilityTests {
         #expect(decoded.fullClipButton)
         #expect(decoded.fullClipConfirm)
         #expect(decoded.playerButton)
+        #expect(decoded.fullDownloadButton)
         #expect(decoded.maxDuration == nil)
         #expect(decoded.preferredHeight == nil)
         #expect(decoded.ignoredDomains == [])

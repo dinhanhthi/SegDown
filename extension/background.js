@@ -359,10 +359,11 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // own lists), never a URL, headers, a title, segment times or a duration. The
 // types marked [selected] below are accepted only from that frame (else {ok:
 // false, error: "not-selected-frame"}); their replies are summaries (no URLs, no
-// header values, no captures). Two exceptions: while nothing is selected, a frame
+// header values, no captures). Exceptions: while nothing is selected, a frame
 // may `select` one of its own videos (frameId = its sender.frameId), so it can
-// claim the overlay; and `openOverlay` (the player button) is accepted from any
-// frame, for its own videos only.
+// claim the overlay; and `openOverlay` (the player button), `fullOptions` and
+// `downloadFull` (the Download full button) are accepted from any frame, for its
+// own videos only.
 //
 //   Agent (every frame, owns that frame's <video> elements):
 //   candidates {videos: [{videoKey, area, duration, live, paused, excluded, score,
@@ -422,9 +423,9 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              stays false while nothing is selected.
 //   getState   any frame -> {ok, state, ui}, plus `segments` (segs:<tabId>, []
 //              if none) only in the selected video's frame. ui: {fullClipButton,
-//              playerButton, ignored}: the app's switches from storage.local `ui`
-//              and whether this tab is ignored (Ignored sites; the domain list
-//              never leaves the hub) (both switches true and ignored false when
+//              playerButton, fullDownloadButton, ignored}: the app's switches from
+//              storage.local `ui` and whether this tab is ignored (Ignored sites;
+//              the domain list never leaves the hub) (every switch true and ignored false when
 //              nothing is stored; then it also pings the app,
 //              not awaited, so the pong's `ui` broadcast follows once the app
 //              is reachable; onInstalled pings too). Agents send it once at load
@@ -439,6 +440,60 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              "user"; its errors pass through), opens the panel like
 //              setPanelOpen {open: true} (state to "all"), then sends
 //              toggleOverlay {open: true} to that frame. -> {ok, state}.
+//   fullOptions {videoKey, probe?: boolean} any frame, NOT [selected] (the
+//              Download full button): the target is checked like openOverlay
+//              (frameId from the sender; "ignored", "no-video"), but it is never
+//              selected and no stored choice or overlay state changes. -> {ok,
+//              kind: "variants" | "heights" | "none", items: [string],
+//              defaultIndex, pending}, at once from the probe cache (never
+//              waiting for a probe; the button asks again while pending).
+//              Without probe, the protocol comes from the last pong only (no
+//              native call); probe: true asks the app first (deps; a failing app
+//              counts as protocol 1). The source is the one Send the job would
+//              take for that video (target-aware correlation; the selected video
+//              is "own"). variants: the HLS Quality rule of `view` wins (more than
+//              one variant; items from the same labels, "WxH · N.N Mbps" or "N.N
+//              Mbps"); else heights when the job runs yt-dlp (Page resolution
+//              picker; more than one height; items "Best", then "<h>p", so index 0
+//              = Best). defaultIndex: what the overlay would take: for the own
+//              video the stored choice, else (and for any other video) the
+//              preferred one. Labels are built from numbers only. pending:
+//              variants or heights with no cached record yet (items [],
+//              defaultIndex 0); kind "none" with pending true: no pong is known
+//              yet and the HLS rule did not answer (no hls source, or its cached
+//              playlist has at most one variant). kind "none" with
+//              pending false means no list is possible: no source, a probe error
+//              record, an empty or one-entry list, protocol < 3 for a page, a
+//              direct file without page first. Only probe: true starts a probe,
+//              with no panelOpen gate, when the record is missing or stale: for
+//              the own video's HLS source the probe run, as `view`; for a page
+//              (any video) or another video's playlist one probe of that one URL
+//              (no run, no "maybe" captures, no sourceChanged), one at a time per
+//              tab and URL.
+//   downloadFull {videoKey, kind?: "heights" | "variants", index?} any frame,
+//              NOT [selected] (the Download full button's click): kind and index
+//              come together or not at all (else bad-message); every other field
+//              is ignored, so the body never carries a URL, a duration or a
+//              height. The target is checked like fullOptions ("ignored",
+//              "no-video") and is never selected; no stored choice, segment,
+//              pendingStart or overlay state changes. With kind: the app is asked
+//              (deps; failing -> the app-unreachable / app-error replies of
+//              download) and the list fullOptions would answer now must have
+//              the same kind and more than index items, else {ok: false, error:
+//              "options-changed"}. Then it runs `download` {full: true} for that
+//              video (no mode or incognito from the body: settings.mode, the
+//              tab's incognito), with its source, duration and page URL from the
+//              target-aware correlation: same checks and replies ({ok, jobId} |
+//              {ok: false, error: "app-unreachable" | "app-error" |
+//              "app-outdated" | "no-source" | "no-duration" | "over-limit",
+//              message?}), same jobs:<tabId> / jobt entries, no segs:<tabId>.
+//              The pick applies to this one job: variants index -> that variant,
+//              as chooseVariant would (a non-default one pins the media, no page
+//              first); heights index -> maxHeight (0 = Best, omitted; i > 0 ->
+//              the height of items[i]). Without a pick: the own video takes the stored
+//              choices, as `download`; another video the defaults (preferred
+//              variant, settings.preferredHeight unless a variant was chosen).
+//              settings.fullClipConfirm is not applied (the button never asks).
 //
 //   Segments. The hub owns the tab's segments: segs:<tabId> in storage.session,
 //   a list sorted by start (then end) of at most MAX_SEGMENTS {start, end,
@@ -556,7 +611,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   [{url, bandwidth, resolution?: {width, height} | null, audioGroup?}]} ([] for
 //   a media playlist) or {type: "error", code, message}. getSource and
 //   chooseSource start a probe run while the overlay is open (one per tab at a
-//   time, in the background):
+//   time, in the background; fullOptions {probe: true} also does, see there):
 //   it probes the resolved hls source when its URL has no cached result (a
 //   failure is retried after PROBE_RETRY_MS, a success is kept until the tab is
 //   cleared). When that source came from the capture order and is a media
@@ -602,7 +657,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   answers a page probe with variants [] and ignores maxHeight) and the job
 //   runs yt-dlp (Send the job: a page source, or page first), and while the
 //   HLS Quality section (below) does not show: `view` asks the app, while the
-//   overlay is open (one run per tab at a time, in the background),
+//   overlay is open (one run per tab at a time, in the background; fullOptions
+//   {probe: true} also does, see there),
 //   chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "probe",
 //   source: {type: "page", url: the job's page URL}}) -> {type: "formats",
 //   heights: [integer]} (tallest first, [] when yt-dlp is missing or cannot
@@ -631,8 +687,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "ping"}) ->
 //              {type: "pong", version, missing: [string], protocol?, settings?:
 //              {mode, incognitoDefault, maxDuration?, fullClipButton?,
-//              fullClipConfirm?, playerButton?, ignoredDomains?,
-//              preferredHeight?}}, at most once
+//              fullClipConfirm?, playerButton?, fullDownloadButton?,
+//              ignoredDomains?, preferredHeight?}}, at most once
 //              per DEPS_TTL_MS (10 s; one cached
 //              answer for every tab, also for the settings; concurrent callers
 //              share one request). protocol: an integer >= 1, absent -> 1 (2:
@@ -641,8 +697,9 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              settings are checked field by field: mode "separate" | "merged"
 //              (else "separate"), incognitoDefault (true only when true, so an
 //              app without settings gives false), maxDuration (seconds, finite >
-//              0, else no limit), fullClipButton, fullClipConfirm and
-//              playerButton (false only when false, so absent -> true), ignoredDomains (lowercased
+//              0, else no limit), fullClipButton, fullClipConfirm,
+//              playerButton and fullDownloadButton (false only when false, so
+//              absent -> true), ignoredDomains (lowercased
 //              hostnames as the app's IgnoredDomain.normalize makes them, others
 //              dropped, deduped, at most MAX_IGNORED_DOMAINS; not an array -> []),
 //              preferredHeight (an integer 1...8640, else null = Best). Every
@@ -845,7 +902,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //     state {state} after the selection, selectedBy or pendingStart changes.
 //     Also sent after panelOpen changes: agents listen for `[` / `]` only while
 //     the overlay is open.
-//     ui {ui: {fullClipButton, playerButton, ignored}} to every tab
+//     ui {ui: {fullClipButton, playerButton, fullDownloadButton, ignored}} to every tab
 //     (chrome.tabs.query; ignored: that tab's, Ignored sites) when a pong (ping
 //     or setIgnored) changed the stored switches or ignored domains
 //     (storage.local `ui`).
@@ -928,10 +985,11 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // access level is set to trusted contexts where the browser supports that):
 //   seg:<url>    -> {segments (with done?), ts}   (at most 200, newest ts kept; entries saved by
 //                    older versions also carry mode and precision, ignored)
-//   ui           -> {fullClipButton, playerButton, ignoredDomains}   (the app's
-//                    switches and ignored domains from the last pong, ping or
-//                    setIgnored; absent ->
-//                    both true, []; stored without ignoredDomains -> []; content
+//   ui           -> {fullClipButton, playerButton, fullDownloadButton, ignoredDomains}
+//                    (the app's switches and ignored domains from the last pong,
+//                    ping or setIgnored; absent -> every switch true, [];
+//                    stored without ignoredDomains -> []; stored without
+//                    fullDownloadButton -> true; content
 //                    scripts get only the switches and a per-tab `ignored`, through
 //                    getState and the `ui` broadcast)
 //   reload       -> "<own version>><app version>"   (the last version pair that
@@ -950,6 +1008,7 @@ const ACTIVE_POLL_MS = 2 * 1000; // status poll while the running badge shows a 
 const ACTIVE_BADGE_COLOR = "#E5484D"; // the running badge's red
 const NO_VIDEO_BADGE_MS = 2000; // the toolbar's "none" / "off" badge after a toggle with nothing selected / an ignored tab; also the Toolbar menu's "off" / "on" / "!"
 const MODES = new Set(["separate", "merged"]);
+const FULL_KINDS = new Set(["heights", "variants"]); // downloadFull pick lists (fullOptions kinds)
 const NATIVE_HOST = "com.math2it.segdown";
 const APP_UNREACHABLE = "SegDown app not reachable: install browser integration";
 const PROBE_RETRY_MS = 30 * 1000; // a failed probe of a URL is not repeated sooner
@@ -1050,6 +1109,23 @@ const HUB_VALIDATORS = new Map([
         : null,
   ],
   ["openOverlay", (m) => (isVideoKey(m.videoKey) ? { videoKey: m.videoKey } : null)],
+  [
+    "fullOptions",
+    (m) =>
+      isVideoKey(m.videoKey) && (m.probe === undefined || typeof m.probe === "boolean")
+        ? { videoKey: m.videoKey, probe: m.probe === true }
+        : null,
+  ],
+  [
+    "downloadFull",
+    (m) => {
+      if (!isVideoKey(m.videoKey)) return null;
+      if (m.kind === undefined && m.index === undefined) return { videoKey: m.videoKey, kind: null, index: null };
+      return FULL_KINDS.has(m.kind) && isIndex(m.index, Math.max(MAX_VARIANTS, MAX_HEIGHTS + 1))
+        ? { videoKey: m.videoKey, kind: m.kind, index: m.index }
+        : null;
+    },
+  ],
   ["getState", () => ({})],
   ["setPanelOpen", (m) => (typeof m.open === "boolean" ? { open: m.open } : null)],
   ["getSource", () => ({})],
@@ -1628,14 +1704,18 @@ function pickSource({ selected, currentSrc, choice, media, active, topURL }) {
 
 // Reads everything in one tab-queue turn. A choice made for another video (or
 // none) is dropped here, so it cannot come back when that video is re-selected.
-function correlate(tabId) {
+// target ({frameId, videoKey}, default the selected video) is "own" when it is the
+// selected video; another target (the Download full button) is resolved without
+// the stored src: choice, which it never reads nor drops. r.own says which.
+function correlate(tabId, target = null) {
   return withTab(tabId, async () => {
     const keys = [capKey(tabId), actKey(tabId), candKey(tabId), srcKey(tabId), topKey(tabId)];
     const got = await chrome.storage.session.get(keys);
     const hub = await readHub(tabId);
-    const sel = hub.selected;
+    const sel = target || hub.selected;
+    const own = !target || sameSelection(target, hub.selected);
     const cand = sel ? ((got[candKey(tabId)] || {})[sel.frameId] || []).find((v) => v.videoKey === sel.videoKey) : null;
-    let choice = isObject(got[srcKey(tabId)]) ? got[srcKey(tabId)] : null;
+    let choice = own && isObject(got[srcKey(tabId)]) ? got[srcKey(tabId)] : null;
     if (choice && !sameSelection(choice.selected || null, sel)) {
       await chrome.storage.session.remove(srcKey(tabId));
       choice = null;
@@ -1651,24 +1731,30 @@ function correlate(tabId) {
       active: isObject(got[actKey(tabId)]) ? got[actKey(tabId)] : {},
       topURL: pageURL,
     });
-    // For the job (5.2): the page URL (page-first) and the selected video's duration.
-    if (r) Object.assign(r, { pageURL, duration: cand && isFiniteNum(cand.duration) && cand.duration > 0 ? cand.duration : null });
+    // For the job (5.2): the page URL (page-first) and the target video's duration.
+    if (r) Object.assign(r, { pageURL, duration: cand && isFiniteNum(cand.duration) && cand.duration > 0 ? cand.duration : null, own });
     return r;
   });
 }
 
-// For the job builder (4.3): {source, frameId, via, pageURL, duration} with the
+// For the job builder (4.3): {source, frameId, via, pageURL, duration, own} with the
 // full Source (captured headers), or null. Service-worker only; never send it to
 // a content script. Reads the probe cache only (no native call); variantURL only
 // for a variant other than the default one (variantChosen: the user chose it).
-async function resolveSource(tabId) {
-  const r = await correlate(tabId);
+// An own target (see correlate) uses the stored var: choice; another target only
+// reads the cache (readProbeRec), so the selected video's choice stays. variantPick
+// (an index into the sorted list) is a choice for this one job, for either target.
+async function resolveSource(tabId, target = null, variantPick = null) {
+  const r = await correlate(tabId, target);
   if (!r) return null;
   if (isHLS(r)) {
-    const { list, choice } = await readVariants(tabId, r.source.url);
-    const i = variantIndex(list, choice);
-    if (i > 0) r.source.variantURL = list[i].url;
-    r.variantChosen = Boolean(choice);
+    const { list, choice } = r.own
+      ? await readVariants(tabId, r.source.url)
+      : { ...(await readProbeRec(tabId, r.source.url)), choice: null };
+    const picked = Number.isInteger(variantPick);
+    const i = picked ? variantPick : variantIndex(list, choice);
+    if (i > 0 && i < list.length) r.source.variantURL = list[i].url; // a pick past a changed list: default
+    r.variantChosen = picked || Boolean(choice);
   }
   return r;
 }
@@ -1677,8 +1763,9 @@ async function resolveSource(tabId) {
 // its fallback when the media was not pinned by the user (chooseSource, a
 // non-default chooseVariant) and the app speaks protocol 2; else the resolved
 // source alone. -> {r, source, fallback (null when none)} or null.
-async function planSource(tabId, protocol) {
-  const r = await resolveSource(tabId);
+// target / variantPick: see resolveSource (none = the selected video, as stored).
+async function planSource(tabId, protocol, target = null, variantPick = null) {
+  const r = await resolveSource(tabId, target, variantPick);
   if (!r) return null;
   const pinned = r.via === "user" || Boolean(r.variantChosen && r.source.variantURL);
   if (r.source.type === "media" && !pinned && protocol >= 2 && r.pageURL) {
@@ -1741,6 +1828,7 @@ function cleanSettings(s) {
     fullClipButton: o.fullClipButton !== false,
     fullClipConfirm: o.fullClipConfirm !== false,
     playerButton: o.playerButton !== false,
+    fullDownloadButton: o.fullDownloadButton !== false,
     ignoredDomains: cleanDomains(o.ignoredDomains),
     preferredHeight: Number.isInteger(o.preferredHeight) && o.preferredHeight >= 1 && o.preferredHeight <= MAX_HEIGHT ? o.preferredHeight : null,
   };
@@ -1757,13 +1845,19 @@ function cleanDomains(list) {
   return [...new Set(hosts)].slice(0, MAX_IGNORED_DOMAINS);
 }
 
-// storage.local ui, checked; never pinged (nothing stored) -> both switches on, no
-// ignored domains. A value stored before ignoredDomains existed reads as [].
+// storage.local ui, checked; never pinged (nothing stored) -> every switch on, no
+// ignored domains. A value stored before ignoredDomains existed reads as [], one
+// stored before fullDownloadButton existed reads it as true.
 async function readUI() {
   const u = (await chrome.storage.local.get(UI_KEY))[UI_KEY];
   return isObject(u) && typeof u.fullClipButton === "boolean" && typeof u.playerButton === "boolean"
-    ? { fullClipButton: u.fullClipButton, playerButton: u.playerButton, ignoredDomains: cleanDomains(u.ignoredDomains) }
-    : { fullClipButton: true, playerButton: true, ignoredDomains: [] };
+    ? {
+        fullClipButton: u.fullClipButton,
+        playerButton: u.playerButton,
+        fullDownloadButton: u.fullDownloadButton !== false,
+        ignoredDomains: cleanDomains(u.ignoredDomains),
+      }
+    : { fullClipButton: true, playerButton: true, fullDownloadButton: true, ignoredDomains: [] };
 }
 
 // Ignored tab: the host of top:<tabId> is one of domains or a subdomain of one
@@ -1782,8 +1876,8 @@ async function tabIgnored(tabId, domains) {
 
 // The `ui` content scripts of tabId get: the switches and whether the tab is
 // ignored, never the list.
-async function uiFor(tabId, { fullClipButton, playerButton, ignoredDomains }) {
-  return { fullClipButton, playerButton, ignored: await tabIgnored(tabId, ignoredDomains) };
+async function uiFor(tabId, { fullClipButton, playerButton, fullDownloadButton, ignoredDomains }) {
+  return { fullClipButton, playerButton, fullDownloadButton, ignored: await tabIgnored(tabId, ignoredDomains) };
 }
 
 // True once a pong has stored the switches (never cleared).
@@ -1794,13 +1888,20 @@ async function hasStoredUI() {
 // After a pong: saves the switches and ignored domains when they changed (or were
 // never stored) and sends every tab its own `ui` (uiFor).
 async function updateUI(settings) {
-  const { fullClipButton, playerButton, ignoredDomains } = settings;
-  const ui = { fullClipButton, playerButton, ignoredDomains };
+  const { fullClipButton, playerButton, fullDownloadButton, ignoredDomains } = settings;
+  const ui = { fullClipButton, playerButton, fullDownloadButton, ignoredDomains };
   const stored = await hasStoredUI();
   const prev = await readUI();
   const sameDomains =
     prev.ignoredDomains.length === ignoredDomains.length && prev.ignoredDomains.every((d, i) => d === ignoredDomains[i]);
-  if (stored && prev.fullClipButton === fullClipButton && prev.playerButton === playerButton && sameDomains) return;
+  if (
+    stored &&
+    prev.fullClipButton === fullClipButton &&
+    prev.playerButton === playerButton &&
+    prev.fullDownloadButton === fullDownloadButton &&
+    sameDomains
+  )
+    return;
   await chrome.storage.local.set({ [UI_KEY]: ui });
   for (const tab of await chrome.tabs.query({})) {
     if (Number.isInteger(tab.id) && tab.id >= 0) notifyAll(tab.id, { type: "ui", ui: await uiFor(tab.id, ui) });
@@ -2139,6 +2240,19 @@ function readVariants(tabId, url) {
   });
 }
 
+// Read-only: the cached result for url and its list (variants sorted as above for
+// a playlist, heights for a page; one URL's record holds one or the other). No
+// choice and no storage writes: safe for a target that is not the selected video.
+function readProbeRec(tabId, url) {
+  return withTab(tabId, async () => {
+    const got = await chrome.storage.session.get(probeKey(tabId));
+    const rec = isObject(got[probeKey(tabId)]) ? got[probeKey(tabId)][url] : undefined;
+    if (!isObject(rec)) return { rec: null, list: [] };
+    const list = Array.isArray(rec.variants) ? sortVariants(rec.variants) : Array.isArray(rec.heights) ? rec.heights : [];
+    return { rec, list };
+  });
+}
+
 // The variant the job takes: the user's choice, else the preferred height's, else 0.
 function variantIndex(list, choice) {
   if (choice) return Math.max(0, list.findIndex((v) => v.url === choice.url));
@@ -2238,6 +2352,117 @@ async function onChooseHeight(tabId, { index }) {
   return { ok: true };
 }
 
+// --- Download full button (rules under fullOptions in the protocol) ---
+
+// The sender frame's video as a target, checked like openOverlay (never selects it).
+async function fullTarget(tabId, frameId, videoKey) {
+  if (await tabIgnored(tabId, (await readUI()).ignoredDomains)) return { ok: false, error: "ignored" };
+  const cands = await withTab(tabId, () => readCands(tabId));
+  if (!(cands[frameId] || []).some((v) => v.videoKey === videoKey && v.excluded === null)) {
+    return { ok: false, error: "no-video" };
+  }
+  return { ok: true, target: { frameId, videoKey } };
+}
+
+// The button's list for target, from the probe cache only: {kind, items,
+// defaultIndex, pending, plan, probeSource}. The HLS Quality rule wins as in
+// `view`; protocol null (no pong yet) leaves the heights unknown. probeSource:
+// the native probe source whose record is missing or stale, else null. An own
+// target (plan.r.own) uses the stored choices; another one reads the cache only.
+async function fullOptionsFor(tabId, target, protocol) {
+  const plan = await planSource(tabId, protocol, target);
+  const none = (pending, probeSource = null) => ({ kind: "none", items: [], defaultIndex: 0, pending, plan, probeSource });
+  if (!plan) return none(false);
+  const own = plan.r.own;
+  const now = Date.now();
+  if (isHLS(plan.r)) {
+    const { url, headers } = plan.r.source;
+    const { rec, list, choice } = own ? await readVariants(tabId, url) : { ...(await readProbeRec(tabId, url)), choice: null };
+    const probeSource = isFresh(rec, now) ? null : { type: "media", url, kind: "hls", headers };
+    if (!rec) return { kind: "variants", items: [], defaultIndex: 0, pending: true, plan, probeSource };
+    if (rec.error) return none(false, probeSource);
+    if (list.length > 1) {
+      return { kind: "variants", items: list.map(variantLabel), defaultIndex: variantIndex(list, choice), pending: false, plan, probeSource };
+    }
+  }
+  if (protocol === null) return none(true);
+  const page = heightsPage(plan, protocol);
+  if (!page) return none(false);
+  const { rec, list, choice } = own ? await readHeights(tabId, page) : { ...(await readProbeRec(tabId, page)), choice: null };
+  const probeSource = isFresh(rec, now) ? null : { type: "page", url: page };
+  if (!rec) return { kind: "heights", items: [], defaultIndex: 0, pending: true, plan, probeSource };
+  if (rec.error || list.length <= 1) return none(false, probeSource);
+  const defaultIndex = choice ? (choice.height ? 1 + list.indexOf(choice.height) : 0) : 1 + preferredIndex(list, preferredHeight());
+  return { kind: "heights", items: ["Best", ...list.map((h) => `${h}p`)], defaultIndex, pending: false, plan, probeSource };
+}
+
+// One probe of one URL for a target that is not the selected video (probe runs
+// follow the selection); later calls for that tab and URL share it. Freshness is
+// read with readProbeRec only (readHeights / readVariants drop the selected
+// video's choices). No sourceChanged: the target has no overlay.
+const probeOnceRuns = new Map();
+
+function probeOnce(tabId, source) {
+  const key = `${tabId} ${source.url}`;
+  if (probeOnceRuns.has(key)) return probeOnceRuns.get(key);
+  const run = (async () => {
+    const gen = tabGen(tabId);
+    if (isFresh((await readProbeRec(tabId, source.url)).rec, Date.now())) return;
+    const result = await probeNative(source);
+    if (!(await storeProbe(tabId, gen, source.url, result))) return;
+    const found = result.variants ? `variants=${result.variants.length}` : `heights=${(result.heights || []).length}`;
+    hubLog(`probe once tab=${tabId} ${result.error ? `error=${result.error.code}` : found}`);
+  })()
+    .catch(hubWarn)
+    .finally(() => probeOnceRuns.delete(key));
+  probeOnceRuns.set(key, run);
+  return run;
+}
+
+async function onFullOptions(tabId, frameId, { videoKey, probe }) {
+  const t = await fullTarget(tabId, frameId, videoKey);
+  if (!t.ok) return t;
+  // probe: ask the app (it may launch it); else the last pong only. A failing app
+  // counts as protocol 1 (no heights), so the button downloads at once and gets the
+  // app's error from downloadFull.
+  const app = probe ? await fetchDeps() : depsCache.result;
+  const protocol = !app ? null : app.appError ? 1 : app.protocol;
+  const o = await fullOptionsFor(tabId, t.target, protocol);
+  // Not awaited: the reply never waits for a probe (the button polls).
+  // A page always gets its own one-shot probe: startPageProbe's one run per tab
+  // may be busy with another URL and would never probe this one.
+  if (probe && o.probeSource) {
+    const gen = tabGen(tabId);
+    const run = o.plan.r.own && o.probeSource.type !== "page" ? startProbes(tabId) : probeOnce(tabId, o.probeSource);
+    // A playlist with at most one variant falls through to the page heights, which
+    // polls never probe: once the playlist probe settles, probe that page here.
+    if (o.probeSource.type !== "page") {
+      run
+        .then(async () => {
+          if (tabGen(tabId) !== gen) return;
+          const next = await fullOptionsFor(tabId, t.target, protocol);
+          if (next.probeSource && next.probeSource.type === "page") probeOnce(tabId, next.probeSource);
+        })
+        .catch(hubWarn);
+    }
+  }
+  return { ok: true, kind: o.kind, items: o.items, defaultIndex: o.defaultIndex, pending: o.pending };
+}
+
+// The button's download: a full clip of the sender frame's video (never selected).
+// A {kind, index} pick must still match the list fullOptions would show now.
+async function onDownloadFull(tabId, frameId, { videoKey, kind, index }, from) {
+  const t = await fullTarget(tabId, frameId, videoKey);
+  if (!t.ok) return t;
+  if (kind) {
+    const app = await fetchDeps(true);
+    if (app.appError) return appFailure(app.appError);
+    const o = await fullOptionsFor(tabId, t.target, app.protocol);
+    if (o.kind !== kind || index >= o.items.length) return { ok: false, error: "options-changed" };
+  }
+  return onDownload(tabId, from, { mode: null, incognito: false, full: true }, { target: t.target, pick: kind ? { kind, index } : null });
+}
+
 // --- send the job (4.3; rules under "Send the job" in the protocol) ---
 
 // The app's reply mapped to the frame's (never the job or its source).
@@ -2279,7 +2504,9 @@ function appFailure(appError) {
     : { ok: false, error: "app-error", code: "internal", message: appError };
 }
 
-async function onDownload(tabId, from, body) {
+// aim (downloadFull only): {target, pick: {kind, index} | null}, a video that may
+// not be the selected one and a pick from its fullOptions list for this one job.
+async function onDownload(tabId, from, body, aim = null) {
   // A full clip never reads segs:<tabId>: its one segment comes from the plan below.
   // The page key is read with the segments, so a later navigation cannot relink them.
   let { segments, pageId } = body.full
@@ -2295,10 +2522,11 @@ async function onDownload(tabId, from, body) {
   if (app.appError) return appFailure(app.appError);
   const incognito = (await withTab(tabId, () => tabIncognito(tabId, from))).on || body.incognito;
   if (incognito && app.protocol < 2) return { ok: false, error: "app-outdated", message: INCOGNITO_NEEDS_UPDATE };
-  const plan = await planSource(tabId, app.protocol); // own withTab turns; never nest
+  const variantPick = aim && aim.pick && aim.pick.kind === "variants" ? aim.pick.index : null;
+  const plan = await planSource(tabId, app.protocol, aim && aim.target, variantPick); // own withTab turns; never nest
   if (!plan) return { ok: false, error: "no-source" };
   if (body.full) {
-    // The end is the hub's own duration of the selected video, never the message's.
+    // The end is the hub's own duration of the target video, never the message's.
     const d = plan.r.duration;
     if (!isFiniteNum(d) || !(d > 0)) return { ok: false, error: "no-duration" };
     if (app.settings.maxDuration !== null && d > app.settings.maxDuration) return { ok: false, error: "over-limit" };
@@ -2311,8 +2539,15 @@ async function onDownload(tabId, from, body) {
   if (plan.fallback) job.fallback = plan.fallback;
   const page = heightsPage(plan, app.protocol); // the page attempt only, never the fallback
   if (page) {
-    const { choice } = await readHeights(tabId, page);
-    const height = choice ? choice.height : plan.r.variantChosen ? null : app.settings.preferredHeight;
+    // A heights pick: 0 = Best, else that height. Another video never reads (nor
+    // drops) the selected video's chooseHeight choice.
+    const heightPick = aim && aim.pick && aim.pick.kind === "heights" ? aim.pick.index : null;
+    let height;
+    if (heightPick !== null) height = heightPick ? (await readProbeRec(tabId, page)).list[heightPick - 1] : null;
+    else {
+      const { choice } = plan.r.own ? await readHeights(tabId, page) : { choice: null };
+      height = choice ? choice.height : plan.r.variantChosen ? null : app.settings.preferredHeight;
+    }
     if (height) job.maxHeight = height;
   }
   if (plan.r.duration !== null) job.mediaDuration = plan.r.duration;
@@ -2769,6 +3004,13 @@ function route(tabId, frameId, type, body, from) {
       return onSelect(tabId, body);
     case "openOverlay":
       return onOpenOverlay(tabId, frameId, body);
+    case "fullOptions":
+      return onFullOptions(tabId, frameId, body);
+    case "downloadFull":
+      downloadsInFlight++;
+      return onDownloadFull(tabId, frameId, body, from).finally(() => {
+        downloadsInFlight--;
+      });
     case "getState":
       return onGetState(tabId, frameId);
     case "setPanelOpen":

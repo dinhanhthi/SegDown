@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A Download full video button sits next to the SegDown icon on a video. One click downloads the whole video, with no overlay and no confirmation. When the video has several qualities, the click opens a list with your preferred resolution already highlighted; pick one and the download starts. SegDown looks up the qualities when the pointer reaches the button. Turn the button off in Settings › Browser › Download full video button.
+
 ## [0.6.11] - 2026-10-30
 
 ### Added
