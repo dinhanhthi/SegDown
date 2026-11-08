@@ -56,9 +56,11 @@ enum SizeEstimate {
     // MARK: Estimate
 
     /// The expected size of a media `request`, or nil when it cannot be estimated (page source,
-    /// failed request, no size header, no `mediaDuration` for mp4, playlist without `BANDWIDTH`).
-    /// HLS: the chosen variant's `BANDWIDTH` / 8 × total segment duration. mp4: the file's total
-    /// size × total segment duration / `mediaDuration`. Expects a validated request.
+    /// failed request, no size header, no `mediaDuration` for mp4, playlist without `BANDWIDTH`,
+    /// DASH without `@bandwidth`). HLS: the chosen variant's `BANDWIDTH` / 8 × total segment
+    /// duration. mp4 and file: the file's total size × total segment duration / `mediaDuration`.
+    /// DASH: the chosen video and audio `@bandwidth` sum / 8 × total segment duration. Expects a
+    /// validated request.
     static func estimate(_ request: JobRequest, session: URLSession = .shared) async -> Int64? {
         guard case let .media(url, kind, headers, variantURL, _) = request.source else { return nil }
         let duration = request.segments.reduce(0) { $0 + ($1.end - $1.start) }
@@ -69,7 +71,16 @@ enum SizeEstimate {
                   variantURL == nil || selection.variant.url.absoluteString == variantURL?.absoluteString,
                   selection.variant.bandwidth > 0 else { return nil }
             return bytes(Double(selection.variant.bandwidth) / 8 * duration)
-        case .mp4:
+        case .dash:
+            // `fetch`'s cookie-less session: a CDN's `Set-Cookie` on the MPD stays out of the shared jar.
+            guard let manifest = try? await DASHManifest.fetch(url, headers: headers) else {
+                return nil
+            }
+            // Doubles: the `@bandwidth` values are untrusted, an Int sum could overflow.
+            let bandwidth = Double(manifest.video.bandwidth) + Double(manifest.audio?.bandwidth ?? 0)
+            guard bandwidth > 0 else { return nil }
+            return bytes(bandwidth / 8 * duration)
+        case .mp4, .file:
             guard let mediaDuration = request.mediaDuration, mediaDuration > 0 else { return nil }
             let target = variantURL ?? url
             // The captured headers belong to the source's origin; another origin gets none.

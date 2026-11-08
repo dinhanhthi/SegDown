@@ -41,6 +41,13 @@ struct AppSettings: Codable, Equatable, Sendable {
     /// The extension stays off on these sites and their subdomains, in the order added (each one
     /// normalized by `IgnoredDomain.normalize`).
     var ignoredDomains: [String] = []
+    /// Who downloads what the extension finds (sent to it in `pong`).
+    var downloadWith: DownloadWith = .segdown
+    /// Grows by one on each change of `downloadWith` (only `SettingsView.downloadWithBinding` sets
+    /// it), so the extension can tell a new change from an old value.
+    var downloadWithRev = 0
+    /// Absolute path of the `.app` that `openWith` opens links in; `nil` = none chosen.
+    var otherAppPath: String?
 
     /// The heights Settings offers for `preferredHeight`.
     static let preferredHeights = [360, 480, 720, 1080, 1440, 2160]
@@ -55,12 +62,23 @@ struct AppSettings: Codable, Equatable, Sendable {
         JobLimits(maxDuration: maxDuration, maxBytes: maxBytes)
     }
 
-    /// What the extension gets in `pong`.
+    /// What the extension gets in `pong`. Another app with no app chosen is sent as SegDown, so the
+    /// extension never offers to open a link in no app.
     var clientSettings: ClientSettings {
-        ClientSettings(mode: mode, incognitoDefault: incognitoDefault, maxDuration: maxDuration,
-                       fullClipButton: fullClipButton, fullClipConfirm: fullClipConfirm, playerButton: playerButton,
-                       fullDownloadButton: fullDownloadButton, preferredHeight: preferredHeight,
-                       ignoredDomains: ignoredDomains)
+        let otherAppName = downloadWith == .otherApp ? otherAppPath.map(Self.appName) : nil
+        let sentDownloadWith = downloadWith == .otherApp && otherAppName == nil ? .segdown : downloadWith
+        return ClientSettings(mode: mode, incognitoDefault: incognitoDefault, maxDuration: maxDuration,
+                              fullClipButton: fullClipButton, fullClipConfirm: fullClipConfirm,
+                              playerButton: playerButton, fullDownloadButton: fullDownloadButton,
+                              preferredHeight: preferredHeight, ignoredDomains: ignoredDomains,
+                              downloadWith: sentDownloadWith, downloadWithRev: downloadWithRev,
+                              otherAppName: otherAppName)
+    }
+
+    /// The display name of the app at `path`, without ".app".
+    static func appName(_ path: String) -> String {
+        let name = FileManager.default.displayName(atPath: path)
+        return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
     }
 
     var jobOptions: JobOptions {
@@ -79,7 +97,7 @@ struct AppSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case outputFolder, mode, precision, autoFallback, maxBytes, maxDuration, incognitoDefault, compress
         case flattenOutput, snakeCaseNames, fullClipButton, fullClipConfirm, playerButton, preferredHeight, ignoredDomains
-        case fullDownloadButton
+        case fullDownloadButton, downloadWith, downloadWithRev, otherAppPath
     }
 }
 
@@ -104,6 +122,10 @@ extension AppSettings {
             ?? defaults.fullDownloadButton
         preferredHeight = try c.decodeIfPresent(Int.self, forKey: .preferredHeight) ?? defaults.preferredHeight
         ignoredDomains = try c.decodeIfPresent([String].self, forKey: .ignoredDomains) ?? defaults.ignoredDomains
+        downloadWith = try c.decodeIfPresent(String.self, forKey: .downloadWith)
+            .flatMap(DownloadWith.init(rawValue:)) ?? defaults.downloadWith
+        downloadWithRev = try c.decodeIfPresent(Int.self, forKey: .downloadWithRev) ?? defaults.downloadWithRev
+        otherAppPath = try c.decodeIfPresent(String.self, forKey: .otherAppPath) ?? defaults.otherAppPath
     }
 }
 

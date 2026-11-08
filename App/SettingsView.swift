@@ -3,6 +3,7 @@
 import AppKit
 import SegDownCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     let store: JobStore
@@ -104,6 +105,31 @@ struct SettingsView: View {
                           hint: "Jobs are not kept in history; the browser does not keep their segments.")
             }
             Section("Browser") {
+                LabeledContent {
+                    Picker("Download with", selection: downloadWithBinding) {
+                        Text("SegDown").tag(DownloadWith.segdown)
+                        Text("Browser only").tag(DownloadWith.browser)
+                        Text("Another app").tag(DownloadWith.otherApp)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                } label: {
+                    Text("Download with")
+                    Text(Self.downloadWithHint(settings.settings.downloadWith))
+                }
+                if settings.settings.downloadWith == .otherApp {
+                    LabeledContent("App") {
+                        HStack {
+                            Text(settings.settings.otherAppPath.map(AppSettings.appName) ?? "None")
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Button("Choose…", action: chooseApp)
+                                .buttonStyle(RowTextButtonStyle(formRow: true))
+                        }
+                    }
+                }
                 switchRow(isOn: setting(\.fullClipButton), title: "Full clip button",
                           hint: "Adds a Full clip button to the overlay that downloads the whole video.")
                 if settings.settings.fullClipButton {
@@ -253,6 +279,45 @@ struct SettingsView: View {
     }
 
     // MARK: - Browser
+
+    /// Bumps `downloadWithRev` on each real change, the only place it changes, so the extension can
+    /// tell a new change from an old value.
+    private var downloadWithBinding: Binding<DownloadWith> {
+        Binding(get: { settings.settings.downloadWith }, set: { value in
+            settings.update { s in
+                guard s.downloadWith != value else { return }
+                s.downloadWith = value
+                s.downloadWithRev += 1
+            }
+        })
+    }
+
+    private static func downloadWithHint(_ value: DownloadWith) -> String {
+        switch value {
+        case .segdown: "SegDown downloads the marked parts."
+        case .browser:
+            "The extension saves whole files with the browser and stops contacting SegDown. "
+                + "Switch back from the extension's ▾ menu (Download with)."
+        case .otherApp:
+            "The extension sends the video's link to this app, without the page's cookies or headers: "
+                + "public links only."
+        }
+    }
+
+    /// Picks the app `openWith` opens links in; SegDown itself is ignored.
+    private func chooseApp() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(filePath: "/Applications", directoryHint: .isDirectory)
+        panel.prompt = "Choose"
+        guard panel.runModal() == .OK, let url = panel.url,
+              url.standardizedFileURL.path != Bundle.main.bundleURL.standardizedFileURL.path else { return }
+        settings.update { $0.otherAppPath = url.path(percentEncoded: false) }
+    }
 
     /// On: 1080p. Off: the best quality.
     private var heightPreferred: Binding<Bool> {

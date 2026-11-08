@@ -13,8 +13,9 @@
 // One host per frame, in a closed shadow root shown in the top layer
 // (popover="manual"), so it stays above the page and every kind of fullscreen.
 // Each button follows its own app switch (playerButton, fullDownloadButton);
-// the host is hidden while both are off, on an ignored site (Ignored sites)
-// and on the video whose overlay is open.
+// the host is hidden while both are off and on an ignored site (Ignored sites).
+// On the video whose overlay is open (or opening after its click) the SegDown
+// icon is left out and Download full stays, in its own place.
 // Page data is untrusted: the DOM is built from constants only (SVG via
 // createElementNS, no page strings; the menu labels are the hub's own strings
 // built from numbers, set with textContent), handlers act on trusted events
@@ -45,6 +46,10 @@
   const OFFSET = 8; // px from the video's top-left corner
   const MENU_GAP = 4; // px between the buttons and the menu / error line
   const EDGE = 4; // px kept from the viewport's edges by the menu / error line
+  const MAX_CLIP_WALK = 15; // ancestors read for a clipping card (visibleRect)
+  const MAX_CLIPS = 3;
+  const MAX_HEADER_WALK = 10; // ancestors of the probe hit read for a header
+  const CLIPPING = new Set(["hidden", "clip"]);
   const SVG_NS = "http://www.w3.org/2000/svg";
   // Players toggle play/pause or fullscreen on clicks and keys: keep them out.
   const ISOLATED_EVENTS = [
@@ -55,12 +60,17 @@
   const ERRORS = {
     "no-video": "The video is gone.",
     "no-source": "No video source found on this page.",
+    drm: "This video is DRM-protected: SegDown can't download it.",
     "no-duration": "The video's duration is unknown.",
     "over-limit": "The video is longer than the Max total duration in SegDown Settings.",
     "no-reply": "SegDown did not answer. Reload the page.",
     ignored: "SegDown is off on this site.",
     "options-changed": "The qualities changed. Try again.",
     "app-unreachable": "SegDown app not reachable.",
+    "copy-only": "Open SegDown (its icon) to copy this stream's link.",
+    "inline-only": "This stream exists only in the page: it needs the SegDown app.",
+    "private-window": "The browser download is off in a private window.",
+    "browser-download": "The browser refused the download.",
   };
   // Undoes the page's and the popover UA styles on the host (left / top / width
   // are set on each show); the buttons and the menu inside opt back into pointer
@@ -154,6 +164,7 @@
   let shown = false;
   let target = null; // {videoKey, video, probed?} the buttons are on while shown
   let lastMove = 0; // the last pointer move over the target
+  let opening = null; // the video whose SegDown icon was clicked, until blockedUntil
   let blockedUntil = 0;
   let hideTimer = null;
   let frame = 0;
@@ -204,6 +215,12 @@
     const st = agent.state();
     return Boolean(st && st.panelOpen === true && agent.video() === v);
   };
+
+  // The SegDown icon shows on v: its switch is on, v's overlay is not open and
+  // not opening after a click.
+  const iconOn = (v) => agent.ui().playerButton && !overlayOn(v) && !(v === opening && Date.now() < blockedUntil);
+  // At least one button shows on v.
+  const anyOn = (v) => iconOn(v) || agent.ui().fullDownloadButton;
 
   // At least one button is switched on, on a site that is not ignored.
   const wanted = () => {
@@ -292,11 +309,18 @@
     root.append(style, wrap);
   }
 
-  // Shows the buttons whose switch is on, side by side, SegDown first.
+  // Shows the buttons whose switch is on, side by side, SegDown first. The
+  // icon's slot stays while it is left out (iconOn), so Download full never
+  // slides under the pointer that just clicked the icon.
+  const layoutKeyOf = () => {
+    const u = agent.ui();
+    return `${u.playerButton} ${u.fullDownloadButton} ${iconOn(target.video)}`;
+  };
+
   function layout() {
     const u = agent.ui();
-    layoutKey = `${u.playerButton} ${u.fullDownloadButton}`;
-    button.hidden = !u.playerButton;
+    layoutKey = layoutKeyOf();
+    button.hidden = !iconOn(target.video);
     fullButton.hidden = !u.fullDownloadButton;
     fullButton.style.left = u.playerButton ? `${SIZE + GAP}px` : "0px";
     const n = Number(u.playerButton) + Number(u.fullDownloadButton);
@@ -305,19 +329,64 @@
     if (!u.fullDownloadButton) resetFull();
   }
 
-  function position(r) {
-    hostLeft = Math.max(0, Math.min(Math.max(r.left, 0) + OFFSET, window.innerWidth - hostWidth));
-    hostTop = Math.max(0, Math.min(Math.max(r.top, 0) + OFFSET, window.innerHeight - SIZE));
+  // el.contains(video), also through the shadow roots the video sits in.
+  function holds(el, video) {
+    for (let n = video; n; n = n.getRootNode().host) if (el.contains(n)) return true;
+    return false;
+  }
+
+  // The top-left of the video's visible part: r clipped by the first MAX_CLIPS
+  // overflow hidden / clip ancestors (a card that crops the video), then moved
+  // below a fixed or sticky full-width header over it (one elementFromPoint). An
+  // ancestor of the video (a player in theater or web fullscreen) is never a
+  // header. Fullscreen keeps r.
+  function visibleRect(video, r) {
+    if (document.fullscreenElement || document.webkitFullscreenElement) return r;
+    let { left, top, right, bottom } = r;
+    let clips = 0;
+    for (let el = video.parentElement, n = 0; el && el !== document.body && n < MAX_CLIP_WALK && clips < MAX_CLIPS; el = el.parentElement, n++) {
+      const s = getComputedStyle(el);
+      if (!CLIPPING.has(s.overflowX) && !CLIPPING.has(s.overflowY)) continue;
+      clips++;
+      const c = el.getBoundingClientRect();
+      const l = Math.max(left, c.left);
+      const t = Math.max(top, c.top);
+      const rt = Math.min(right, c.right);
+      const b = Math.min(bottom, c.bottom);
+      if (rt > l && b > t) [left, top, right, bottom] = [l, t, rt, b]; // empty: keep the rect
+    }
+    const x = (Math.max(left, 0) + Math.min(right, window.innerWidth)) / 2;
+    const cx = Math.max(0, Math.min(x, window.innerWidth - 1));
+    const y = Math.max(0, Math.min(top, window.innerHeight - 2));
+    const hit = document.elementFromPoint(cx, y + 1);
+    if (!hit || hit.localName === "segdown-button" || hit.localName === "segdown-overlay") return { left, top };
+    for (let el = hit, n = 0; el && n <= MAX_HEADER_WALK; el = el.parentElement, n++) {
+      if (holds(el, video)) break;
+      const pos = getComputedStyle(el).position;
+      if (pos !== "fixed" && pos !== "sticky") continue;
+      const h = el.getBoundingClientRect();
+      if (h.top > 1 || h.width < 0.9 * window.innerWidth) continue;
+      if (h.bottom > top) top = h.bottom;
+      break;
+    }
+    return { left, top };
+  }
+
+  function position(video, r) {
+    const p = visibleRect(video, r);
+    hostLeft = Math.max(0, Math.min(Math.max(p.left, 0) + OFFSET, window.innerWidth - hostWidth));
+    hostTop = Math.max(0, Math.min(Math.max(p.top, 0) + OFFSET, window.innerHeight - SIZE));
     host.style.setProperty("left", `${hostLeft}px`, "important");
     host.style.setProperty("top", `${hostTop}px`, "important");
   }
 
-  // While shown: the switches changed -> lay the buttons out again.
+  // While shown: the switches or the icon changed -> lay the buttons out again;
+  // none left on the video -> hide.
   function relayout() {
-    const u = agent.ui();
-    if (`${u.playerButton} ${u.fullDownloadButton}` === layoutKey) return;
+    if (!anyOn(target.video)) return hide();
+    if (layoutKeyOf() === layoutKey) return;
     layout();
-    position(target.video.getBoundingClientRect());
+    position(target.video, target.video.getBoundingClientRect());
     if (menuKey !== null) place(menu);
     if (!errorLine.hidden) place(errorLine);
   }
@@ -378,21 +447,26 @@
 
   // --- show / hide ---
 
-  // (Re-)enters the top layer last, so it sits above a fullscreen element.
-  function show(r) {
-    if (gone()) return;
-    if (!host) build();
-    if (!host.isConnected) document.documentElement.append(host);
-    hideOthers();
-    layout();
-    position(r);
-    host.style.setProperty("visibility", "visible", "important");
+  // (Re-)enters the top layer last, so it sits above a fullscreen element and
+  // above an overlay that opened after it.
+  function raise() {
     try {
       if (host.matches(":popover-open")) host.hidePopover();
       host.showPopover();
     } catch {
       // no popover support: the fixed host with the top z-index stays
     }
+  }
+
+  function show(r) {
+    if (gone()) return;
+    if (!host) build();
+    if (!host.isConnected) document.documentElement.append(host);
+    hideOthers();
+    layout();
+    position(target.video, r);
+    host.style.setProperty("visibility", "visible", "important");
+    raise();
     shown = true;
     scheduleHide();
     if (agent.ui().fullDownloadButton) askOptions(target.videoKey, false);
@@ -422,8 +496,9 @@
   function onHideTick() {
     hideTimer = null;
     if (gone() || !shown) return;
-    if (!wanted() || !target.video.isConnected || overlayOn(target.video)) return hide();
+    if (!wanted() || !target.video.isConnected) return hide();
     relayout();
+    if (!shown) return;
     if (stuck() || wrap.matches(":hover")) {
       hideTimer = setTimeout(onHideTick, MIN_TICK_MS);
       return;
@@ -435,8 +510,9 @@
 
   // --- pointer ---
 
-  // The eligible video under the point, the smallest if several overlap; the
-  // video whose overlay is open does not count.
+  // The eligible video under the point, the smallest if several overlap; a
+  // video with no button to show (its overlay open, Download full off) does not
+  // count.
   function hitTest(x, y) {
     let best = null;
     let bestArea = Infinity;
@@ -444,7 +520,7 @@
       const r = c.video.getBoundingClientRect();
       if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
       const area = r.width * r.height;
-      if (area < bestArea && !overlayOn(c.video)) {
+      if (area < bestArea && anyOn(c.video)) {
         best = { videoKey: c.videoKey, video: c.video, rect: r };
         bestArea = area;
       }
@@ -458,16 +534,12 @@
     if (!wanted()) return hide();
     if (shown) relayout();
     const hit = hitTest(pointX, pointY);
-    if (!hit) {
-      if (shown && overlayOn(target.video)) hide();
-      return;
-    }
+    if (!hit) return;
     if (shown && hit.video === target.video) {
       lastMove = Date.now();
       return;
     }
     if (shown && stuck()) return;
-    if (Date.now() < blockedUntil) return;
     target = { videoKey: hit.videoKey, video: hit.video };
     lastMove = Date.now();
     show(hit.rect);
@@ -481,12 +553,14 @@
     if (!frame) frame = requestAnimationFrame(onFrame);
   }
 
+  // Drops the icon at once (the hub's `state` marks the overlay open later);
+  // Download full stays.
   function onButtonClick() {
     if (!shown) return;
-    const videoKey = target.videoKey;
+    opening = target.video;
     blockedUntil = Date.now() + BLOCK_MS;
-    hide();
-    ask({ type: "openOverlay", videoKey });
+    ask({ type: "openOverlay", videoKey: target.videoKey });
+    relayout();
   }
 
   // --- Download full video ---
@@ -537,6 +611,7 @@
   function openMenu(videoKey) {
     clearFeedback();
     menuKey = videoKey;
+    raise(); // above the overlay's panel
     menu.hidden = false;
     renderMenu();
     window.addEventListener("keydown", onMenuKey, true);
@@ -653,6 +728,7 @@
       okGlyph.toggleAttribute("hidden", false);
     } else {
       errorLine.textContent = text;
+      raise();
       errorLine.hidden = false;
       place(errorLine);
     }

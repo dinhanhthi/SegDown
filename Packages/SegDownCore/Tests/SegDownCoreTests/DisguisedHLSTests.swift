@@ -8,10 +8,10 @@ struct DisguisedHLSTests {
     private let source = URL(string: "https://cdn.example.com/v/index.m3u8")!
     private let output = URL(fileURLWithPath: "/tmp/job/part-001.mp4")
 
-    private func segmentArgs(input: URL) -> [String] {
+    private func segmentArgs(input: URL, kind: MediaKind = .hls) -> [String] {
         CommandBuilder.ffmpegSegment(
             input: input,
-            kind: .hls,
+            kind: kind,
             audio: nil,
             headers: ["Referer": "https://example.com/", "User-Agent": "UA", "Cookie": "a=b"],
             source: source,
@@ -21,16 +21,16 @@ struct DisguisedHLSTests {
         )
     }
 
-    /// Three MPEG-TS packets (sync byte, then zeros).
-    private func tsPackets() -> Data {
+    /// `packets` MPEG-TS packets (sync byte, then zeros).
+    private func tsPackets(packets: Int = 3) -> Data {
         var packet = Data(repeating: 0x00, count: 188)
         packet[0] = 0x47
-        return packet + packet + packet
+        return Data((0..<packets).flatMap { _ in packet })
     }
 
-    /// `prefix` padded with 0xFF to `offset`, then three TS packets.
-    private func disguised(prefix: [UInt8], offset: Int) -> Data {
-        Data(prefix) + Data(repeating: 0xFF, count: offset - prefix.count) + tsPackets()
+    /// `prefix` padded with 0xFF to `offset`, then `packets` TS packets.
+    private func disguised(prefix: [UInt8], offset: Int, packets: Int = 3) -> Data {
+        Data(prefix) + Data(repeating: 0xFF, count: offset - prefix.count) + tsPackets(packets: packets)
     }
 
     // MARK: CommandBuilder
@@ -42,8 +42,25 @@ struct DisguisedHLSTests {
             start + expected.count <= args.count && Array(args[start..<start + expected.count]) == expected
         }
         #expect(found)
-        for option in ["-extension_picky", "-user_agent", "-headers", "-cookies"] {
+        for option in [
+            "-extension_picky", "-user_agent", "-headers", "-cookies", "-reconnect", "-multiple_requests",
+            "-seg_max_retry",
+        ] {
             #expect(!args.contains(option))
+        }
+
+        // A joined DASH track gets a forced demuxer from its host-chosen name, never `hls`.
+        let dash = segmentArgs(input: URL(fileURLWithPath: "/tmp/x/dash/video.mp4"), kind: .dash)
+        let dashExpected = ["-protocol_whitelist", "file", "-f", "mov", "-ss", "3.000", "-i", "/tmp/x/dash/video.mp4"]
+        #expect(dash.indices.contains { start in
+            start + dashExpected.count <= dash.count && Array(dash[start..<start + dashExpected.count]) == dashExpected
+        })
+        #expect(!dash.contains("hls"))
+        for option in [
+            "-extension_picky", "-user_agent", "-headers", "-cookies", "-reconnect", "-multiple_requests",
+            "-seg_max_retry",
+        ] {
+            #expect(!dash.contains(option))
         }
     }
 
@@ -142,5 +159,116 @@ struct DisguisedHLSTests {
         #expect(try !HLSPlaylist.parse(keyed, baseURL: source).isPlain)
         let unkeyed = media.replacingOccurrences(of: "#EXT-X-TARGETDURATION:5", with: "#EXT-X-KEY:METHOD=NONE")
         #expect(try HLSPlaylist.parse(unkeyed, baseURL: source).isPlain)
+
+        let fragmented = """
+        #EXTM3U
+        #EXT-X-MAP:URI="init.mp4"
+        #EXTINF:4,
+        seg-1.m4s
+        #EXTINF:4,
+        blob:https://example.com/0b1c
+        #EXT-X-ENDLIST
+        """
+        let mapped = try HLSPlaylist.parse(fragmented, baseURL: source)
+        #expect(!mapped.isPlain)
+        #expect(mapped.mapURL?.absoluteString == "https://cdn.example.com/v/init.mp4")
+        #expect(mapped.mapCount == 1)
+        #expect(mapped.skippedURIs == 1)
+        #expect(mapped.segments.map(\.url.absoluteString) == ["https://cdn.example.com/v/seg-1.m4s"])
+
+        let text = DisguisedHLS.playlist(durations: [4], fileNames: ["hls-0001.m4s"], mapFileName: "hls-init.mp4")
+        #expect(text.contains("#EXT-X-VERSION:7\n"))
+        #expect(text.contains("#EXT-X-MAP:URI=\"hls-init.mp4\"\n#EXTINF:"))
     }
+
+    // MARK: Download
+
+    /// The body arrives in 10 000-byte chunks and is longer than `probeBytes`: the TS start is found
+    /// across chunks and the rest is written as it comes.
+    @Test func downloadStripsPrefixAcrossChunks() async throws {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("SegDownTests-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
+        let session = StubProtocol.session()
+        defer { session.invalidateAndCancel() }
+        func download(_ path: String, to name: String, stripPrefix: Bool = true) async throws -> URL {
+            let file = directory.appendingPathComponent(name)
+            try await DisguisedHLS.download(
+                HLSMediaSegment(url: URL(string: "https://cdn.example.com\(path)")!, duration: 4), number: 1,
+                headers: [:], source: source, to: file, stripPrefix: stripPrefix, session: session
+            )
+            return file
+        }
+
+        let png: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        let stripped = try await download("/seg.png", to: "stripped.ts")
+        #expect(try Data(contentsOf: stripped) == tsPackets(packets: 400))
+        let kept = try await download("/seg.png", to: "kept.ts", stripPrefix: false)
+        #expect(try Data(contentsOf: kept) == disguised(prefix: png, offset: 1000, packets: 400))
+
+        // A 429 is refused for now, with its `Retry-After`, for `JobRunner`'s back-off; a 410 is final.
+        let refused = await #expect(throws: DisguisedHLS.Refused.self) {
+            _ = try await download("/busy", to: "busy.ts")
+        }
+        #expect(refused?.status == 429)
+        #expect(refused?.retryAfter == 3)
+        await #expect(throws: JobError.linkExpired) {
+            _ = try await download("/gone", to: "gone.ts")
+        }
+    }
+}
+
+/// Answers requests by URL path with fixed bodies, sent in 10 000-byte `didLoad` calls. Registered
+/// only on its own ephemeral session (`session()`), never globally.
+private final class StubProtocol: URLProtocol, @unchecked Sendable {
+    private struct Route: Sendable {
+        var status: Int
+        var headers: [String: String] = [:]
+        var body = Data()
+    }
+
+    private static let routes: [String: Route] = {
+        var packet = Data(repeating: 0x00, count: 188)
+        packet[0] = 0x47
+        // A PNG signature, 0xFF padding to 1 000 bytes, then 400 TS packets (more than `probeBytes`).
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let segment = png + Data(repeating: 0xFF, count: 1000 - png.count) + Data((0..<400).flatMap { _ in packet })
+        return [
+            "/seg.png": Route(status: 200, body: segment),
+            "/busy": Route(status: 429, headers: ["Retry-After": "3"]),
+            "/gone": Route(status: 410),
+        ]
+    }()
+
+    static func session() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url, let route = Self.routes[url.path] else {
+            client?.urlProtocol(self, didFailWithError: URLError(.fileDoesNotExist))
+            return
+        }
+        var headers = route.headers
+        headers["Content-Length"] = String(route.body.count)
+        let response = HTTPURLResponse(url: url, statusCode: route.status, httpVersion: "HTTP/1.1", headerFields: headers)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        var offset = 0
+        while offset < route.body.count {
+            let end = min(offset + 10_000, route.body.count)
+            client?.urlProtocol(self, didLoad: route.body.subdata(in: offset..<end))
+            offset = end
+        }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

@@ -4,7 +4,7 @@
 
 # SegDown
 
-**Mark time ranges on a video in your browser. Only those ranges are downloaded.**
+**A video download manager for your browser: save the whole video, or mark time ranges and download only those.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![macOS 15+](https://img.shields.io/badge/macOS-15%2B-blue)
@@ -19,6 +19,8 @@
 - Works in Chrome, Brave, Edge, Arc, Firefox and Safari, on YouTube and most video sites.
 - One file per part, or all parts merged into one file.
 - Pick the quality per video, or set a preferred resolution once.
+- Works with HLS and DASH streams, and with mp4, WebM and MOV files.
+- For a video played by hls.js, Shaka, dash.js, video.js or JW Player, SegDown asks the page's player for the real stream when you open the panel or click Download, including playlists that exist only in the page.
 
 ## Install
 
@@ -40,6 +42,8 @@ Needs macOS 15 or later. SegDown updates itself; its Dependencies page shows a m
 2. In your browser, open the extensions page (`chrome://extensions`), turn on **Developer mode**, click **Load unpacked** and choose that folder. `~/Library` is hidden in the folder picker: press **⌘⇧G** there and paste the path from **Copy Path**, or drag the folder in from Finder.
 
 Pages that were already open pick SegDown up by themselves. On a stream site whose video was already playing, reload the page once if SegDown finds no video to download.
+
+The extension asks for the `downloads` permission ("Manage your downloads" in Chrome) to save files in Browser mode.
 
 The extension comes with the app: each SegDown update also updates the extension. The `SegDown-extension-X.Y.Z.zip` on the release page is only a spare copy; you don't need it.
 
@@ -63,7 +67,9 @@ Open SegDown once. In Safari › Settings › Extensions, tick SegDown and allow
 1. Play the video.
 2. Click the SegDown icon on the video, the SegDown toolbar button, or press Alt+Shift+S.
 3. Mark the parts with the **[** (Mark start) and **]** (Mark end) buttons, or the `[` and `]` keys. While a start is marked, **Cancel** drops it.
-4. Click **Download**. The ▾ menu has more choices: separate or merged files, quality, incognito. **Full clip** downloads the whole video.
+4. Click **Download**. The ▾ menu has more choices: separate or merged files, quality, incognito, and **Download with**: the SegDown app or the browser alone. **Full clip** downloads the whole video.
+
+In Browser mode the extension works without the app: it saves whole files (mp4, WebM and other video files) with the browser's own downloader. Streams (HLS, DASH) can only be copied, as a link or as a yt-dlp or ffmpeg command, without cookies. SegDown Settings › Download with can also send links to another Mac app (public links only).
 
 To download the whole video in one click, use the download button next to the SegDown icon on the video. If the video has several qualities, it lists them first, with your preferred one highlighted.
 
@@ -75,7 +81,7 @@ To keep SegDown off on a site, choose **Ignore this site** in the ▾ menu or ri
 
 ## Not supported
 
-Protected video (DRM, such as Netflix), live streams and DASH. If a site stops working, update yt-dlp on SegDown's Dependencies page.
+Protected video (DRM, such as Netflix), live streams (HLS or DASH), and DASH with several periods (often ads). If a site stops working, update yt-dlp on SegDown's Dependencies page.
 
 ## Build from source
 

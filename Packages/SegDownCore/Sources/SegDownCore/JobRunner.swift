@@ -19,13 +19,17 @@ public actor JobRunner {
         "The site refused the download (HTTP 403/410). It may block yt-dlp; try `brew upgrade yt-dlp`."
     /// Time between SIGINT and SIGTERM when a job is cancelled.
     static let cancelGracePeriod: Duration = .seconds(3)
-    /// Time the title lookup (`lookUpTitle`) may run before its yt-dlp is terminated.
-    static let titleLookupTimeout: Duration = .seconds(20)
     /// Time between two sums of a running job's temp dir (`JobStatus.bytes` and the size cap).
     static let sizePollInterval: Duration = .milliseconds(500)
     /// Files `merge` writes into the temp dir; `SizeEstimate.countedFileNames` skips them.
     static let mergeListName = "list.txt"
     static let mergeOutputName = "merged.mp4"
+    /// Retries of one piece after a 429/503 (`downloadPieces`).
+    static let maxPieceRetries = 2
+    /// The longest `Retry-After` wait in seconds; a longer one fails the job.
+    static let maxRetryAfter: Double = 30
+    /// The wait in seconds after a 429/503 without a usable `Retry-After`.
+    static let defaultRetryAfter: Double = 2
 
     private struct Entry {
         var task: Task<Void, Never>?
@@ -36,6 +40,9 @@ public actor JobRunner {
         var abortReason: JobError?
         /// Set when a compression failed; the job still ends `done` with the uncompressed file(s).
         var compressionFailed = false
+        /// Pieces `downloadPieces` keeps in flight; lowered on refusals, kept for the rest of the
+        /// job (every window, the fallback attempt too).
+        var pieceLimit = DisguisedHLS.parallelPieces
     }
 
     private let binaries: Binaries
@@ -97,20 +104,22 @@ public actor JobRunner {
             .appendingPathComponent("SegDown-\(id)", isDirectory: true)
 
         var final: JobStatus
-        // The looked-up title when it replaced the request's; reported in the final status.
-        var newTitle: String?
+        // The title yt-dlp prints for a page whose title is only the site name (`PageTitle.isGeneric`).
+        // Read on every outcome, so a failed job keeps a title printed before the failure.
+        var titleLine: FirstLine?
         do {
             tracker.begin(index: 0, message: "Starting")
-            var request = try Validation.validate(request)
+            let request = try Validation.validate(request)
             if let maxBytes = options.maxBytes {
                 try await checkEstimate(id: id, request: request, maxBytes: maxBytes, tracker: tracker)
             }
-            newTitle = try await lookUpTitle(id: id, request: request, tracker: tracker)
-            // `PageTitle.clean` caps it at `Validation.maxTitleLength`, so the request stays valid.
-            if let newTitle { request.title = newTitle }
+            if case let .page(url) = request.source, PageTitle.isGeneric(request.title, pageURL: url) {
+                titleLine = FirstLine()
+            }
             try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
             let outputs = try await run(
-                id: id, request: request, options: options, tempDirectory: tempDirectory, tracker: tracker
+                id: id, request: request, options: options, tempDirectory: tempDirectory, tracker: tracker,
+                titleLine: titleLine
             )
             final = JobStatus(
                 id: id, state: .done, segmentIndex: count - 1, segmentCount: count,
@@ -134,7 +143,7 @@ public actor JobRunner {
         final.fraction = final.state == .done ? 1 : tracker.fraction
         final.bytes = tracker.bytes
         final.fallbackUsed = tracker.fallbackUsed ? true : nil
-        final.title = newTitle
+        final.title = Self.printedTitle(titleLine, replacing: request.title)
         try? FileManager.default.removeItem(at: tempDirectory)
         jobs[id] = nil
         continuation.yield(final)
@@ -142,11 +151,14 @@ public actor JobRunner {
     }
 
     /// Downloads every segment into `tempDirectory`, then writes the outputs. Returns their URLs.
-    /// A page source with a media `fallback` runs yt-dlp without its generic extractor first, then
-    /// the captured media when `FallbackDecision` allows it. Each download attempt runs under
-    /// `watchingSize` (`JobStatus.bytes` and `options.maxBytes`).
+    /// A page source with a media or playlist `fallback` runs yt-dlp without its generic extractor
+    /// first, then the captured media when `FallbackDecision` allows it. Each download attempt runs
+    /// under `watchingSize` (`JobStatus.bytes` and `options.maxBytes`).
+    /// With a `titleLine`, the page attempts print the video's title into it, and the outputs are
+    /// named after it (`printedTitle`).
     private func run(
-        id: String, request: JobRequest, options: JobOptions, tempDirectory: URL, tracker: ProgressTracker
+        id: String, request: JobRequest, options: JobOptions, tempDirectory: URL, tracker: ProgressTracker,
+        titleLine: FirstLine?
     ) async throws -> [URL] {
         let ffmpeg = try binary(.ffmpeg)
         let maxBytes = options.maxBytes
@@ -161,12 +173,19 @@ public actor JobRunner {
                     request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory, tracker: tracker
                 )
             }
+        case let .playlist(text, baseURL, headers):
+            parts = try await watchingSize(id: id, directory: tempDirectory, maxBytes: maxBytes, tracker: tracker) {
+                try await downloadPlaylist(
+                    id: id, text: text, baseURL: baseURL, headers: headers, request: request, ffmpeg: ffmpeg,
+                    tempDirectory: tempDirectory, tracker: tracker
+                )
+            }
         case let .page(url):
             guard let fallback = request.fallback else {
                 parts = try await watchingSize(id: id, directory: tempDirectory, maxBytes: maxBytes, tracker: tracker) {
                     try await downloadPage(
                         id: id, url: url, request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory,
-                        tracker: tracker
+                        tracker: tracker, titleLine: titleLine
                     )
                 }
                 break
@@ -175,14 +194,15 @@ public actor JobRunner {
                 parts = try await watchingSize(id: id, directory: tempDirectory, maxBytes: maxBytes, tracker: tracker) {
                     try await downloadPage(
                         id: id, url: url, request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory,
-                        tracker: tracker, siteOnly: true
+                        tracker: tracker, siteOnly: true, titleLine: titleLine
                     )
                 }
             } catch {
                 // A cancel or a size-cap abort makes the attempt throw too: end the job instead.
                 try checkCancelled(id)
-                guard FallbackDecision.shouldFallback(error: error, autoFallback: options.autoFallback),
-                      case let .media(url, kind, headers, variantURL, audioURL) = fallback else { throw error }
+                guard FallbackDecision.shouldFallback(error: error, autoFallback: options.autoFallback) else {
+                    throw error
+                }
                 // yt-dlp's ffmpeg can outlive the failed attempt and keep writing `part-NNN.*` into
                 // tempDirectory. A fresh subdirectory keeps such stale files out of this attempt's
                 // parts and byte count; removing tempDirectory at the end removes both.
@@ -196,10 +216,21 @@ public actor JobRunner {
                 parts = try await watchingSize(
                     id: id, directory: fallbackDirectory, maxBytes: maxBytes, tracker: tracker
                 ) {
-                    try await downloadMedia(
-                        id: id, url: url, kind: kind, headers: headers, variantURL: variantURL, audioURL: audioURL,
-                        request: request, ffmpeg: ffmpeg, tempDirectory: fallbackDirectory, tracker: tracker
-                    )
+                    switch fallback {
+                    case let .media(url, kind, headers, variantURL, audioURL):
+                        return try await downloadMedia(
+                            id: id, url: url, kind: kind, headers: headers, variantURL: variantURL, audioURL: audioURL,
+                            request: request, ffmpeg: ffmpeg, tempDirectory: fallbackDirectory, tracker: tracker
+                        )
+                    case let .playlist(text, baseURL, headers):
+                        return try await downloadPlaylist(
+                            id: id, text: text, baseURL: baseURL, headers: headers, request: request, ffmpeg: ffmpeg,
+                            tempDirectory: fallbackDirectory, tracker: tracker
+                        )
+                    case .page:
+                        // Validation rejects a page fallback.
+                        throw error
+                    }
                 }
             }
         }
@@ -207,7 +238,8 @@ public actor JobRunner {
 
         let snakeCase = options.snakeCaseNames
         let titleDirectory = try PathSanitizer.outputDirectory(
-            title: request.title, base: options.baseDirectory ?? baseDirectory, snakeCase: snakeCase
+            title: Self.printedTitle(titleLine, replacing: request.title) ?? request.title,
+            base: options.baseDirectory ?? baseDirectory, snakeCase: snakeCase
         )
         // Use the component titleDirectory produced, so a fallback name has one timestamp.
         let title = titleDirectory.lastPathComponent
@@ -247,31 +279,12 @@ public actor JobRunner {
         }
     }
 
-    /// The video's real title for a page source whose `request.title` is only the site name
-    /// (`PageTitle.isGeneric`): the first stdout line of `CommandBuilder.ytDlpTitle`, cleaned by
-    /// `PageTitle.clean`. Nil keeps the request's title: other sources and titles, no yt-dlp, any
-    /// failure, `titleLookupTimeout` reached, nothing left after cleaning or no change. A cancel throws.
-    private func lookUpTitle(id: String, request: JobRequest, tracker: ProgressTracker) async throws -> String? {
-        guard case let .page(url) = request.source, PageTitle.isGeneric(request.title, pageURL: url),
-              let ytDlp = binaries.url(for: .ytDlp) else { return nil }
-        tracker.begin(index: 0, message: "Reading the title")
-        let firstLine = FirstLine()
-        do {
-            try await runProcess(
-                .ytDlp, executable: ytDlp, arguments: CommandBuilder.ytDlpTitle(url: url), jobID: id,
-                timeout: Self.titleLookupTimeout
-            ) { stream, line in
-                if stream == .stdout { firstLine.offer(line) }
-            }
-        } catch {
-            // A cancel makes the lookup fail too: end the job instead of keeping the title.
-            try checkCancelled(id)
-            return nil
-        }
-        guard let line = firstLine.value, let title = PageTitle.clean(line), title != request.title else {
-            return nil
-        }
-        return title
+    /// The title yt-dlp printed into `titleLine` (`CommandBuilder.printedTitle`), cleaned by
+    /// `PageTitle.clean`, when it differs from `title`. Nil keeps `title`: no line, nothing left after
+    /// cleaning or no change. `PageTitle.clean` caps it at `Validation.maxTitleLength`.
+    private static func printedTitle(_ titleLine: FirstLine?, replacing title: String) -> String? {
+        guard let line = titleLine?.value, let printed = PageTitle.clean(line), printed != title else { return nil }
+        return printed
     }
 
     /// Fails before anything is downloaded when `SizeEstimate` expects more than `maxBytes`. No
@@ -369,10 +382,17 @@ public actor JobRunner {
     }
 
     /// Resolves the media source (`resolveMedia`), then downloads its segments (`downloadSegments`).
+    /// A DASH manifest goes to `downloadDASH`.
     private func downloadMedia(
         id: String, url: URL, kind: MediaKind, headers: [String: String], variantURL: URL?, audioURL: URL?,
         request: JobRequest, ffmpeg: URL, tempDirectory: URL, tracker: ProgressTracker
     ) async throws -> [URL] {
+        if kind == .dash {
+            return try await downloadDASH(
+                id: id, url: url, headers: headers, request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory,
+                tracker: tracker
+            )
+        }
         let (input, audio) = try await resolveMedia(
             id: id, url: url, kind: kind, headers: headers, variantURL: variantURL, audioURL: audioURL,
             tracker: tracker
@@ -383,20 +403,74 @@ public actor JobRunner {
         )
     }
 
+    /// A `playlist` source: its text is parsed, never fetched again; URIs resolve against `baseURL`.
+    /// A master playlist goes on as a media source for its best variant (`downloadMedia`), with
+    /// Cookie only when the variant is on `baseURL`'s origin. A media playlist is staged by the app
+    /// itself (`downloadSegments` with a `StagedHLS`), since ffmpeg sends no headers from a local
+    /// playlist: TS segments as for disguised HLS, fMP4 ones as they come, after their `EXT-X-MAP`.
+    /// Encryption, byte ranges, several init sections and non-http(s) URIs fail with a clear error.
+    private func downloadPlaylist(
+        id: String, text: String, baseURL: URL, headers: [String: String], request: JobRequest, ffmpeg: URL,
+        tempDirectory: URL, tracker: ProgressTracker
+    ) async throws -> [URL] {
+        tracker.begin(index: 0, message: "Reading playlist")
+        let playlist = try HLSPlaylist.parse(text, baseURL: baseURL)
+        if playlist.isMaster {
+            guard let selection = playlist.pickVariant() else {
+                throw JobError.invalid("The HLS master playlist has no playable variant")
+            }
+            let url = selection.variant.url
+            return try await downloadMedia(
+                id: id, url: url, kind: .hls, headers: DisguisedHLS.scoped(headers, for: url, source: baseURL),
+                variantURL: nil, audioURL: selection.audioURL, request: request, ffmpeg: ffmpeg,
+                tempDirectory: tempDirectory, tracker: tracker
+            )
+        }
+        let unsupportedMap = JobError.invalid(
+            "This playlist uses byte ranges or several init sections, SegDown can't download it"
+        )
+        guard !playlist.hasKey else {
+            throw JobError.invalid("This playlist is encrypted, SegDown can't download it")
+        }
+        guard !playlist.hasByteRange, playlist.mapCount <= 1 else { throw unsupportedMap }
+        guard playlist.skippedURIs == 0 else {
+            throw JobError.invalid("This playlist links to files that are not http(s)")
+        }
+        // A MAP without a usable URI (after the check above, one with none or an empty one).
+        guard playlist.mapCount == 0 || playlist.mapURL != nil else { throw unsupportedMap }
+        guard !playlist.segments.isEmpty else {
+            throw JobError.invalid("This playlist has no segments")
+        }
+        // `input` is unused once `plan` is set; `.hls` keeps `-f hls` on the local playlist.
+        return try await downloadSegments(
+            id: id, input: baseURL, kind: .hls, audio: nil, headers: headers, source: baseURL,
+            request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory, tracker: tracker,
+            plan: StagedHLS(
+                segments: playlist.segments, mapURL: playlist.mapURL, stripPrefix: playlist.mapURL == nil
+            )
+        )
+    }
+
     /// One ffmpeg run per segment into `<tmp>/part-NNN.mp4`. When the HLS segments are disguised
-    /// (`disguisedSegments`), each run reads a local playlist of the segments it needs instead
-    /// (`stageDisguised`), with the times shifted to that playlist. The size cap counts the staged
+    /// (`disguisedSegments`), or a `plan` is given (a `playlist` source), each run reads a local
+    /// playlist of the segments it needs instead (`stageDisguised`), with the times shifted to that
+    /// playlist. With a `plan`, the disguise detection is skipped. The size cap counts the staged
     /// segments while they download, then they move out of its count before ffmpeg runs, so a
     /// window is never counted twice beside its part. They are removed after the run, whether it
     /// succeeds, fails or is cancelled, so only one segment's window is on disk at a time.
     private func downloadSegments(
         id: String, input: URL, kind: MediaKind, audio: URL?, headers: [String: String], source: URL,
-        request: JobRequest, ffmpeg: URL, tempDirectory: URL, tracker: ProgressTracker
+        request: JobRequest, ffmpeg: URL, tempDirectory: URL, tracker: ProgressTracker, plan: StagedHLS? = nil
     ) async throws -> [URL] {
         let count = request.segments.count
-        let disguised = try await disguisedSegments(
-            id: id, input: input, kind: kind, audio: audio, headers: headers, source: source
-        )
+        let staging: StagedHLS?
+        if let plan {
+            staging = plan
+        } else {
+            staging = try await disguisedSegments(
+                id: id, input: input, kind: kind, audio: audio, headers: headers, source: source
+            ).map { StagedHLS(segments: $0, mapURL: nil, stripPrefix: true) }
+        }
         var parts: [URL] = []
         for (index, segment) in request.segments.enumerated() {
             let part = tempDirectory.appendingPathComponent(CommandBuilder.partFileName(index: index + 1))
@@ -406,12 +480,15 @@ public actor JobRunner {
             // The segments left in place if staging stops midway, and the folder they move to.
             var staged: [URL] = []
             defer { for file in staged { try? FileManager.default.removeItem(at: file) } }
-            if let disguised {
-                let window = DisguisedHLS.window(disguised, start: segment.start, end: segment.end)
-                let files = DisguisedHLS.stagedFiles(count: window.range.count, in: tempDirectory)
-                staged = files.segments + [files.folder]
+            if let staging {
+                let window = DisguisedHLS.window(staging.segments, start: segment.start, end: segment.end)
+                let files = DisguisedHLS.stagedFiles(
+                    count: window.range.count, in: tempDirectory,
+                    segmentExtension: staging.mapURL == nil ? "ts" : "m4s", withInit: staging.mapURL != nil
+                )
+                staged = files.segments + [files.initFile].compactMap { $0 } + [files.folder]
                 segmentInput = try await stageDisguised(
-                    id: id, segments: disguised, range: window.range, files: files, headers: headers,
+                    id: id, plan: staging, range: window.range, files: files, headers: headers,
                     source: source, tracker: tracker
                 )
                 shifted = Segment(start: segment.start - window.offset, end: segment.end - window.offset)
@@ -420,19 +497,181 @@ public actor JobRunner {
                 input: segmentInput, kind: kind, audio: audio, headers: headers, source: source, segment: shifted,
                 precision: request.precision, output: part
             )
-            let duration = segment.end - segment.start
-            try await runProcess(.ffmpeg, executable: ffmpeg, arguments: arguments, jobID: id) { stream, line in
-                // Not `progress=end`: ffmpeg also prints it when interrupted by a cancel.
-                guard stream == .stdout, line.hasPrefix("out_time_us="),
-                      let micros = Double(line.dropFirst("out_time_us=".count)) else { return }
-                tracker.progress(micros / 1_000_000 / duration)
-            }
-            guard FileManager.default.fileExists(atPath: part.path) else {
-                throw JobError.processFailed("ffmpeg wrote no file for segment \(index + 1)")
-            }
+            try await runSegment(
+                id: id, arguments: arguments, ffmpeg: ffmpeg, segment: segment, index: index, part: part,
+                tracker: tracker
+            )
             parts.append(part)
         }
         return parts
+    }
+
+    /// Runs one segment's ffmpeg `arguments` into `part`, with its progress in `tracker`.
+    private func runSegment(
+        id: String, arguments: [String], ffmpeg: URL, segment: Segment, index: Int, part: URL,
+        tracker: ProgressTracker
+    ) async throws {
+        let duration = segment.end - segment.start
+        try await runProcess(.ffmpeg, executable: ffmpeg, arguments: arguments, jobID: id) { stream, line in
+            // Not `progress=end`: ffmpeg also prints it when interrupted by a cancel.
+            guard stream == .stdout, line.hasPrefix("out_time_us="),
+                  let micros = Double(line.dropFirst("out_time_us=".count)) else { return }
+            tracker.progress(micros / 1_000_000 / duration)
+        }
+        guard FileManager.default.fileExists(atPath: part.path) else {
+            throw JobError.processFailed("ffmpeg wrote no file for segment \(index + 1)")
+        }
+    }
+
+    // MARK: DASH
+
+    /// A DASH manifest (`DASHManifest`): the highest-bandwidth video and audio tracks. When both are
+    /// single files, ffmpeg reads them over http with the headers (`downloadSegments`, Cookie only
+    /// on the MPD's origin). Otherwise, per segment, the inits and windows of the `.segments` tracks
+    /// download together (`downloadPieces`), each track is joined into one local file (`stageDASH`),
+    /// and ffmpeg reads it with a forced demuxer, the times shifted to that file. VP8/Vorbis/Theora tracks force the `.precise`
+    /// arguments, as for the `file` kind: they cannot be stream-copied into mp4.
+    private func downloadDASH(
+        id: String, url: URL, headers: [String: String], request: JobRequest, ffmpeg: URL, tempDirectory: URL,
+        tracker: ProgressTracker
+    ) async throws -> [URL] {
+        tracker.begin(index: 0, message: "Reading manifest")
+        let manifest = try await DASHManifest.fetch(url, headers: headers)
+        var request = request
+        if [manifest.video, manifest.audio].contains(where: { $0.map(Self.mustReencode) ?? false }) {
+            request.precision = .precise
+        }
+        if case let .file(videoURL) = manifest.video.content {
+            var audioURL: URL?
+            if case let .file(url)? = manifest.audio?.content { audioURL = url }
+            if manifest.audio == nil || audioURL != nil {
+                return try await downloadSegments(
+                    id: id, input: videoURL, kind: .dash, audio: audioURL, headers: headers, source: url,
+                    request: request, ffmpeg: ffmpeg, tempDirectory: tempDirectory, tracker: tracker
+                )
+            }
+        }
+        let count = request.segments.count
+        var parts: [URL] = []
+        for (index, segment) in request.segments.enumerated() {
+            let part = tempDirectory.appendingPathComponent(CommandBuilder.partFileName(index: index + 1))
+            tracker.begin(index: index, message: "Downloading segment \(index + 1) of \(count)")
+            let folder = tempDirectory.appendingPathComponent("dash", isDirectory: true)
+            let video = try Self.dashPieces(manifest.video, segment: segment, prefix: "v", in: tempDirectory)
+            let audio = try manifest.audio.map { try Self.dashPieces($0, segment: segment, prefix: "a", in: tempDirectory) }
+            // The pieces left in place if staging stops midway, and the folder they join into.
+            let staged = video.files + (audio?.files ?? []) + [folder]
+            defer { for file in staged { try? FileManager.default.removeItem(at: file) } }
+            // Both tracks' pieces download together, as they come.
+            let pieces = [video, audio].compactMap { $0 }.flatMap { track in
+                zip(track.pieces, track.files).map { piece, file in
+                    DisguisedHLS.Piece(segment: piece.segment, number: piece.number, file: file, stripPrefix: false)
+                }
+            }
+            try await downloadPieces(id: id, pieces: pieces, headers: headers, source: url, tracker: tracker)
+            let videoInput = try stageDASH(id: id, track: manifest.video, pieces: video, name: "video", folder: folder)
+            var audioInput: URL?
+            if let audioTrack = manifest.audio, let audio {
+                audioInput = try stageDASH(id: id, track: audioTrack, pieces: audio, name: "audio", folder: folder)
+            }
+            let videoOffset = video.offset
+            let audioOffset = audio?.offset ?? 0
+            let arguments = CommandBuilder.ffmpegSegment(
+                input: videoInput, kind: .dash, audio: audioInput, headers: headers, source: url,
+                segment: Segment(start: segment.start - videoOffset, end: segment.end - videoOffset),
+                precision: request.precision, output: part, audioShift: audioOffset - videoOffset
+            )
+            try await runSegment(
+                id: id, arguments: arguments, ffmpeg: ffmpeg, segment: segment, index: index, part: part,
+                tracker: tracker
+            )
+            parts.append(part)
+        }
+        return parts
+    }
+
+    /// True when a track's `@codecs` names VP8, Vorbis or Theora, which mp4 cannot hold as copied.
+    private static func mustReencode(_ track: DASHTrack) -> Bool {
+        guard let codecs = track.codecs?.lowercased() else { return false }
+        return codecs.split(separator: ",").contains { codec in
+            let codec = codec.trimmingCharacters(in: .whitespaces)
+            return ["vp8", "vorbis", "theora"].contains { codec.hasPrefix($0) }
+        }
+    }
+
+    /// What one DASH track stages for one segment: `pieces` (the init, if any, then the window's
+    /// media segments; manifest position 0 for the init) downloaded into `files`, and the source
+    /// time where they start. A `.file` track stages nothing (offset 0).
+    private struct DASHPieces {
+        var pieces: [(number: Int, segment: HLSMediaSegment)]
+        var files: [URL]
+        var offset: Double
+        var hasInit: Bool
+    }
+
+    /// The pieces of `track` for `segment`, named `dash-<prefix>-0000.<ext>` (init),
+    /// `dash-<prefix>-0001.<ext>`… directly in `directory`, so the size cap counts them while they
+    /// grow. Names the host chooses, never taken from the manifest.
+    private static func dashPieces(_ track: DASHTrack, segment: Segment, prefix: String, in directory: URL) throws -> DASHPieces {
+        guard case let .segments(initURL, segments) = track.content else {
+            return DASHPieces(pieces: [], files: [], offset: 0, hasInit: false)
+        }
+        guard !segments.isEmpty else { throw JobError.invalid("The DASH manifest has no segments") }
+        let window = DisguisedHLS.window(segments, start: segment.start, end: segment.end)
+        var pieces = window.range.map { (number: $0 + 1, segment: segments[$0]) }
+        if let initURL {
+            pieces.insert((number: 0, segment: HLSMediaSegment(url: initURL, duration: 0)), at: 0)
+        }
+        let files = pieces.indices.map { position in
+            directory.appendingPathComponent(
+                "dash-\(prefix)-" + String(format: "%04d", position + (initURL == nil ? 1 : 0)) + ".\(track.ext)"
+            )
+        }
+        return DASHPieces(pieces: pieces, files: files, offset: window.offset, hasInit: initURL != nil)
+    }
+
+    /// Checks that the first of the downloaded `pieces` is the media type the manifest says
+    /// (`dashHeaderMatches`), then joins them in order into `<folder>/<name>.<ext>`, deleting each
+    /// piece once it is copied: `folder` is not counted by the size cap, as for `hls/`. Returns the
+    /// joined file's URL, or a `.file` track's own http URL.
+    private func stageDASH(
+        id: String, track: DASHTrack, pieces: DASHPieces, name: String, folder: URL
+    ) throws -> URL {
+        if case let .file(url) = track.content { return url }
+        try checkCancelled(id)
+        guard let first = pieces.files.first, try Self.dashHeaderMatches(first, ext: track.ext, isInit: pieces.hasInit) else {
+            throw JobError.invalid("The DASH stream is not the media type its manifest says")
+        }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let joined = folder.appendingPathComponent("\(name).\(track.ext)")
+        guard FileManager.default.createFile(atPath: joined.path, contents: nil) else {
+            throw JobError.processFailed("Cannot create \(joined.lastPathComponent)")
+        }
+        let output = try FileHandle(forWritingTo: joined)
+        defer { try? output.close() }
+        for file in pieces.files {
+            try checkCancelled(id)
+            let input = try FileHandle(forReadingFrom: file)
+            defer { try? input.close() }
+            while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+                try output.write(contentsOf: chunk)
+            }
+            try FileManager.default.removeItem(at: file)
+        }
+        return joined
+    }
+
+    /// True when `file` starts like `ext` says: webm with the EBML magic `1A 45 DF A3`, mp4 with an
+    /// `ftyp`/`styp` box (an init section), or also `moof`/`sidx` for a first media segment
+    /// (`isInit` false, a manifest without init). The bytes come from the CDN unchecked.
+    private static func dashHeaderMatches(_ file: URL, ext: String, isInit: Bool) throws -> Bool {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        let bytes = [UInt8](try handle.read(upToCount: 8) ?? Data())
+        guard bytes.count == 8 else { return false }
+        if ext == "webm" { return bytes[0..<4] == [0x1A, 0x45, 0xDF, 0xA3] }
+        let box = String(decoding: bytes[4..<8], as: UTF8.self)
+        return ["ftyp", "styp"].contains(box) || (!isInit && ["moof", "sidx"].contains(box))
     }
 
     /// The segments of the HLS media playlist `input` when they are disguised
@@ -458,50 +697,146 @@ public actor JobRunner {
         }
     }
 
-    /// Downloads `segments[range]` into `files.segments` (`DisguisedHLS.stagedFiles`) with their
-    /// prefix stripped, counted by the size cap meanwhile, then moves them into `files.folder`,
-    /// out of its count before ffmpeg writes the part, and writes `files.playlist` listing them.
-    /// The downloads fill the first 90% of the segment's progress. Returns the playlist's file URL.
+    /// Downloads `plan.mapURL` (as it comes) into `files.initFile` and `plan.segments[range]` into
+    /// `files.segments` (`DisguisedHLS.stagedFiles`), with their prefix stripped when
+    /// `plan.stripPrefix`, several at a time (`downloadPieces`), counted by the size cap meanwhile.
+    /// Then moves them into `files.folder`, out of its count before ffmpeg writes the part, and
+    /// writes `files.playlist` listing them. The downloads fill the first 90% of the segment's
+    /// progress. Returns the playlist's file URL.
     private func stageDisguised(
-        id: String, segments: [HLSMediaSegment], range: Range<Int>,
-        files: (segments: [URL], folder: URL, playlist: URL), headers: [String: String],
+        id: String, plan: StagedHLS, range: Range<Int>,
+        files: DisguisedHLS.StagedFiles, headers: [String: String],
         source: URL, tracker: ProgressTracker
     ) async throws -> URL {
-        for (position, index) in range.enumerated() {
-            try checkCancelled(id)
-            try await DisguisedHLS.download(
-                segments[index], number: index + 1, headers: headers, source: source, to: files.segments[position]
-            )
-            tracker.progress(0.9 * Double(position + 1) / Double(range.count))
+        let segments = plan.segments
+        var pieces: [DisguisedHLS.Piece] = []
+        if let mapURL = plan.mapURL, let initFile = files.initFile {
+            // Number 0 names the init section in errors (segments count from 1).
+            pieces.append(DisguisedHLS.Piece(
+                segment: HLSMediaSegment(url: mapURL, duration: 0), number: 0, file: initFile, stripPrefix: false
+            ))
         }
+        for (position, index) in range.enumerated() {
+            pieces.append(DisguisedHLS.Piece(
+                segment: segments[index], number: index + 1, file: files.segments[position],
+                stripPrefix: plan.stripPrefix
+            ))
+        }
+        try await downloadPieces(id: id, pieces: pieces, headers: headers, source: source, tracker: tracker)
         try checkCancelled(id)
         // A rename: the playlist lists bare names, so they resolve next to it.
         try FileManager.default.createDirectory(at: files.folder, withIntermediateDirectories: true)
-        for file in files.segments {
+        for file in files.segments + [files.initFile].compactMap({ $0 }) {
             try FileManager.default.moveItem(at: file, to: files.folder.appendingPathComponent(file.lastPathComponent))
         }
         let text = DisguisedHLS.playlist(
-            durations: range.map { segments[$0].duration }, fileNames: files.segments.map(\.lastPathComponent)
+            durations: range.map { segments[$0].duration }, fileNames: files.segments.map(\.lastPathComponent),
+            mapFileName: files.initFile?.lastPathComponent
         )
         try text.write(to: files.playlist, atomically: true, encoding: .utf8)
         return files.playlist
     }
 
+    /// Downloads `pieces` (`DisguisedHLS.download`), at most the job's `pieceLimit` at a time. Each
+    /// child only downloads, off the actor; the actor handles each result in turn:
+    /// - success: the finished pieces fill the first 90% of the segment's progress;
+    /// - 429/503 (`DisguisedHLS.Refused`) with retries left (`maxPieceRetries`) and a wait
+    ///   (`Retry-After`, else `defaultRetryAfter`) of at most `maxRetryAfter`: the piece is queued
+    ///   again first, and no piece starts before the wait is over. The limit is halved (at least 1)
+    ///   once per burst: only for a child launched at the current limit;
+    /// - 403 from a child launched while several could run: the limit drops to 1 for the rest of
+    ///   the job (today's sequential behaviour) and the piece is queued again first, without using
+    ///   a retry. A 403 from a child that ran alone, or a 410, fails as `JobError.linkExpired`;
+    /// - anything else (also a 429/503 out of retries) cancels the other children and throws.
+    /// The task group awaits every child before it returns, also on a throw, so no child still
+    /// writes once the caller removes the files. A cancel reaches the children through the job's task.
+    private func downloadPieces(
+        id: String, pieces: [DisguisedHLS.Piece], headers: [String: String], source: URL, tracker: ProgressTracker
+    ) async throws {
+        try checkCancelled(id)
+        guard !pieces.isEmpty else { return }
+        var queue = Array(pieces.indices)
+        var retries = [Int](repeating: 0, count: pieces.count)
+        var finished = 0
+        // No piece starts before this deadline (the latest `Retry-After` wins).
+        var notBefore: ContinuousClock.Instant?
+        try await withThrowingTaskGroup(of: (index: Int, limit: Int, result: Result<Void, Error>).self) { group in
+            var running = 0
+            while running > 0 || !queue.isEmpty {
+                while running < jobs[id]?.pieceLimit ?? 1, !queue.isEmpty {
+                    if let deadline = notBefore {
+                        notBefore = nil
+                        try await Task.sleep(until: deadline)
+                        try checkCancelled(id)
+                        continue
+                    }
+                    let index = queue.removeFirst()
+                    let piece = pieces[index]
+                    // The limit at launch: a child launched at 1 ran alone.
+                    let limit = jobs[id]?.pieceLimit ?? 1
+                    group.addTask {
+                        do {
+                            try await DisguisedHLS.download(
+                                piece.segment, number: piece.number, headers: headers, source: source,
+                                to: piece.file, stripPrefix: piece.stripPrefix
+                            )
+                            return (index, limit, .success(()))
+                        } catch {
+                            return (index, limit, .failure(error))
+                        }
+                    }
+                    running += 1
+                }
+                guard let (index, limit, result) = try await group.next() else { break }
+                running -= 1
+                try checkCancelled(id)
+                let number = pieces[index].number
+                switch result {
+                case .success:
+                    finished += 1
+                    tracker.progress(0.9 * Double(finished) / Double(pieces.count))
+                case let .failure(refused as DisguisedHLS.Refused) where refused.status == 403:
+                    guard limit > 1 else { throw JobError.linkExpired }
+                    jobs[id]?.pieceLimit = 1
+                    queue.insert(index, at: 0)
+                case let .failure(refused as DisguisedHLS.Refused):
+                    let wait = refused.retryAfter ?? Self.defaultRetryAfter
+                    guard retries[index] < Self.maxPieceRetries, wait <= Self.maxRetryAfter else {
+                        throw JobError.processFailed("Segment \(number) request failed with HTTP \(refused.status)")
+                    }
+                    retries[index] += 1
+                    if limit == jobs[id]?.pieceLimit ?? 1 {
+                        jobs[id]?.pieceLimit = max(1, limit / 2)
+                    }
+                    let deadline = ContinuousClock.now + .seconds(wait)
+                    notBefore = max(notBefore ?? deadline, deadline)
+                    queue.insert(index, at: 0)
+                case let .failure(error):
+                    group.cancelAll()
+                    throw error
+                }
+            }
+        }
+    }
+
     /// One yt-dlp run for all segments; it writes `<tmp>/part-NNN.<ext>` in segment order.
     /// `siteOnly` turns the generic extractor off (see `CommandBuilder.ytDlp`).
+    /// With a `titleLine`, yt-dlp also prints the video's title, and the first one lands there.
     private func downloadPage(
         id: String, url: URL, request: JobRequest, ffmpeg: URL, tempDirectory: URL, tracker: ProgressTracker,
-        siteOnly: Bool = false
+        siteOnly: Bool = false, titleLine: FirstLine? = nil
     ) async throws -> [URL] {
         let ytDlp = try binary(.ytDlp)
         let segments = request.segments
         let arguments = CommandBuilder.ytDlp(
             url: url, segments: segments, precision: request.precision, ffmpeg: ffmpeg, tempDirectory: tempDirectory,
-            siteOnly: siteOnly, maxHeight: request.maxHeight
+            siteOnly: siteOnly, maxHeight: request.maxHeight, printTitle: titleLine != nil
         )
         tracker.begin(index: 0, message: "Downloading segment 1 of \(segments.count)")
-        try await runProcess(.ytDlp, executable: ytDlp, arguments: arguments, jobID: id) { _, line in
-            if line.contains("Destination:"), let number = Self.partNumber(in: line),
+        try await runProcess(.ytDlp, executable: ytDlp, arguments: arguments, jobID: id) { stream, line in
+            if let titleLine, stream == .stdout, let title = CommandBuilder.printedTitle(line) {
+                titleLine.offer(title)
+            } else if line.contains("Destination:"), let number = Self.partNumber(in: line),
                (1...segments.count).contains(number) {
                 if number - 1 != tracker.index {
                     tracker.begin(index: number - 1, message: "Downloading segment \(number) of \(segments.count)")
@@ -882,7 +1217,7 @@ private final class ProgressTracker: @unchecked Sendable {
 
 // MARK: - Process I/O
 
-/// The first non-blank line a process printed, shared with the pipe reader threads.
+/// The first non-blank line offered, shared with the pipe reader threads.
 private final class FirstLine: @unchecked Sendable {
     private let lock = NSLock()
     private var line: String?

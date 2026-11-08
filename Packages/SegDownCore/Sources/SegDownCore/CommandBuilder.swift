@@ -25,11 +25,18 @@ public enum CommandBuilder {
     /// ffmpeg arguments that download one segment into `output` (`<tmp>/part-NNN.mp4`).
     ///
     /// - `input`: the media URL (for HLS the chosen variant playlist, never the master), or a file
-    ///   URL of a playlist the host wrote itself (`DisguisedHLS`), which gets only
-    ///   `-protocol_whitelist file -f hls`: no headers, cookies or `-extension_picky`.
-    /// - `kind`: HLS inputs get `-f hls -extension_picky 0`, and in fast mode `-copypriorss 0` (see below).
-    /// - `audio`: the separate HLS audio rendition, if any. It is a second input with its own
-    ///   whitelist/headers (ffmpeg input options apply only to the next `-i`) and the same `-ss`.
+    ///   URL the host wrote itself: a playlist (`DisguisedHLS`) or a joined DASH track, which gets
+    ///   only `-protocol_whitelist file` and a forced demuxer (see `inputArguments`): no headers,
+    ///   cookies or `-extension_picky`.
+    /// - `kind`: HLS inputs get `-f hls -extension_picky 0 -seg_max_retry 2`, and in fast mode
+    ///   `-copypriorss 0` (see below). Other http(s) inputs get reconnect flags (see below).
+    ///   A `file` input is always re-encoded with the `.precise` arguments, also in fast mode:
+    ///   VP8/Vorbis/Theora cannot be stream-copied into mp4 (tested with ffmpeg 9.0.2).
+    /// - `audio`: the separate HLS audio rendition or DASH audio track, if any. It is a second input
+    ///   with its own whitelist/headers (ffmpeg input options apply only to the next `-i`).
+    /// - `audioShift`: where the `audio` input starts minus where `input` starts, in source time
+    ///   (two staged DASH windows rarely start at the same time). `segment` is relative to `input`,
+    ///   so the audio `-ss` is `segment.start - audioShift`, clamped at 0; 0 gives both the same `-ss`.
     /// - `headers`: validated, canonically cased headers (`Referer`, `Origin`, `User-Agent`, `Cookie`).
     /// - `source`: the job's media URL, the one the headers were captured for. `Cookie` is sent
     ///   only to inputs on `source`'s origin (see `cookieArguments`).
@@ -38,8 +45,10 @@ public enum CommandBuilder {
     /// The HLS demuxer seeks only to the start of the media segment holding `-ss`, so with
     /// `-c copy` video would start up to a whole segment early while a separate audio rendition
     /// starts at `-ss`. `-copypriorss 0` drops packets before `-ss`: video then starts at the
-    /// next keyframe, within one GOP. Not used for mp4, whose demuxer already seeks every stream
-    /// to the keyframe before `-ss`.
+    /// next keyframe, within one GOP. DASH gets it too: its video and audio are always two inputs,
+    /// and with `-c copy` the video input would start at the keyframe before `-ss` while the audio
+    /// input starts at `-ss`. Not used for mp4, whose demuxer already seeks every stream (of its one
+    /// input) to the keyframe before `-ss`.
     ///
     /// ffmpeg 7.1+ rejects HLS segments whose extension is not a known media one (some sites serve
     /// MPEG-TS as `file-0000.png`); `-extension_picky 0` lets them through. It is safe because a
@@ -48,6 +57,15 @@ public enum CommandBuilder {
     /// host wrote itself, whose segment names are its own (and which keeps `-extension_picky` on).
     /// `-f hls` because ffmpeg does not detect HLS from a playlist that has
     /// neither an `.m3u8` name nor an HLS Content-Type (some sites serve it as `master.html`).
+    ///
+    /// `-seg_max_retry 2` fetches a segment that failed to open up to twice more instead of skipping
+    /// it (a silent jump in the clip). ffmpeg 9.0.2 does not forward `-reconnect*` to HLS segment
+    /// requests (checked with a segment cut mid-body: it was never requested again, with or without
+    /// them), so HLS inputs do not get them. Every other http(s) input (mp4, a single-file DASH track)
+    /// gets `-multiple_requests 1` (keep-alive across the seeks of input `-ss`, moov at the end then
+    /// back) and `-reconnect 1 -reconnect_on_network_error 1 -reconnect_delay_max 10` (a dropped
+    /// connection resumes with a Range instead of cutting the clip short). Never on a `file` input:
+    /// the `file` protocol has no such options and ffmpeg exits on an unused input option.
     public static func ffmpegSegment(
         input: URL,
         kind: MediaKind,
@@ -56,7 +74,8 @@ public enum CommandBuilder {
         source: URL,
         segment: Segment,
         precision: Precision,
-        output: URL
+        output: URL,
+        audioShift: Double = 0
     ) -> [String] {
         let startMs = milliseconds(segment.start)
         let durationMs = max(0, milliseconds(segment.end) - startMs)
@@ -65,16 +84,17 @@ public enum CommandBuilder {
         var args = ["-hide_banner", "-nostdin", "-y"]
         args += inputArguments(url: input, kind: kind, source: source, start: start, headers: headers)
         if let audio {
-            args += inputArguments(url: audio, kind: kind, source: source, start: start, headers: headers)
+            let audioStart = format(milliseconds: milliseconds(segment.start - audioShift))
+            args += inputArguments(url: audio, kind: kind, source: source, start: audioStart, headers: headers)
             args += ["-map", "0:v:0", "-map", "1:a:0"]
         }
         args += ["-t", format(milliseconds: durationMs)]
-        switch precision {
+        switch kind == .file ? .precise : precision {
         case .precise:
             args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-movflags", "+faststart"]
         case .fast:
             args += ["-c", "copy"]
-            if kind == .hls {
+            if kind == .hls || kind == .dash {
                 args += ["-copypriorss", "0"]
             }
             args += ["-avoid_negative_ts", "make_zero"]
@@ -128,6 +148,17 @@ public enum CommandBuilder {
     /// `maxHeight` sorts formats by `-S height:<h>`, so yt-dlp picks the largest height no taller
     /// than `h`, or the smallest one when none is. Not `res`: yt-dlp reads it as the smaller of
     /// height and width, which would cap a portrait video's width instead.
+    ///
+    /// yt-dlp downloads every `--download-sections` job with its ffmpeg downloader, and
+    /// `--downloader-args "ffmpeg_i:…"` puts the reconnect flags right before each of its `-i`
+    /// (checked with yt-dlp 2026.08.19), so a dropped connection resumes there too. An HLS format
+    /// gets them on its playlist request only.
+    ///
+    /// `printTitle` makes the download print the video's title on stdout as a `titleMarker` line
+    /// (see `printedTitle`), once per section before its `Destination:` line, so the page is read
+    /// only once. `--print` implies `--quiet`, which would hide the `Destination:` and progress
+    /// lines; `--no-quiet` keeps them. `before_dl` does not imply `--simulate` (checked with
+    /// yt-dlp 2026.08.19: the section was downloaded).
     public static func ytDlp(
         url: URL,
         segments: [Segment],
@@ -135,7 +166,8 @@ public enum CommandBuilder {
         ffmpeg: URL,
         tempDirectory: URL,
         siteOnly: Bool = false,
-        maxHeight: Int? = nil
+        maxHeight: Int? = nil,
+        printTitle: Bool = false
     ) -> [String] {
         var args = ["--ignore-config"]
         if siteOnly {
@@ -158,23 +190,29 @@ public enum CommandBuilder {
         if precision == .precise {
             args.append("--force-keyframes-at-cuts")
         }
+        args += ["--downloader-args", "ffmpeg_i:-reconnect 1 -reconnect_on_network_error 1 -reconnect_delay_max 10"]
+        if printTitle {
+            args += ["--print", "before_dl:\(titleMarker)%(extractor_key)s:%(title)s", "--no-quiet"]
+        }
         args += ["-P", tempDirectory.path, "-o", "part-%(autonumber)03d.%(ext)s"]
         args += ["--", url.absoluteString]
         return args
     }
 
-    /// yt-dlp arguments that print only the title of the page `url`, without downloading.
-    /// Site extractors only: the generic one would return the same page `<title>` as the tab.
-    public static func ytDlpTitle(url: URL) -> [String] {
-        [
-            "--ignore-config", "--use-extractors", "default,-generic",
-            "--skip-download", "--no-playlist", "--print", "title",
-            "--", url.absoluteString,
-        ]
+    /// Starts the title line `ytDlp(…, printTitle: true)` prints: `segdown-title:<extractor key>:<title>`.
+    static let titleMarker = "segdown-title:"
+
+    /// The title in a `titleMarker` line, else nil. Nil for the `Generic` extractor too: its title is
+    /// the page's own `<title>`, the one the tab already gave.
+    static func printedTitle(_ line: String) -> String? {
+        guard line.hasPrefix(titleMarker) else { return nil }
+        let rest = line.dropFirst(titleMarker.count)
+        guard let colon = rest.firstIndex(of: ":"), rest[..<colon] != "Generic" else { return nil }
+        return String(rest[rest.index(after: colon)...])
     }
 
     /// yt-dlp arguments that print the formats of the page `url` as one JSON array line
-    /// (height, vcodec and protocol of each), without downloading. Site extractors only, like `ytDlpTitle`.
+    /// (height, vcodec and protocol of each), without downloading. Site extractors only.
     public static func ytDlpFormats(url: URL) -> [String] {
         [
             "--ignore-config", "--use-extractors", "default,-generic",
@@ -185,17 +223,27 @@ public enum CommandBuilder {
 
     // MARK: - Helpers
 
-    /// Per-input options followed by `-ss S -i URL`. A file URL is a host-written HLS playlist:
-    /// headers and cookies would not apply to it, and its segments are local files too.
+    /// Per-input options followed by `-ss S -i URL`. A file URL is a file the host wrote itself: an
+    /// HLS playlist (its segments are local files too) or a joined DASH track. Headers and cookies
+    /// would not apply to it. Its demuxer is always forced, never detected from its content: the
+    /// staged bytes come from the CDN unchecked, and `file` is whitelisted. HLS gets `hls`; DASH gets
+    /// `matroska` for the `.webm` name the host chose, else `mov` (`DASHTrack.ext` is `mp4` or
+    /// `webm`); any other kind `hls` (no such input is written).
     private static func inputArguments(
         url: URL, kind: MediaKind, source: URL, start: String, headers: [String: String]
     ) -> [String] {
         if url.isFileURL {
-            return ["-protocol_whitelist", "file", "-f", "hls", "-ss", start, "-i", url.path]
+            let demuxer = kind == .dash ? (url.pathExtension.lowercased() == "webm" ? "matroska" : "mov") : "hls"
+            return ["-protocol_whitelist", "file", "-f", demuxer, "-ss", start, "-i", url.path]
         }
         var args = ["-protocol_whitelist", protocolWhitelist]
         if kind == .hls {
-            args += ["-f", "hls", "-extension_picky", "0"]
+            args += ["-f", "hls", "-extension_picky", "0", "-seg_max_retry", "2"]
+        } else {
+            args += [
+                "-multiple_requests", "1",
+                "-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "10",
+            ]
         }
         if let userAgent = headers["User-Agent"] {
             args += ["-user_agent", userAgent]

@@ -12,9 +12,14 @@ public struct Segment: Codable, Sendable, Hashable {
     }
 }
 
+/// `mp4`: a progressive mp4/mov file. `hls`: an HLS playlist. `dash`: a DASH manifest (MPD),
+/// read by the app itself (`DASHManifest`). `file`: a progressive file other than mp4/mov (WebM,
+/// Matroska, Ogg, other `video/*`) whose codecs may not fit in mp4, so it is always re-encoded.
 public enum MediaKind: String, Codable, Sendable, Hashable {
     case mp4
     case hls
+    case dash
+    case file
 }
 
 /// Where the media comes from.
@@ -28,35 +33,50 @@ public enum MediaKind: String, Codable, Sendable, Hashable {
 ///
 ///     {"type": "page", "url": "https://www.youtube.com/watch?v=…"}
 ///
+///     {"type": "playlist", "text": "#EXTM3U…", "baseURL": "https://…/chunk-1.ts",
+///      "headers": {"Referer": "https://…"}}           // optional, defaults to {} (protocol 5)
+///
+/// A `playlist` is HLS playlist text the app must not fetch again. `baseURL` is the URL it came
+/// from: for a `blob:` playlist read by the player probe, the frame's last chunk URL, else the URL
+/// of its newest capture, else the frame URL; for a playlist the page fetched again, the
+/// playlist's own http(s) URL. Relative URIs resolve against `baseURL`, and Cookie is scoped to
+/// `baseURL`'s origin.
+///
 /// URLs are plain strings. Unknown keys are ignored; an unknown `type` fails decoding.
 public enum Source: Sendable, Hashable {
     case media(url: URL, kind: MediaKind, headers: [String: String], variantURL: URL?, audioURL: URL?)
     case page(url: URL)
+    case playlist(text: String, baseURL: URL, headers: [String: String])
 }
 
 extension Source: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, url, kind, headers, variantURL, audioURL
+        case type, url, kind, headers, variantURL, audioURL, text, baseURL
     }
 
     private enum SourceType: String, Codable {
-        case media, page
+        case media, page, playlist
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let url = try Self.decodeURL(c, .url)
         switch try c.decode(SourceType.self, forKey: .type) {
         case .media:
             self = .media(
-                url: url,
+                url: try Self.decodeURL(c, .url),
                 kind: try c.decode(MediaKind.self, forKey: .kind),
                 headers: try c.decodeIfPresent([String: String].self, forKey: .headers) ?? [:],
                 variantURL: try Self.decodeURLIfPresent(c, .variantURL),
                 audioURL: try Self.decodeURLIfPresent(c, .audioURL)
             )
         case .page:
-            self = .page(url: url)
+            self = .page(url: try Self.decodeURL(c, .url))
+        case .playlist:
+            self = .playlist(
+                text: try c.decode(String.self, forKey: .text),
+                baseURL: try Self.decodeURL(c, .baseURL),
+                headers: try c.decodeIfPresent([String: String].self, forKey: .headers) ?? [:]
+            )
         }
     }
 
@@ -73,6 +93,11 @@ extension Source: Codable {
         case let .page(url):
             try c.encode(SourceType.page, forKey: .type)
             try c.encode(url.absoluteString, forKey: .url)
+        case let .playlist(text, baseURL, headers):
+            try c.encode(SourceType.playlist, forKey: .type)
+            try c.encode(text, forKey: .text)
+            try c.encode(baseURL.absoluteString, forKey: .baseURL)
+            try c.encode(headers, forKey: .headers)
         }
     }
 
@@ -102,10 +127,20 @@ public enum Precision: String, Codable, Sendable, Hashable {
     case fast
 }
 
+/// Who downloads what the extension finds: `segdown`, the app downloads (default); `browser`, the
+/// extension saves files with the browser and never contacts the app (a signal for the extension
+/// only: the app still runs any job it is sent); `otherApp`, the extension asks the app to open the
+/// link in the app the user chose.
+public enum DownloadWith: String, Codable, Sendable, Hashable {
+    case segdown
+    case browser
+    case otherApp
+}
+
 /// JSON: `{"source": {…}, "title": "…", "segments": [{"start": 10, "end": 20}], "mode": "separate", "precision": "precise"}`
 ///
 /// Optional keys (protocol 2; absent from older extensions, omitted when `nil`):
-/// `"incognito": true`, `"fallback": {…Source…}` (media to try when the page source fails) and
+/// `"incognito": true`, `"fallback": {…Source…}` (media or playlist to try when the page source fails) and
 /// `"mediaDuration": 3600` (seconds, the whole video's duration, for the size estimate).
 /// `"pageURL": "https://…"` (the tab's page, which the window's card opens) is optional too; older apps ignore it.
 /// `"maxHeight": 1080` (protocol 3, page source only: the tallest video yt-dlp may pick).

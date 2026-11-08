@@ -2,8 +2,9 @@
 // Sections: config, media capture (3.2), hub + frame routing (3.3, auto-pick 3.4,
 // overlay toggle 3.5, marking 3.6, hub-owned segments and their persistence,
 // selected-frame gating, source correlation 4.1, HLS variant picker 4.2, page
-// resolution picker, send the job 4.3, progress + cancel 4.4, app settings,
-// ignored sites, incognito and the overlay view 5.2, toolbar menu).
+// resolution picker, player introspection, send the job 4.3, progress + cancel
+// 4.4, app settings, ignored sites, incognito and the overlay view 5.2, toolbar
+// menu).
 
 "use strict";
 
@@ -26,6 +27,8 @@ const MAX_ENTRIES_PER_TAB = 50;
 const MAX_ENTRIES_PER_FRAME = 20;
 const PENDING_TTL_MS = 60 * 1000;
 const MAX_PENDING = 500;
+// After a page change, chunks within this window still belong to the previous video (in flight).
+const STALE_GRACE_MS = 1000;
 // Request types that never carry media we can download.
 const IGNORED_TYPES = new Set(["script", "stylesheet", "image", "font"]);
 
@@ -34,14 +37,24 @@ const HLS_TYPES = new Set([
   "application/x-mpegurl",
   "audio/mpegurl",
   "audio/x-mpegurl",
+  "video/x-mpegurl",
+  "video/mpegurl",
+  "application/octet-stream-m3u8",
 ]);
-const MP4_TYPES = new Set(["video/mp4"]);
+const DASH_TYPES = new Set(["application/dash+xml", "video/vnd.mpeg.dash.mpd"]);
+const MP4_TYPES = new Set(["video/mp4", "video/quicktime", "video/x-m4v"]);
+// Progressive files other than mp4/mov (kind "file"): their codecs may not fit in mp4.
+const FILE_TYPES = new Set(["video/webm", "video/x-matroska", "video/ogg", "video/3gpp"]);
+const MP4_EXTS = [".mp4", ".mov", ".m4v"];
+const FILE_EXTS = [".webm", ".mkv", ".ogv", ".3gp"];
+// A "file" whose whole size is known and under this is a hover preview or a UI loop.
+const MIN_FILE_BYTES = 32 * 1024;
 const CHUNK_TYPES = new Set(["video/mp2t", "video/iso.segment"]);
 // A small fetch/XHR response with one of these types may be a disguised playlist (e.g.
 // master.html served as text/html): captured as kind "maybe" until the app's probe tells.
 const MAYBE_HLS_TYPES = new Set(["text/html", "text/plain", "application/octet-stream", ""]);
 const MAX_MAYBE_HLS_BYTES = 256 * 1024; // larger ones are segments, not playlists
-// A numbered .mp4/.m4v/.m4a whose whole file is smaller than this is an fMP4 piece, not a video.
+// A numbered progressive file (.mp4, .webm, ...) whose whole file is smaller than this is a piece, not a video.
 const MAX_PIECE_BYTES = 64 * 1024;
 // Query params that pick a byte range of the same file (fbcdn bytestart/byteend): stripped so
 // ranged fetches of one video collapse into one entry.
@@ -51,8 +64,16 @@ const RANGE_PARAMS = new Set(["bytestart", "byteend", "range", "rbuf"]);
 // Media capture: pending request headers (memory only, short-lived)
 // ---------------------------------------------------------------------------
 
-// requestId -> {tabId, frameId, url, headers, ts}. Map keeps insertion order, oldest first.
+// requestId -> {tabId, frameId, url, firstUrl, headers, ts, refetch?}. firstUrl: the URL of
+// the chain's first hop (redirects re-fire onSendHeaders with the same requestId). refetch:
+// the hub's own page re-fetch (refetching below), never captured. Map keeps insertion
+// order, oldest first.
 const pending = new Map();
+
+// The hub's page re-fetches in flight (refetchPlaylist): refetchKey -> expiry ts. Their
+// requests neither create nor move a capture, nor bump act:<tabId>.
+const refetching = new Map();
+const refetchKey = (tabId, frameId, url) => `${tabId} ${frameId} ${url}`;
 
 function prunePending(now) {
   for (const [id, p] of pending) {
@@ -121,27 +142,59 @@ function totalSize(responseHeaders, status) {
   return m ? Number(m[1]) : null;
 }
 
-// Returns "hls" | "mp4" | "chunk" | "maybe" | null. A .ts/.m4s path wins over the Content-Type,
-// because fMP4 segments are often served as video/mp4. "maybe": a fetch/XHR response that
-// could be a playlist under another name (a GET with a body: MAYBE_HLS_TYPES, at most
-// MAX_MAYBE_HLS_BYTES; never a 204 or an empty body). A would-be mp4 (video/mp4 or a .mp4
-// path) is a chunk too when it is an init segment (init.mp4, seg_init-1.m4v, ...) or a numbered
-// piece (seg-12.mp4) whose total (whole file, from Content-Range for a 206) is under
-// MAX_PIECE_BYTES; never a Range's own length, so a big progressive mp4 stays an mp4.
-function classify(pathname, ctype, type, length, method, status, total) {
-  const path = pathname.toLowerCase();
+// The lowercased extension (".webm") of the Content-Disposition filename, else "".
+function dispositionExt(responseHeaders) {
+  const h = (responseHeaders || []).find((x) => String(x.name).toLowerCase() === "content-disposition");
+  const m = h && typeof h.value === "string" ? /filename\*?=(?:[\w-]+'[^']*')?"?([^";]*)"?/i.exec(h.value) : null;
+  const ext = m ? /\.[a-z0-9]{2,5}$/.exec(m[1].trim().toLowerCase()) : null;
+  return ext ? ext[0] : "";
+}
+
+// Returns "hls" | "dash" | "mp4" | "file" | "chunk" | "maybe" | null ("dash": an MPD
+// manifest; "file": a progressive file other than mp4/mov, e.g. WebM). The path first
+// drops one trailing numeric suffix after a real extension (clip.mp4.3 -> clip.mp4).
+// First match wins:
+//   1. a .m3u8 path -> hls, a .mpd path -> dash, whatever the type (the path names a
+//      playlist or manifest even when it is served as video/mp2t or video/mp4);
+//   2. a .ts/.m4s path or a CHUNK_TYPES type -> chunk (fMP4 segments are often served
+//      as video/mp4);
+//   3. a would-be progressive file (an mp4 or file type or extension, any other video/*)
+//      -> chunk when it is an init segment (init.mp4, seg_init-1.webm, ...) or a numbered
+//      piece (seg-12.mp4) whose total (whole file, from Content-Range for a 206) is under
+//      MAX_PIECE_BYTES; never a Range's own length, so a big progressive file stays one;
+//   4. HLS_TYPES -> hls; 5. DASH_TYPES -> dash;
+//   6. an mp4 type or extension -> mp4, with no size floor (a short real clip must stay);
+//   7. a file type or extension, or any other video/* -> file, except when the total is
+//      known and under MIN_FILE_BYTES (hover previews, UI loops) -> null;
+//   8. application/octet-stream whose Content-Disposition filename (dispExt) has an mp4
+//      or file extension -> that kind (the floor of 7 applies to file);
+//   9. "maybe": a fetch/XHR response that could be a playlist under another name (a GET
+//      with a body: MAYBE_HLS_TYPES, at most MAX_MAYBE_HLS_BYTES; never a 204 or an
+//      empty body).
+// (addEntry also turns a numbered .webm of a frame that has a dash capture into a chunk.)
+function classify(pathname, ctype, type, length, method, status, total, dispExt = "") {
+  const path = pathname.toLowerCase().replace(/(\.[a-z0-9]{2,5})\.\d{1,3}$/, "$1");
+  const hasExt = (exts) => exts.some((x) => path.endsWith(x));
+  if (path.endsWith(".m3u8")) return "hls";
+  if (path.endsWith(".mpd")) return "dash";
   if (path.endsWith(".ts") || path.endsWith(".m4s") || CHUNK_TYPES.has(ctype)) return "chunk";
+  const isMp4 = MP4_TYPES.has(ctype) || hasExt(MP4_EXTS);
+  const otherVideo = ctype.startsWith("video/") && !HLS_TYPES.has(ctype) && !DASH_TYPES.has(ctype);
+  const isFile = FILE_TYPES.has(ctype) || hasExt(FILE_EXTS) || otherVideo;
   if (
-    (MP4_TYPES.has(ctype) || path.endsWith(".mp4")) &&
-    (/(?:^|[-_.\/])init(?:[-_.][\w-]*)?\.(?:mp4|m4v|m4a)$/i.test(path) ||
-      (total !== null && total < MAX_PIECE_BYTES && /\d\.(?:mp4|m4v|m4a)$/i.test(path)))
+    (isMp4 || isFile) &&
+    (/(?:^|[-_.\/])init(?:[-_.][\w-]*)?\.(?:mp4|m4v|m4a|mov|webm|mkv|ogv|3gp)$/i.test(path) ||
+      (total !== null && total < MAX_PIECE_BYTES && /\d\.(?:mp4|m4v|m4a|mov|webm|mkv|ogv|3gp)$/i.test(path)))
   ) {
     return "chunk";
   }
   if (HLS_TYPES.has(ctype)) return "hls";
-  if (MP4_TYPES.has(ctype)) return "mp4";
-  if (path.endsWith(".m3u8")) return "hls";
-  if (path.endsWith(".mp4")) return "mp4";
+  if (DASH_TYPES.has(ctype)) return "dash";
+  if (isMp4) return "mp4";
+  const fileKind = total !== null && total < MIN_FILE_BYTES ? null : "file";
+  if (isFile) return fileKind;
+  if (ctype === "application/octet-stream" && MP4_EXTS.includes(dispExt)) return "mp4";
+  if (ctype === "application/octet-stream" && FILE_EXTS.includes(dispExt)) return fileKind;
   if (
     type === "xmlhttprequest" &&
     method === "GET" &&
@@ -156,17 +209,24 @@ function classify(pathname, ctype, type, length, method, status, total) {
 
 // ---------------------------------------------------------------------------
 // Media capture: per-tab store in chrome.storage.session
-// Keys: cap:<tabId> -> [{url, frameId, kind, isMaster?, headers, ts}] (oldest first)
-//       act:<tabId> -> {<frameId>: {lastChunkUrl, count, ts}}
+// Keys: cap:<tabId> -> [{url, alias?, frameId, kind, isMaster?, headers, ts, sw?, staleAt?}] (oldest
+//                      first; kind "hls" | "dash" | "mp4" | "file" | "maybe"; alias: the pre-redirect
+//                      URL of a redirected request, kept when a later capture of the same url
+//                      carries none; sw: requested by the page's service worker (tabId -1), bound
+//                      to the one tab on its origin as frame 0; staleAt: the time of the
+//                      same-document page change it predates, dropped when it is captured again)
+//       act:<tabId> -> {<frameId>: {lastChunkUrl, headers, count, ts}} (headers: the allowlisted
+//                      ones the browser sent for that chunk; a player probe's playlist base)
 //       top:<tabId> -> the top frame's http(s) URL, from webNavigation (never from a content script)
 //       hub:<tabId>, cand:<tabId>, segs:<tabId>, page:<tabId>, src:<tabId>, probe:<tabId>, var:<tabId>,
-//       res:<tabId>, jobs:<tabId> and inc:<tabId> belong to the hub (see the hub section).
+//       res:<tabId>, intro:<tabId>, jobs:<tabId> and inc:<tabId> belong to the hub (see the hub section).
 // isMaster comes from the app's probe (4.2): set on every entry with the probed URL,
 // and on entries captured later from the probe:<tabId> cache. A "maybe" entry becomes
 // "hls" once the probe parses it as a playlist (also from that cache) and is removed
 // when the app says it is not one; until then only the probe run reads it.
-// At most MAX_ENTRIES_PER_FRAME entries per frame (that frame's newest maybe but the
-// one just captured goes first, then its oldest mp4, then its oldest entry) and
+// At most MAX_ENTRIES_PER_FRAME entries per frame (that frame's oldest stale entry goes
+// first, then its newest maybe but the one just captured, then its oldest mp4 or file,
+// then its oldest entry) and
 // MAX_ENTRIES_PER_TAB per tab (taken from the frame with the most entries, same order).
 // Never call storage.session.setAccessLevel: Cookie values live here. (storage.local,
 // the saved segments and the app's ui switches, is owned by the hub; see the end
@@ -186,6 +246,7 @@ const varKey = (tabId) => `var:${tabId}`;
 const resKey = (tabId) => `res:${tabId}`;
 const jobsKey = (tabId) => `jobs:${tabId}`;
 const incKey = (tabId) => `inc:${tabId}`;
+const introKey = (tabId) => `intro:${tabId}`;
 
 // Serialises read-modify-write per tab. A failed task never blocks the next one.
 const tabQueues = new Map();
@@ -208,6 +269,11 @@ async function addEntry(tabId, entry) {
   const key = capKey(tabId);
   const got = await chrome.storage.session.get({ [key]: [], [probeKey(tabId)]: {} });
   const entries = got[key];
+  // A numbered .webm of a frame that plays DASH is one of its segments, not a file.
+  const piece = entry.kind === "file" && /\d\.webm$/.test(new URL(entry.url).pathname.toLowerCase());
+  if (piece && entries.some((e) => e.frameId === entry.frameId && e.kind === "dash")) {
+    return bumpActive(tabId, entry.frameId, entry.url, entry.headers, entry.ts);
+  }
   const probed = got[probeKey(tabId)][entry.url];
   // A refetch of a known non-playlist (a polled URL) is not probed again.
   if (entry.kind === "maybe" && isObject(probed) && isObject(probed.error) && probed.error.code === "invalid") return;
@@ -217,6 +283,10 @@ async function addEntry(tabId, entry) {
   }
   const index = entries.findIndex((e) => e.url === entry.url);
   const isNew = index < 0;
+  // Later Range requests (moov at the end, seeks) go straight to the final URL: keep the alias.
+  if (!isNew && entry.alias === undefined && typeof entries[index].alias === "string") {
+    entry.alias = entries[index].alias;
+  }
   // Also from the stored entry: its probe record may have left the cache (MAX_PROBE_CACHE).
   if (!isNew && entry.kind === "maybe" && entries[index].kind === "hls") {
     Object.assign(entry, { kind: "hls", isMaster: entries[index].isMaster }); // a probed playlist's refetch
@@ -233,19 +303,22 @@ async function addEntry(tabId, entry) {
   await chrome.storage.session.set({ [key]: entries });
   if (DEBUG && isNew) {
     console.debug(
-      `[SegDown] capture tab=${tabId} frame=${entry.frameId} kind=${entry.kind} headers=[${Object.keys(entry.headers).join(", ")}]`
+      `[SegDown] capture tab=${tabId} frame=${entry.frameId} kind=${entry.kind}${entry.sw ? " sw" : ""} headers=[${Object.keys(entry.headers).join(", ")}]`
     );
   }
 }
 
-// Removes one entry of frameId: its newest maybe other than `added` (the entry just
+// Removes one entry of frameId: its oldest stale entry (staleAt: from a previous page
+// of a single-page app), else its newest maybe other than `added` (the entry just
 // stored), so a frame keeps its earliest maybes (a player fetches its disguised
 // playlists first, and a refetch keeps its place) and a page's other requests never
-// evict media, then its oldest mp4, so segment churn never evicts a playlist, else
+// evict media, then its oldest mp4 or file, so segment churn never evicts a playlist
+// or manifest, else
 // its oldest entry.
 function dropOldest(entries, frameId, added) {
-  let i = entries.findLastIndex((e) => e.frameId === frameId && e.kind === "maybe" && e !== added);
-  if (i < 0) i = entries.findIndex((e) => e.frameId === frameId && e.kind === "mp4");
+  let i = entries.findIndex((e) => e.frameId === frameId && e.staleAt !== undefined && e !== added);
+  if (i < 0) i = entries.findLastIndex((e) => e.frameId === frameId && e.kind === "maybe" && e !== added);
+  if (i < 0) i = entries.findIndex((e) => e.frameId === frameId && (e.kind === "mp4" || e.kind === "file"));
   if (i < 0) i = entries.findIndex((e) => e.frameId === frameId);
   entries.splice(i, 1);
 }
@@ -259,11 +332,11 @@ function largestFrame(entries) {
   return best;
 }
 
-async function bumpActive(tabId, frameId, url, ts) {
+async function bumpActive(tabId, frameId, url, headers, ts) {
   const key = actKey(tabId);
   const active = (await chrome.storage.session.get({ [key]: {} }))[key];
   const prev = active[frameId];
-  active[frameId] = { lastChunkUrl: url, count: (prev ? prev.count : 0) + 1, ts };
+  active[frameId] = { lastChunkUrl: url, headers, count: (prev ? prev.count : 0) + 1, ts };
   await chrome.storage.session.set({ [key]: active });
 }
 
@@ -271,8 +344,18 @@ async function bumpActive(tabId, frameId, url, ts) {
 const tabGens = new Map();
 const tabGen = (tabId) => tabGens.get(tabId) || 0;
 
+// Player introspection (hub section): bumped by clearTab and onPageChanged, so a
+// player probe in flight writes nothing into the next page. The tab's manifest
+// text from the last probe stays in memory only (storage.session quota):
+// tabId -> {ts (= intro:<tabId>.ts), text}, at most MAX_INTRO_MANIFESTS tabs.
+const introGens = new Map();
+const introGen = (tabId) => introGens.get(tabId) || 0;
+const introManifests = new Map();
+
 function clearTab(tabId) {
   tabGens.set(tabId, tabGen(tabId) + 1);
+  introGens.set(tabId, introGen(tabId) + 1);
+  introManifests.delete(tabId);
   return withTab(tabId, () =>
     chrome.storage.session.remove([
       capKey(tabId),
@@ -286,6 +369,7 @@ function clearTab(tabId) {
       probeKey(tabId),
       varKey(tabId),
       resKey(tabId),
+      introKey(tabId),
       jobsKey(tabId),
     ])
   );
@@ -304,17 +388,21 @@ function setTopURL(tabId, url) {
 // Media capture: listeners (registered synchronously at top level)
 // ---------------------------------------------------------------------------
 
+// Also for tabId -1 (a page's service worker), so onHeadersReceived knows its headers.
 function onSendHeaders(details) {
-  if (details.tabId < 0) return;
   const now = Date.now();
+  const prev = pending.get(details.requestId); // an earlier hop of the same redirect chain
   pending.delete(details.requestId); // redirects re-fire with the same id; keep order honest
-  pending.set(details.requestId, {
+  const entry = {
     tabId: details.tabId,
     frameId: details.frameId,
     url: details.url,
+    firstUrl: prev ? prev.firstUrl : details.url,
     headers: pickHeaders(details.requestHeaders),
     ts: now,
-  });
+  };
+  if ((prev && prev.refetch) || refetching.has(refetchKey(details.tabId, details.frameId, details.url))) entry.refetch = true;
+  pending.set(details.requestId, entry);
   prunePending(now);
 }
 
@@ -328,11 +416,46 @@ try {
   chrome.webRequest.onSendHeaders.addListener(onSendHeaders, { urls: ["<all_urls>"] }, ["requestHeaders"]);
 }
 
+// A prerendered page's outermost frame (Chrome speculation rules): not shown yet, and
+// its frame id changes on activation. Firefox and Safari send neither field.
+function isActiveTop(details) {
+  const top = details.frameType ? details.frameType === "outermost_frame" : details.frameId === 0;
+  return top && (!details.documentLifecycle || details.documentLifecycle === "active");
+}
+
+// The tab a service-worker request (tabId -1) belongs to, or null: the one http(s)
+// tab on the worker's origin (initiator in Chromium, originUrl in Firefox), and with
+// several, the one whose URL is the request's Referer (both without their hash).
+// Only tabs on the request's side when it says which one (Firefox); without that field
+// (Chrome), null as soon as an incognito tab is on the origin, as the side is unknown.
+async function workerTab(details, headers) {
+  const from = typeof details.initiator === "string" ? details.initiator : details.originUrl;
+  const u = typeof from === "string" ? httpURL(from) : null;
+  if (!u) return null;
+  const noHash = (url) => url.split("#")[0];
+  let tabs = (await chrome.tabs.query({})).filter((tab) => {
+    const t = Number.isInteger(tab.id) ? httpURL(tab.url) : null;
+    return t !== null && t.origin === u.origin;
+  });
+  if (typeof details.incognito === "boolean") tabs = tabs.filter((tab) => tab.incognito === details.incognito);
+  else if (tabs.some((tab) => tab.incognito === true)) return null;
+  if (tabs.length > 1) {
+    const referer = typeof headers.Referer === "string" ? noHash(headers.Referer) : null;
+    tabs = referer ? tabs.filter((tab) => noHash(tab.url) === referer) : [];
+  }
+  return tabs.length === 1 ? tabs[0].id : null;
+}
+
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
+    if (details.documentLifecycle === "prerender") return; // see isActiveTop
     const { tabId, frameId, requestId, url } = details;
-    if (tabId < 0 || IGNORED_TYPES.has(details.type)) return;
+    if (refetching.has(refetchKey(tabId, frameId, url))) return; // the hub's own re-fetch
+    if (IGNORED_TYPES.has(details.type)) return;
     if (details.statusCode < 200 || details.statusCode > 299) return;
+    // If the worker restarted since onSendHeaders, store the entry without headers.
+    const p = pending.get(requestId);
+    if (p && p.refetch) return; // a re-fetch whose key is gone already, or a redirect hop of one
     const parsed = httpURL(url);
     if (!parsed) return;
     const kind = classify(
@@ -342,20 +465,36 @@ chrome.webRequest.onHeadersReceived.addListener(
       contentLength(details.responseHeaders),
       details.method,
       details.statusCode,
-      totalSize(details.responseHeaders, details.statusCode)
+      totalSize(details.responseHeaders, details.statusCode),
+      dispositionExt(details.responseHeaders)
     );
     if (!kind) return;
     const ts = Date.now();
-    if (kind === "chunk") {
-      withTab(tabId, () => bumpActive(tabId, frameId, url, ts)).catch(logError);
-      return;
-    }
-    // If the worker restarted since onSendHeaders, store the entry without headers.
-    const p = pending.get(requestId);
     const headers = p ? p.headers : {};
     // isMaster: from an earlier probe of this URL (addEntry), else set by the 4.2 probe.
     // Without its range params, so addEntry's dedupe by URL collapses ranged fetches (chunks keep theirs).
-    withTab(tabId, () => addEntry(tabId, { url: stripRangeParams(url), frameId, kind, headers, ts })).catch(logError);
+    const entry = { url: stripRangeParams(url), frameId, kind, headers, ts };
+    // alias: the pre-redirect URL (a <video src> that 302s keeps it as its currentSrc).
+    const first = p ? p.firstUrl : null;
+    if (first && first.length <= MAX_URL_LENGTH && httpURL(first) && stripRangeParams(first) !== entry.url) {
+      entry.alias = stripRangeParams(first);
+    }
+    // A page's service worker (no frame): media only, as frame 0 of the one tab it serves.
+    if (tabId < 0) {
+      if (!MEDIA_KINDS.has(kind)) return;
+      workerTab(details, headers)
+        .then((boundTab) => {
+          if (boundTab === null) return undefined;
+          return withTab(boundTab, () => addEntry(boundTab, { ...entry, frameId: 0, sw: true }));
+        })
+        .catch(logError);
+      return;
+    }
+    if (kind === "chunk") {
+      withTab(tabId, () => bumpActive(tabId, frameId, url, headers, ts)).catch(logError);
+      return;
+    }
+    withTab(tabId, () => addEntry(tabId, entry)).catch(logError);
   },
   { urls: ["<all_urls>"] },
   ["responseHeaders"]
@@ -372,9 +511,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 // clearTab, setTopURL and restoreSegments share the tab queue, so the new URL lands
-// after the clear and the page's saved segments are read for that URL.
+// after the clear and the page's saved segments are read for that URL. A prerender
+// commit fires while the user still sees the old page; its activation commits again
+// as "active", and that one clears the tab.
 chrome.webNavigation.onCommitted.addListener((details) => {
-  if (details.frameId !== 0) return;
+  if (!isActiveTop(details)) return;
   clearTab(details.tabId).catch(logError);
   setTopURL(details.tabId, details.url)
     .then(() => refreshActionMenu().catch(hubWarn))
@@ -391,7 +532,9 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // Content -> hub: chrome.runtime.sendMessage({type, ...}). The hub takes the tab
 // and frame ONLY from sender.tab.id / sender.frameId, never from the body. It
 // ignores other extensions (sender.id), senders without a tab, and types it does
-// not own (no sendResponse, so later onMessage listeners still get them). A
+// not own (no sendResponse, so later onMessage listeners still get them). It also
+// ignores every message from a prerendered page (sender.documentLifecycle
+// "prerender", Chrome 106+): that page is not shown yet. A
 // malformed hub message gets {ok: false, error: "bad-message"}. Every hub reply
 // has `ok`; failures add `error`.
 //
@@ -402,7 +545,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // own lists), never a URL, headers, a title, segment times or a duration. The
 // types marked [selected] below are accepted only from that frame (else {ok:
 // false, error: "not-selected-frame"}); their replies are summaries (no URLs, no
-// header values, no captures). Exceptions: while nothing is selected, a frame
+// header values, no captures; one stated exception: copyText, see Source
+// correlation). Exceptions: while nothing is selected, a frame
 // may `select` one of its own videos (frameId = its sender.frameId), so it can
 // claim the overlay; and `openOverlay` (the player button), `fullOptions` and
 // `downloadFull` (the Download full button) are accepted from any frame, for its
@@ -410,7 +554,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //
 //   Agent (every frame, owns that frame's <video> elements):
 //   candidates {videos: [{videoKey, area, duration, live, paused, excluded, score,
-//              currentSrc?, videoId?}]}
+//              currentSrc?, videoId?, blob?, drm?}]}
 //              The frame's full list (replaces the previous one, [] clears it).
 //              videoKey: [A-Za-z0-9_-]{1,64}, stable per element for the frame's
 //              lifetime. area: finite >= 0, the part of the video inside the
@@ -420,11 +564,16 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              class token or id, see agent.js) | "live" | "small" (rendered box
 //              width * height < 200x112, on-screen or not), first match in that
 //              order. score: area * min(duration, 3 h), 0 when excluded or
-//              duration is null. currentSrc: only if http(s), max 8192 chars,
+//              duration is null, x 0.1 for a muted, looping, controls-less
+//              object-fit: cover video, x 4 for the frame's last played video.
+//              currentSrc: only if http(s), max 8192 chars,
 //              else omitted. videoId: digits only (1-25), Facebook's
 //              data-video-id of the video's container, else omitted. width,
 //              height (optional): the video's intrinsic size, integers
-//              1...100000, kept only as a pair (labels in `view`). At most 20
+//              1...100000, kept only as a pair (labels in `view`). blob, drm
+//              (optional, true or omitted): currentSrc is a blob: URL (MSE; the
+//              Player introspection below runs only for such a video) / the
+//              video has mediaKeys (EME attached). At most 20
 //              videos (the top scores when a frame has more). Agents re-send
 //              only when a field the hub uses changes (the score in coarse
 //              buckets, so scrolling rarely re-sends), and
@@ -507,7 +656,10 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              playlist has at most one variant). kind "none" with
 //              pending false means no list is possible: no source, a probe error
 //              record, an empty or one-entry list, protocol < 3 for a page, a
-//              direct file without page first. Only probe: true starts a probe,
+//              direct file without page first, Browser mode (answered right
+//              after the target check, no native call) and Another-app mode
+//              (settings.downloadWith "otherApp" in the pong used, protocol >=
+//              OPEN_WITH_PROTOCOL): both take the whole file. Only probe: true starts a probe,
 //              with no panelOpen gate, when the record is missing or stale: for
 //              the own video's HLS source the probe run, as `view`; for a page
 //              (any video) or another video's playlist one probe of that one URL
@@ -615,38 +767,75 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              uses the same setter, also with ignored false.
 //
 //   Source correlation (4.1). Content scripts only ever get a source summary
-//   {kind: "hls" | "mp4" | "page", host, file (last path component, no query),
-//   frameId, via: "currentSrc" | "capture" | "page" | "user"}, never the URL's
-//   query or header values. The full Source (URL + captured headers) stays in
-//   this worker: resolveSource(tabId) builds it for the job (4.3).
+//   {kind: "hls" | "dash" | "mp4" | "file" | "page", host, file (last path component, no query),
+//   frameId, via: "currentSrc" | "player" | "capture" | "page" | "user"}, never
+//   the URL's query or header values; a playlist source (step 3) gives {kind:
+//   "hls", host: its baseURL's host, file: "inline playlist"}, never its text.
+//   One exception: `refetch` (Send the job) sends a captured playlist URL to the
+//   frame that requested it (the capture's frameId), which already knows it; the
+//   reply is untrusted text, checked like a player manifest (isPlaylistText).
+//   A second exception: `copyText` (Browser mode) sends the resolved URL and its
+//   Referer / User-Agent / Origin (never Cookie) to the selected video's frame,
+//   only on a click there and only in Browser mode, so the overlay can write the
+//   clipboard (the worker has none; an offscreen document would need two more
+//   permissions).
+//   The full Source (URL + captured headers) stays in this worker:
+//   resolveSource(tabId) builds it for the job (4.3).
 //   getSource [selected] -> {ok, source: summary | null} (null: nothing
 //              captured and no http(s) top URL). For an hls source the summary
 //              adds the 4.2 variant fields (below). Also starts the probe when
 //              one is due and the overlay is open.
-//   chooseSource {index} [selected]: index into the source list: the tab's hls
-//              and mp4 captures (cap:<tabId>) sorted by frameId, then URL (a
+//   chooseSource {index} [selected]: index into the source list: the tab's hls,
+//              dash, mp4 and file captures (cap:<tabId>; dash and file only when
+//              the last pong's protocol >= DASH_PROTOCOL, since an older app fails
+//              to decode the whole enqueue) sorted by frameId, then URL (a
 //              re-fetch moves an entry to the end of cap:<tabId>, so that order
 //              is not used). -> {ok, source: summary}, or {ok: false, error:
 //              "unknown-source"} when out of range. The choice (src:<tabId>)
 //              overrides the auto order until the selected video or the page
-//              changes.
+//              changes. The order below reads the same gated captures.
+//   A media request of a page's service worker (tabId -1) counts as a frame-0
+//   capture of the one tab on the worker's origin (several such tabs: the one
+//   whose URL is the request's Referer; none or still several: not captured).
+//   Never its chunks. A capture made before a same-document page change is stale
+//   (staleAt) until it is captured again, or until its frame's chunks from the
+//   capture's directory arrive more than STALE_GRACE_MS after the change; only
+//   steps 4 and 5 skip stale captures (an exact URL in 1-3 names the stream).
 //   Order (first match wins; `selected` is hub:<tabId>.selected):
 //     1. the user's choice (via "user");
 //     2. the selected candidate's currentSrc (http(s) only, via "currentSrc"):
-//        kind and headers from the capture with the same URL, else kind from
-//        the path (.m3u8 -> hls, otherwise mp4) and no headers;
-//     3. in the selected video's frame, the newest hls capture with isMaster,
+//        kind and headers from the capture with the same URL or pre-redirect
+//        alias, else kind from the path (.m3u8 -> hls; .webm / .mkv / .ogv ->
+//        file when protocol >= DASH_PROTOCOL; otherwise mp4) and no headers;
+//     3. the selected video's player probe (Player introspection; intro:<tabId>
+//        for that {frameId, videoKey}, used only while its candidate has blob:
+//        true, so never with an http currentSrc; via "player"): its manifest,
+//        when the last pong's protocol >= PLAYLIST_PROTOCOL, as {type:
+//        "playlist", text, baseURL, headers} (baseURL and headers from the
+//        record); else its url of kind hls or mp4 (or dash when protocol >=
+//        DASH_PROTOCOL): the capture with the same URL or alias (its headers),
+//        else {type: "media", url, kind, headers: Referer "<origin of the
+//        video's frame>/" and Origin, through the header allowlist} (none when
+//        that frame's URL is unknown). A url of kind dash for an older app or of
+//        no kind goes on to step 4;
+//     4. in the selected video's frame (live captures only), the newest hls capture with isMaster,
 //        then the newest hls capture (isMaster is unknown until a probe), then
-//        the newest mp4 (via "capture");
-//     4. tab-wide, when that frame has nothing (or nothing is selected): frames
-//        with active .ts/.m4s chunks (act:<tabId>) first, then hls before mp4,
-//        then a probed master (4.2), then the newest (via "capture", with the
+//        the newest dash, then the newest mp4, then the newest file (via
+//        "capture");
+//     5. tab-wide (live captures only), when that frame has nothing (or nothing is selected): frames
+//        with active chunks (act:<tabId>) first, then hls, then dash, before mp4
+//        and file, then a probed master (4.2), then the newest (via "capture", with the
 //        capture's own frameId; chooseSource picks another one);
-//     5. the page URL for yt-dlp, from top:<tabId> (via "page"); for a Facebook
-//        top URL and a selected frame-0 candidate with videoId, https://<top
-//        host>/watch/?v=<videoId> instead. A page source {type: "page", url}
-//        has no headers (yt-dlp fetches the page itself), no HLS probe and no
-//        variants (its heights: Page resolution picker).
+//     6. the page URL for yt-dlp (via "page"): from top:<tabId>; for a selected
+//        video in a subframe, that frame's URL from
+//        chrome.webNavigation.getFrame (never from a content script) when it is
+//        http(s), at most MAX_URL_LENGTH chars and not the top URL (an embed's
+//        own page); else, for a Facebook top URL and a selected frame-0
+//        candidate with videoId, https://<top host>/watch/?v=<videoId>. A page
+//        source {type: "page", url} has no headers (yt-dlp fetches the page
+//        itself), no HLS probe and no variants (its heights: Page resolution
+//        picker). Every page rule (page-first, heights, DRM) uses this URL.
+//   A playlist source has no HLS probe and no variants.
 //
 //   HLS variant picker (4.2). Only this worker talks to the app:
 //   chrome.runtime.sendNativeMessage(NATIVE_HOST, {type: "probe", source:
@@ -724,6 +913,41 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              selected video, while the height is in the cached list, until
 //              either changes or the page changes.
 //
+//   Player introspection. A video whose currentSrc is blob: (MSE; the agent's
+//   `blob` flag) plays a stream the captures can only guess, so on demand the hub
+//   asks the page's player library which stream the video plays. When: a `select`
+//   (after the selection is written) and setPanelOpen / the toggle opening the
+//   panel (both fire-and-forget; a result less than INTRO_TTL_MS old for the same
+//   video is reused), fullOptions {probe: true} (not awaited: the reply never
+//   waits), and every `download` (awaited, always a new probe; downloadFull goes
+//   through it, so one probe per click). Never from candidates, scans or timers,
+//   and only for a target candidate with blob: true. One run per tab at a time.
+//   How: the hub asks the video's agent to `tag` it with a random
+//   data-segdown-<16 hex> attribute, runs playerProbe in that frame only through
+//   chrome.scripting.executeScript({world: "MAIN"}) (a static function of this
+//   file, raced against INTRO_TIMEOUT_MS), then `untag`s it. The probe duck-types
+//   hls.js, Shaka, dash.js, video.js and JW Player objects reachable from
+//   window's own keys (values only, no getters), keeps only the player whose
+//   media element carries the attribute, and reads a blob: playlist of the
+//   page's own origin (at most MAX_INLINE_PLAYLIST_BYTES). A browser without
+//   MAIN world (the error names `world`) turns the probe off for the worker's
+//   lifetime; any failure just leaves the captures to Source correlation.
+//   What is trusted: the result is page data, checked by cleanIntro (url: http(s)
+//   only, never blob:; kind from its type or path; drm boolean; manifest: within
+//   the cap, no NUL, "#EXTM3U" after an optional BOM). frameId and videoKey come
+//   from the hub, never from the page. The manifest's baseURL and headers never
+//   come from the page either: the frame's last chunk request (act:<tabId>,
+//   lastChunkUrl + its headers), else the frame's newest capture (its own URL and
+//   headers), else the frame's URL from webNavigation.getFrame with Referer
+//   "<origin>/" and Origin "<origin>" (through the header allowlist); with none
+//   of them the manifest is dropped. What is stored: every run replaces
+//   intro:<tabId> (Storage below; a run that found nothing or failed removes
+//   it) and keeps the manifest text in worker memory only (at most
+//   MAX_INTRO_MANIFESTS tabs; a worker restart loses it and the next call probes
+//   again). A run whose tab was cleared or changed page meanwhile writes
+//   nothing. A run that wrote or removed the selected video's record sends
+//   `sourceChanged` to its frame.
+//
 //   deps [selected] -> {ok, missing: [tool], appError?}: the tools the app
 //              reports missing, each one of "yt-dlp" | "ffmpeg" | "ffprobe" |
 //              "deno" (others dropped). The hub asks the app
@@ -731,12 +955,14 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              {type: "pong", version, missing: [string], protocol?, settings?:
 //              {mode, incognitoDefault, maxDuration?, fullClipButton?,
 //              fullClipConfirm?, playerButton?, fullDownloadButton?,
-//              ignoredDomains?, preferredHeight?}}, at most once
+//              ignoredDomains?, preferredHeight?, downloadWith?,
+//              downloadWithRev?, otherAppName?}}, at most once
 //              per DEPS_TTL_MS (10 s; one cached
 //              answer for every tab, also for the settings; concurrent callers
 //              share one request). protocol: an integer >= 1, absent -> 1 (2:
 //              incognito and fallback, 3: maxHeight and the page probe, 4:
-//              setIgnored).
+//              setIgnored, 5: the playlist source, 6: the dash and file media
+//              kinds, 7: openWith).
 //              settings are checked field by field: mode "separate" | "merged"
 //              (else "separate"), incognitoDefault (true only when true, so an
 //              app without settings gives false), maxDuration (seconds, finite >
@@ -745,10 +971,16 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              absent -> true), ignoredDomains (lowercased
 //              hostnames as the app's IgnoredDomain.normalize makes them, others
 //              dropped, deduped, at most MAX_IGNORED_DOMAINS; not an array -> []),
-//              preferredHeight (an integer 1...8640, else null = Best). Every
+//              preferredHeight (an integer 1...8640, else null = Best),
+//              downloadWith "segdown" | "browser" | "otherApp" (else
+//              "segdown"), downloadWithRev (a safe integer >= 0, the app's
+//              count of downloadWith changes, else 0), otherAppName (the
+//              chosen app's name: a string, control characters removed, at
+//              most MAX_APP_NAME code points, else null). Every
 //              pong sets the persistence gate to settings.incognitoDefault
 //              (Segment persistence) and keeps storage.local `ui` equal to the
-//              two switches and ignoredDomains (written, and sent as `ui` to
+//              two switches and ignoredDomains, plus browserOnly / appRev
+//              (Browser mode; written, and sent as `ui` to
 //              "all" in every tab (below), only when they differ from the stored
 //              value). A ping without a pong leaves `ui` as it is (never pinged:
 //              both true, no ignored domains). Any other reply or a failed call
@@ -779,26 +1011,70 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   download {mode?: "separate" | "merged", incognito?: boolean, full?: boolean}
 //              [selected]: the overlay's Download button (full: true for its
 //              Full clip button). Every other field is ignored. The hub builds
-//              the rest from its own state: segments from segs:<tabId> ([] ->
-//              {ok: false, error: "no-segments"}; not read for full); then the
-//              app's pong (deps; still failing -> the app-unreachable /
-//              app-error replies below); the effective incognito = the tab is
+//              the rest from its own state: segments from segs:<tabId> (not
+//              read for full); then the app's pong (deps; still failing -> the
+//              app-unreachable / app-error replies below); then Another app
+//              (below); then [] segments -> {ok: false, error: "no-segments"};
+//              the effective incognito = the tab is
 //              incognito (Incognito) || body incognito (the body can turn it
 //              on, never off), refused with {ok: false, error: "app-outdated",
 //              message: "Update the SegDown app to download incognito"} when the
 //              pong's protocol < 2; the source from resolveSource(tabId) (with
 //              captured headers and the chooseSource / chooseVariant choices;
-//              null -> {ok: false, error: "no-source"}): when it is media, the user
-//              pinned neither the source (chooseSource) nor a non-default
-//              variant (chooseVariant), protocol >= 2 and top:<tabId> holds an
-//              http(s) URL, the job gets source = {type: "page", url: page URL}
-//              and fallback = that media (the app tries yt-dlp first); otherwise
-//              source = the resolved source and no fallback. mediaDuration: the
-//              selected candidate's duration when finite > 0, else omitted.
-//              pageURL: the top URL (top:<tabId>) when it is http(s), else
-//              omitted (the window's card opens it; older apps ignore it); for
-//              a Facebook top URL and a selected frame-0 candidate with videoId,
-//              https://<top host>/watch/?v=<videoId> instead (page source too).
+//              null -> {ok: false, error: "no-source"}): when it is media or a
+//              playlist (Source correlation step 3), the user pinned neither the
+//              source (chooseSource) nor a non-default variant (chooseVariant),
+//              protocol >= 2 and there is a page URL (Source correlation step
+//              6), the job gets source = {type: "page", url: page URL} and
+//              fallback = that media or playlist (the app tries yt-dlp first);
+//              otherwise source = the resolved source and no fallback. A
+//              playlist source {type: "playlist", text, baseURL, headers} is
+//              playlist text the app must not fetch again (protocol >=
+//              PLAYLIST_PROTOCOL only). A media source's kind is "hls" | "mp4" |
+//              "dash" (an MPD manifest) | "file" (a progressive file other than
+//              mp4/mov, e.g. WebM); dash and file only when protocol >=
+//              DASH_PROTOCOL (Source correlation).
+//              DRM, checked before anything goes to the app and skipped when the
+//              user pinned the source as above: the player probe's drm flag
+//              (Shaka drmInfo(), JW Player item.drm) -> {ok: false, error:
+//              "drm"}; else the candidate's drm (bare mediaKeys, which has false
+//              positives): a page-first job is sent without its fallback (yt-dlp
+//              still tries, captured encrypted media is never downloaded), a job
+//              without a page attempt -> {ok: false, error: "drm"}.
+//              Page re-fetch, after DRM (and the full clip's checks), at most once
+//              per click: when the hls media the job would send (the fallback of
+//              a page-first job, else the source) has a probe record (4.2) with
+//              error code "unavailable" (the app fetched that URL with the
+//              captured headers and was refused; the host also answers it while
+//              the app is not running, which costs one extra GET), protocol >=
+//              PLAYLIST_PROTOCOL, and cap:<tabId> holds an hls capture with that
+//              exact URL that a page's service worker did not make (else the job
+//              goes unchanged), the hub asks that capture's frame `refetch` (Hub
+//              -> content) with credentials "include" when the capture has a
+//              Cookie or its URL has the frame's origin (webNavigation), else
+//              "same-origin" (hls.js's default), the capture's Referer as
+//              referrer, maxBytes MAX_INLINE_PLAYLIST_BYTES, and waits
+//              REFETCH_TIMEOUT_MS + 1 s. A reply {ok: true, text} whose text
+//              passes isPlaylistText replaces that slot with {type: "playlist",
+//              text, baseURL: the capture's URL (its final URL after redirects),
+//              headers: its allowlisted headers}; a page-first job keeps its page
+//              source. Anything else sends the job unchanged (the app then
+//              reports the expired link). The download log line adds refetch=ok
+//              or refetch=fail when the frame was asked. While the frame is asked,
+//              refetching holds "<tabId> <frameId> <url>" (expiry now +
+//              REFETCH_TIMEOUT_MS + 1 s, pruned on each set, deleted once
+//              answered): a request with that key (onHeadersReceived), or whose
+//              pending entry got refetch: true at onSendHeaders (redirect hops
+//              keep it), is not captured and bumps no act:<tabId>. No marker
+//              header is added. A browser that reports the fetch with another
+//              tab or frame id captures it again, which only replaces the same
+//              cap: entry (addEntry dedupes by URL; a playlist is never a chunk).
+//              mediaDuration: the selected candidate's duration when finite > 0,
+//              else omitted. pageURL: the page URL of Source correlation step 6
+//              (the Facebook watch URL included) when it is http(s), else omitted
+//              (the window's card opens it; older apps ignore it); when that is a
+//              subframe's URL, the top URL instead (the page the user watched;
+//              omitted when it is not http(s)).
 //              maxHeight: protocol >= 3 and a page source only (never for the
 //              fallback): the chooseHeight choice that still applies to the
 //              job's page URL (omitted for Best); without one,
@@ -816,7 +1092,13 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              control characters (U+0000-U+001F, U+007F-U+009F) become spaces,
 //              trimmed, the first MAX_TITLE_CHARS code points kept (the app
 //              counts characters, which are never more than code points, and
-//              sanitizes it again). precision is always "precise" (required on
+//              sanitizes it again). Then (tidyTitle, each step only when text is
+//              left): a leading "(N) " / "(N+) " counter and a leading "▶" / "►"
+//              are dropped, and one trailing " - Site" (also "–", "—", "|") when
+//              Site, lowercased without spaces, dots and hyphens, is the site
+//              label of top:<tabId>'s host (its second-to-last label, the only
+//              one for a one-label host such as localhost) or its last two
+//              labels joined (no such rule for an IP host). precision is always "precise" (required on
 //              the wire; the app replaces it with its own setting). Apart from
 //              a full clip's over-limit, the hub refuses neither a missing tool
 //              nor a total over maxDuration (the overlay disables Download and
@@ -843,6 +1125,50 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              adds page: {key, ranges} (key: the page key of top:<tabId>, read
 //              with segs:<tabId> at the start of the download, never from the
 //              body; ranges: the job's segments) for Downloaded segments.
+//              Browser mode (ui.browserOnly), checked first (no segments read,
+//              no native call; downloadFull goes through it): the whole file,
+//              saved by the browser. After the player probe Download makes, the
+//              source from resolveSource (no page first; dash and file captures
+//              kept); only a direct media source (directMedia: via
+//              "currentSrc" or "user", or kind hls / dash; an mp4 / file from
+//              the capture tiers or the player probe is one MSE track) of kind
+//              mp4 or file is saved: null -> "no-source", a playlist ->
+//              "inline-only", any other -> "copy-only"; a private-window tab ->
+//              "private-window" (Chrome's spanning worker would save it in the
+//              normal profile). No chrome.downloads (Safari) ->
+//              chrome.tabs.create({url}) -> {ok, saved: "tab"}. Else
+//              chrome.downloads.download({url, filename: saveName ("SegDown/"
+//              + the tidied title with / \ : * ? " < > | and control
+//              characters as spaces, at most 120 code points, "video" when
+//              empty, + the URL's extension among SAVE_EXTS, else ".mp4" for
+//              mp4; none for a file of another extension), saveAs: false,
+//              conflictAction: "uniquify"}), once more without filename when
+//              refused -> {ok, saved: "browser"} (started; a later HTTP error
+//              shows in the browser's list) or {ok: false, error:
+//              "browser-download"}. No headers option (the browser refuses
+//              Referer, Origin, Cookie and User-Agent there; it sends its own
+//              cookies). Segments, mode, incognito, maxDuration, jobs:<tabId>,
+//              jobt and status do not apply.
+//              Another app (the pong's settings.downloadWith "otherApp" and
+//              protocol >= OPEN_WITH_PROTOCOL), right after the pong check and
+//              before no-segments: the whole video's link goes to the app,
+//              which opens it in the app the user chose. After the player
+//              probe, resolveSource: null -> "no-source", a playlist ->
+//              "inline-only", a private-window tab -> "private-window"; else
+//              sendNativeMessage(NATIVE_HOST, {type: "openWith", url: the
+//              media URL when directMedia, else the page URL (Source
+//              correlation step 6), else the media URL}) (only the URL: never
+//              headers or Cookie; an HLS master as is, no variant pick) ->
+//                {type: "opened", app} -> {ok, opened: app (cleaned like
+//                  otherAppName)};
+//                {type: "error", code, message} -> {ok: false, error:
+//                  "app-error", code, message} (e.g. no app chosen, a bad URL);
+//                the native call fails -> {ok: false, error: "app-unreachable",
+//                  message: APP_UNREACHABLE}; any other reply -> app-error
+//                  "internal".
+//              No jobs:<tabId> or jobt entry. Log lines: download tab=…
+//              with=browser|otherApp kind=<kind> saved=<…> | opened |
+//              error=<code> (never the URL).
 //
 //   Progress + cancel (4.4).
 //   jobs [selected] -> {ok, jobs: [job], appError?}: this tab's jobs
@@ -884,7 +1210,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //   STATUS_TIMEOUT_MS closes the port (a late reply would resolve the wrong
 //   request) and fails every pending one; so does onDisconnect. After either,
 //   the next status goes through sendNativeMessage and the one after reopens
-//   the port. enqueue, cancel, probe, ping and setIgnored always use
+//   the port. enqueue, cancel, probe, ping, setIgnored and openWith always use
 //   sendNativeMessage. Jobs run in the app: closing the port never affects them.
 //   Safari never opens the port: every status there is its own
 //   sendNativeMessage (a short appex call).
@@ -921,12 +1247,58 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //                appError (the ping failed),
 //                job (this tab's newest job from `jobs`: {id, state,
 //                  segmentIndex, segmentCount, fraction, bytes, message,
-//                  fallbackUsed}, or null)}.
+//                  fallbackUsed}, or null),
+//                downloadWith ("segdown" | "otherApp" from the pong, the app's
+//                  "browser" counting as "segdown" outside Browser mode; then
+//                  depsProblem is left out for "otherApp", which needs no
+//                  tool) and otherApp (settings.otherAppName in Another-app
+//                  mode, else null)}.
+//              In Browser mode (also when the view's own ping just turned it
+//              on): no ping, no status, no probe; source is the resolved
+//              source's summary (no page first, no variants or heights),
+//              pageFirst false, job null, no depsProblem or appError, the
+//              settings fields from the defaults, and downloadWith "browser",
+//              saveable (Download can save it: directMedia and kind mp4 or
+//              file), copy (the copyText kinds for the source: ["link",
+//              "ytdlp", "ffmpeg"] for direct media that is not dash, else
+//              ["link", "ytdlp"]; [] for a playlist or no source) and
+//              inlineOnly: true for a playlist.
 //              Uses the deps cache and, when the tab has jobs or else when jobt
 //              holds an entry with page.key = page:<tabId>.key and no applied,
 //              one status request (a failure is ignored), made before segments
 //              are read so they carry its Downloaded segments flags; starts a
 //              probe run like getSource, and the page probe.
+//
+//   Browser mode. While storage.local ui.browserOnly is true no native message is
+//   sent and no native port is opened (the host launches the app for any message):
+//   one sendNative wrapper (a backstop) plus early returns: deps answers
+//   {missing: [], appError: BROWSER_ONLY} without pinging or touching the cache,
+//   probes do not run, status answers an error and clears the running badge,
+//   ignoreSite answers app-error and the Toolbar menu hides both items. Download is
+//   the browser's (Send the job), fullOptions answers kind "none". An unreachable
+//   app never switches the mode; only the menu below or an app-side change does
+//   (the `ui` storage line). Segments stay in storage.session while no pong of this
+//   worker's life allowed persistence.
+//   setDownloadWith {browser: boolean} [selected] (the overlay's "Download with"
+//              menu) -> {ok}: writes ui {...stored, browserOnly: browser, appRev:
+//              "sync"}; leaving Browser mode also drops the cached pong (the
+//              next `view` pings). Never calls the app, never writes back to it.
+//   copyText {what: "link" | "ytdlp" | "ffmpeg"} [selected], Browser mode only
+//              (else bad-message) -> {ok, text} | {ok: false, error: "no-source"
+//              | "inline-only" (a playlist) | "copy-only" | "bad-url" |
+//              "bad-message" (ffmpeg for a dash or page source)}. After the
+//              player probe, the selected video's resolved source: link: its
+//              URL; ytdlp: "yt-dlp [--referer R] [--user-agent U] [--add-header
+//              'Origin:O'] URL" with the page URL when the media is not direct;
+//              ffmpeg (direct media only, else copy-only): "ffmpeg [-user_agent
+//              U] [-referer R] [-headers 'Origin: O'] -i URL -c copy
+//              './<base><ext>'" (base as saveName's; .mp4 for hls and mp4, a
+//              file's own extension among SAVE_EXTS, else .mkv). Headers only
+//              from the source's Referer / User-Agent / Origin, never Cookie (the
+//              clipboard is readable by every app); every value POSIX
+//              single-quoted ('\'' for a quote); a URL or value with a C0
+//              control character or DEL -> "bad-url". Log: copy tab=… what=…
+//              kind=… (never the text).
 //
 // Hub -> content: chrome.tabs.sendMessage(tabId, msg, {frameId}). agent.js and
 // the overlay share each frame, so every message names its receiver in `to`;
@@ -935,12 +1307,26 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //     seek {videoKey, time} | play {videoKey} | pause {videoKey} -> {ok}
 //     getTime {videoKey} -> {ok, currentTime, duration (null if unknown), paused}
 //     select {videoKey | null}: the frame's selected video (null: none there)
+//     tag {videoKey, attr}: attr matches ^data-segdown-[0-9a-f]{16}$; sets attr="1"
+//       on that tracked, connected video, removed by untag or after 5 s -> {ok}
+//       ({ok: false} for an unknown video or a bad name). Player introspection only.
+//     untag {attr}: same name check; removes attr from the video tagged with it -> {ok}
+//     refetch {url, credentials, referrer?, maxBytes} -> {ok, text} | {ok: false,
+//       error}: url http(s), at most 8192 chars; credentials "include" |
+//       "same-origin"; maxBytes an integer 1...1 MiB (else error "bad-message");
+//       referrer only when it is an http(s) URL of the frame's own origin (else
+//       the frame's URL). One fetch from the isolated world {cache: "force-cache",
+//       redirect: "error"}, aborted after 5 s; error "http" (not 2xx), "too-big"
+//       (over maxBytes), "failed" (CORS, abort, redirect, not UTF-8). Answered
+//       asynchronously; never carries the URL, status text or headers. Send the
+//       job (page re-fetch) only.
 //   to "overlay" (the selected video's frame):
 //     segments {segments: [{start, end, done?}]}: after every change of segs:<tabId>
 //     mark {action, time, frameId, videoKey, start?, end?} | markError {action, error}
 //     toggleOverlay {open}: the toggle below or `openOverlay`; open = the new
 //     panelOpen.
-//     sourceChanged {}: a probe run stored results; the overlay asks `view` again.
+//     sourceChanged {}: a probe run or a player probe stored results; the overlay
+//     asks `view` again.
 //   to "all" (every frame, no frameId option):
 //     state {state} after the selection, selectedBy or pendingStart changes.
 //     Also sent after panelOpen changes: agents listen for `[` / `]` only while
@@ -981,11 +1367,14 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // setSiteIgnored(tab, item is "site-off") (Ignored sites); the badge shows "off"
 // / "on" on success, "!" on any failure, for NO_VIDEO_BADGE_MS.
 //
-// Same-document URL changes (webNavigation.onHistoryStateUpdated, frame 0) update
-// top:<tabId>. When the URL, without its hash, differs from the key in
+// Same-document URL changes (webNavigation.onHistoryStateUpdated, the active top
+// frame) update top:<tabId>. When the URL, without its hash, differs from the key in
 // page:<tabId>, the hub also clears pendingStart and the source, variant and
-// height choices src:<tabId> / var:<tabId> / res:<tabId> (captures and probe
-// results stay; the next video's requests add to them), loads the new page's
+// height choices src:<tabId> / var:<tabId> / res:<tabId>, and the player probe's
+// intro:<tabId> and manifest (a probe in flight writes nothing; captures stay but
+// are marked `staleAt`; the capture tiers skip them until they are captured again or
+// their frame's chunks keep arriving; probe results stay; the next video's
+// requests add to them), loads the new page's
 // segments (Segment persistence), relays them to the selected video's frame and
 // sends `state` to "all". The selection stays until the agents report other
 // videos.
@@ -1016,6 +1405,9 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //                    chosen variant's URL, the selection; never sent to content scripts)
 //   res:<tabId>  -> {page, height, selected}   (chooseHeight: the page URL, the chosen
 //                    height (0 = Best), the selection; never sent to content scripts)
+//   intro:<tabId> -> {frameId, videoKey, ts, url?, kind?, drm, hasManifest, baseURL,
+//                    headers}   (the last player probe; Player introspection; never
+//                    sent to content scripts)
 //   jobs:<tabId> -> [{jobId, title?, ts}]   (4.3 enqueued jobs, oldest first, at most
 //                    MAX_JOBS_PER_TAB; title as sent to the app, absent for incognito jobs)
 //   jobt         -> {<jobId>: {title, ts, page?: {key, ranges}, applied?}}   (4.4:
@@ -1028,13 +1420,27 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 // access level is set to trusted contexts where the browser supports that):
 //   seg:<url>    -> {segments (with done?), ts}   (at most 200, newest ts kept; entries saved by
 //                    older versions also carry mode and precision, ignored)
-//   ui           -> {fullClipButton, playerButton, fullDownloadButton, ignoredDomains}
+//   ui           -> {fullClipButton, playerButton, fullDownloadButton, ignoredDomains,
+//                    browserOnly, appRev}
 //                    (the app's switches and ignored domains from the last pong,
 //                    ping or setIgnored; absent -> every switch true, [];
 //                    stored without ignoredDomains -> []; stored without
 //                    fullDownloadButton -> true; content
 //                    scripts get only the switches and a per-tab `ignored`, through
-//                    getState and the `ui` broadcast)
+//                    getState and the `ui` broadcast, never browserOnly / appRev).
+//                    browserOnly: Browser mode (absent -> false). appRev: the app's
+//                    downloadWithRev from the last pong, null before any (absent),
+//                    or "sync" after a setDownloadWith. The newest change wins, on
+//                    the revision, never the value (A -> X -> A between two pongs
+//                    is still seen), with no write-back to the app: a pong with
+//                    appRev null turns browserOnly on only for "browser"; with
+//                    "sync" it records the revision and leaves browserOnly (the
+//                    menu pick is newer: Browser mode heard no pong); with another
+//                    revision it sets browserOnly = (downloadWith == "browser").
+//                    It always stores appRev = the revision. Known limit: an app
+//                    change made after a menu pick and before the next pong is
+//                    recorded, not applied. updateUI and setDownloadWith write
+//                    the whole object in one queue (UI_KEY).
 //   reload       -> "<own version>><app version>"   (the last version pair that
 //                    reloaded this extension; see reloadIfOutdated)
 // ---------------------------------------------------------------------------
@@ -1081,6 +1487,24 @@ const TOOLS = new Set(["yt-dlp", "ffmpeg", "ffprobe", "deno"]); // SegDownCore T
 const INCOGNITO_NEEDS_UPDATE = "Update the SegDown app to download incognito";
 const IGNORE_NEEDS_UPDATE = "Update the SegDown app to turn sites off from the browser";
 const MAX_VIDEO_SIDE = 100000; // candidate width/height in px
+// Player introspection: the app's IPC.protocolVersion that added the `playlist` source.
+const PLAYLIST_PROTOCOL = 5;
+// The app's IPC.protocolVersion that added the `dash` and `file` media kinds.
+const DASH_PROTOCOL = 6;
+// The app's IPC.protocolVersion that added the `openWith` request (Another app).
+const OPEN_WITH_PROTOCOL = 7;
+const DOWNLOAD_WITH = new Set(["segdown", "browser", "otherApp"]); // ClientSettings.downloadWith
+const BROWSER_ONLY = "Browser mode: SegDown downloads with the browser and does not use the SegDown app.";
+const COPY_KINDS = new Set(["link", "ytdlp", "ffmpeg"]); // copyText
+// Extensions a browser-saved file keeps (saveName); others get ".mp4" (kind mp4) or the browser's name.
+const SAVE_EXTS = [".mp4", ".m4v", ".mov", ".webm", ".mkv", ".ogv", ".3gp"];
+const MAX_SAVE_BASE = 120; // code points of a saved file's base name
+const MAX_APP_NAME = 100; // code points of settings.otherAppName and an `opened` app name
+const INTRO_TTL_MS = 30 * 1000; // a probe result serves the panel this long (never a job)
+const INTRO_TIMEOUT_MS = 3000; // executeScript of the MAIN-world probe
+const MAX_INLINE_PLAYLIST_BYTES = 256 * 1024; // Validation.maxInlinePlaylistBytes
+const MAX_INTRO_MANIFESTS = 8; // tabs whose probed manifest text stays in memory
+const REFETCH_TIMEOUT_MS = 5000; // the agent's abort of a page re-fetch; the hub waits 1 s more
 
 const isFiniteNum = (n) => typeof n === "number" && Number.isFinite(n);
 const isTime = (n) => isFiniteNum(n) && n >= 0;
@@ -1124,6 +1548,10 @@ function cleanCandidate(v) {
   }
   const isSide = (n) => Number.isInteger(n) && n > 0 && n <= MAX_VIDEO_SIDE;
   if (isSide(v.width) && isSide(v.height)) [out.width, out.height] = [v.width, v.height];
+  for (const flag of ["blob", "drm"]) {
+    if (v[flag] !== undefined && typeof v[flag] !== "boolean") return null;
+    if (v[flag] === true) out[flag] = true;
+  }
   return out;
 }
 
@@ -1190,6 +1618,8 @@ const HUB_VALIDATORS = new Map([
   ["setIncognito", (m) => (typeof m.on === "boolean" ? { on: m.on } : null)],
   ["view", () => ({})],
   ["ignoreSite", () => ({})],
+  ["setDownloadWith", (m) => (typeof m.browser === "boolean" ? { browser: m.browser } : null)],
+  ["copyText", (m) => (COPY_KINDS.has(m.what) ? { what: m.what } : null)],
 ]);
 
 // Accepted only from the frame that holds the selected video (see the protocol).
@@ -1214,6 +1644,8 @@ const SELECTED_FRAME_TYPES = new Set([
   "setIncognito",
   "view",
   "ignoreSite",
+  "setDownloadWith",
+  "copyText",
 ]);
 
 // Control characters become spaces, then at most MAX_TITLE_CHARS code points (never splits
@@ -1417,6 +1849,7 @@ async function onSelect(tabId, sel) {
   notifySelectionAgents(tabId, prev, hub.selected);
   notifyAll(tabId, { type: "state", state: hub });
   hubLog(`select tab=${tabId} frame=${sel.frameId} video=${sel.videoKey}`);
+  ensureIntro(tabId, hub.selected).catch(hubWarn); // Player introspection (blob: videos only)
   return { ok: true, state: hub };
 }
 
@@ -1490,6 +1923,7 @@ async function setPanelOpen(tabId, open) {
   });
   notifyAll(tabId, { type: "state", state: hub });
   hubLog(`panelOpen tab=${tabId} ${hub.panelOpen}`);
+  if (hub.panelOpen && hub.selected) ensureIntro(tabId, hub.selected).catch(hubWarn); // shares onSelect's run
   return { ok: true, state: hub };
 }
 
@@ -1678,15 +2112,23 @@ async function onSetIncognito(tabId, from, { on }) {
 // pushState / replaceState in the top frame (see the protocol). A URL that keys
 // the page already loaded (same URL, or only the hash changed) is not a change.
 // Runs after setTopURL in the tab queue, so loadSegments reads the new URL.
-async function onPageChanged(tabId, url) {
+// at: the navigation's time; captures older than it are marked stale (isLive).
+async function onPageChanged(tabId, url, at = Date.now()) {
   const key = pageKeyOf(url);
   const result = await withTab(tabId, async () => {
     const rec = await readPageRecord(tabId);
     if (rec && rec.key === key) return null;
+    const caps = (await chrome.storage.session.get({ [capKey(tabId)]: [] }))[capKey(tabId)];
+    if (Array.isArray(caps) && caps.length) {
+      for (const e of caps) if (isObject(e) && e.ts < at) e.staleAt = at; // a later change moves it on
+      await chrome.storage.session.set({ [capKey(tabId)]: caps });
+    }
     const h = await readHub(tabId);
     h.pendingStart = null; // a start belongs to the page it was marked on
     await writeHub(tabId, h);
-    await chrome.storage.session.remove([srcKey(tabId), varKey(tabId), resKey(tabId)]);
+    await chrome.storage.session.remove([srcKey(tabId), varKey(tabId), resKey(tabId), introKey(tabId)]);
+    introGens.set(tabId, introGen(tabId) + 1); // a player probe in flight writes nothing
+    introManifests.delete(tabId);
     return { hub: h, segments: await loadSegments(tabId) };
   });
   if (!result) return;
@@ -1698,13 +2140,47 @@ async function onPageChanged(tabId, url) {
 
 // --- source correlation (4.1; rules under "Source correlation" in the protocol) ---
 
-const isMediaEntry = (e) => isObject(e) && (e.kind === "hls" || e.kind === "mp4") && typeof e.url === "string";
+const MEDIA_KINDS = new Set(["hls", "dash", "mp4", "file"]);
+const isMediaEntry = (e) => isObject(e) && MEDIA_KINDS.has(e.kind) && typeof e.url === "string";
 
-// Only allowlisted headers, copied (the entry came from pickHeaders already).
-function entrySource(e, via) {
+// Does the app decode the dash and file kinds? An older app fails to decode the whole
+// enqueue, so correlate and sourceList drop those captures for it. Browser mode
+// (ui.browserOnly) keeps them: nothing goes to an app (correlate and sourceList's
+// callers read the flag).
+const dashAllowed = () => appProtocol() >= DASH_PROTOCOL;
+const isAppMediaEntry = (e) => isMediaEntry(e) && (dashAllowed() || (e.kind !== "dash" && e.kind !== "file"));
+
+// Pure: the capture e is url, or was redirected from it (alias).
+const sameURL = (e, url) => e.url === url || e.alias === url;
+
+// Only allowlisted headers, copied (stored headers came from pickHeaders already).
+function copyHeaders(h) {
   const headers = {};
-  for (const name of ALLOWED_HEADERS) if (isObject(e.headers) && typeof e.headers[name] === "string") headers[name] = e.headers[name];
-  return { source: { type: "media", url: e.url, kind: e.kind, headers }, frameId: e.frameId, via };
+  for (const name of ALLOWED_HEADERS) if (isObject(h) && typeof h[name] === "string") headers[name] = h[name];
+  return headers;
+}
+
+function entrySource(e, via) {
+  return { source: { type: "media", url: e.url, kind: e.kind, headers: copyHeaders(e.headers) }, frameId: e.frameId, via };
+}
+
+// The Referer / Origin a player's cross-origin request sends from a page at url
+// (strict-origin-when-cross-origin), through the header allowlist.
+function originHeaders(url) {
+  const origin = httpURL(url).origin;
+  return pickHeaders([{ name: "Referer", value: `${origin}/` }, { name: "Origin", value: origin }]);
+}
+
+// The frame's URL from webNavigation (never from a content script) when it is
+// http(s) and at most MAX_URL_LENGTH chars, else null.
+async function frameURL(tabId, frameId) {
+  try {
+    const frame = await chrome.webNavigation.getFrame({ tabId, frameId });
+    const url = frame && frame.url;
+    return typeof url === "string" && url.length <= MAX_URL_LENGTH && httpURL(url) ? url : null;
+  } catch {
+    return null; // the frame is gone, or no getFrame (Safari)
+  }
 }
 
 // Pure: the selected Facebook video's own page (frame 0, with videoId), else topURL.
@@ -1715,30 +2191,65 @@ function videoPageURL(topURL, selected, cand) {
   return `${u.origin}/watch/?v=${cand.videoId}`;
 }
 
-// Pure: {source, frameId, via} or null. `media` holds hls/mp4 entries, oldest first.
-function pickSource({ selected, currentSrc, choice, media, active, topURL }) {
+// Pure: the capture is from the current page: not marked stale by a page change
+// (onPageChanged), or its frame's chunks still come from its directory (the URL up to
+// its last "/") more than STALE_GRACE_MS after the change.
+function isLive(e, active) {
+  if (e.staleAt === undefined) return true;
+  const a = active[e.frameId];
+  if (!isObject(a) || !(a.ts > e.staleAt + STALE_GRACE_MS) || typeof a.lastChunkUrl !== "string") return false;
+  const u = new URL(e.url);
+  return a.lastChunkUrl.startsWith(u.origin + u.pathname.slice(0, u.pathname.lastIndexOf("/") + 1));
+}
+
+// Pure: {source, frameId, via} or null. `media` holds media entries the app takes,
+// oldest first. intro: the selected video's player probe record plus manifest (the
+// text, only when the app takes a playlist source) and frameHeaders (from the frame's
+// URL), or null. dash: the app takes the dash and file kinds (DASH_PROTOCOL).
+function pickSource({ selected, currentSrc, choice, intro, media, active, topURL, dash = false }) {
   if (choice) {
     const e = media.findLast((x) => x.url === choice.url);
     if (e) return entrySource(e, "user");
   }
   if (selected && currentSrc) {
-    const e = media.findLast((x) => x.url === currentSrc);
+    const e = media.findLast((x) => sameURL(x, currentSrc));
     if (e) return entrySource(e, "currentSrc");
-    const kind = httpURL(currentSrc).pathname.toLowerCase().endsWith(".m3u8") ? "hls" : "mp4";
+    const path = httpURL(currentSrc).pathname.toLowerCase();
+    // An old app gets webm & co. as mp4: it can still re-encode them in precise mode.
+    const fileExt = [".webm", ".mkv", ".ogv"].some((x) => path.endsWith(x));
+    const kind = path.endsWith(".m3u8") ? "hls" : fileExt && dash ? "file" : "mp4";
     return { source: { type: "media", url: currentSrc, kind, headers: {} }, frameId: selected.frameId, via: "currentSrc" };
   }
+  if (selected && intro) {
+    if (intro.manifest) {
+      const source = { type: "playlist", text: intro.manifest, baseURL: intro.baseURL, headers: copyHeaders(intro.headers) };
+      return { source, frameId: selected.frameId, via: "player" };
+    }
+    // dash only when the app reads DASH; a URL of no known kind is skipped too.
+    if (intro.url && (intro.kind === "hls" || intro.kind === "mp4" || (intro.kind === "dash" && dash))) {
+      const e = media.findLast((x) => sameURL(x, intro.url));
+      if (e) return entrySource(e, "player");
+      const source = { type: "media", url: intro.url, kind: intro.kind, headers: copyHeaders(intro.frameHeaders) };
+      return { source, frameId: selected.frameId, via: "player" };
+    }
+  }
+  // The capture tiers skip stale captures: with none live, the page source (never the previous video).
+  const live = media.filter((e) => isLive(e, active));
   if (selected) {
-    const own = media.filter((e) => e.frameId === selected.frameId);
+    const own = live.filter((e) => e.frameId === selected.frameId);
     const e =
       own.findLast((x) => x.kind === "hls" && x.isMaster === true) ||
       own.findLast((x) => x.kind === "hls") ||
-      own.findLast((x) => x.kind === "mp4");
+      own.findLast((x) => x.kind === "dash") ||
+      own.findLast((x) => x.kind === "mp4") ||
+      own.findLast((x) => x.kind === "file");
     if (e) return entrySource(e, "capture");
   }
   let best = null;
   let bestTier = -1;
-  for (const e of media) {
-    const tier = (isObject(active[e.frameId]) ? 4 : 0) + (e.kind === "hls" ? 2 : 0) + (e.isMaster === true ? 1 : 0);
+  for (const e of live) {
+    const kindTier = e.kind === "hls" ? 4 : e.kind === "dash" ? 2 : 0;
+    const tier = (isObject(active[e.frameId]) ? 8 : 0) + kindTier + (e.isMaster === true ? 1 : 0);
     if (tier >= bestTier) [best, bestTier] = [e, tier]; // >=: the newest wins a tie
   }
   if (best) return entrySource(best, "capture");
@@ -1750,9 +2261,12 @@ function pickSource({ selected, currentSrc, choice, media, active, topURL }) {
 // target ({frameId, videoKey}, default the selected video) is "own" when it is the
 // selected video; another target (the Download full button) is resolved without
 // the stored src: choice, which it never reads nor drops. r.own says which.
+// The player probe's record is used only for that target while its candidate is
+// blob:, its manifest only when the last pong allows a playlist source. A video in
+// a subframe uses that frame's URL as the page (r.pageFrame; r.topURL keeps the top).
 function correlate(tabId, target = null) {
   return withTab(tabId, async () => {
-    const keys = [capKey(tabId), actKey(tabId), candKey(tabId), srcKey(tabId), topKey(tabId)];
+    const keys = [capKey(tabId), actKey(tabId), candKey(tabId), srcKey(tabId), topKey(tabId), introKey(tabId)];
     const got = await chrome.storage.session.get(keys);
     const hub = await readHub(tabId);
     const sel = target || hub.selected;
@@ -1765,23 +2279,47 @@ function correlate(tabId, target = null) {
     }
     const top = got[topKey(tabId)];
     const topURL = typeof top === "string" && httpURL(top) ? top : null;
-    const pageURL = videoPageURL(topURL, sel, cand);
+    const dash = dashAllowed() || (await readUI()).browserOnly; // Browser mode keeps dash and file
+    // A subframe's own URL (an embed's page reads best in yt-dlp); Facebook's rule is frame 0 only.
+    const subURL = sel && sel.frameId > 0 ? await frameURL(tabId, sel.frameId) : null;
+    const pageFrame = Boolean(subURL && subURL !== topURL);
+    const pageURL = pageFrame ? subURL : videoPageURL(topURL, sel, cand);
+    const rec = got[introKey(tabId)];
+    let intro = null;
+    if (isObject(rec) && cand && cand.blob === true && sameSelection(rec, sel)) {
+      const kept = introManifests.get(tabId);
+      const allowed = rec.hasManifest && kept && kept.ts === rec.ts && appProtocol() >= PLAYLIST_PROTOCOL;
+      const ownURL = sel.frameId > 0 ? subURL : topURL; // the video's frame
+      intro = { ...rec, manifest: allowed ? kept.text : null, frameHeaders: ownURL ? originHeaders(ownURL) : {} };
+    }
     const r = pickSource({
       selected: sel,
       currentSrc: cand && cand.currentSrc ? cand.currentSrc : null,
       choice,
-      media: (got[capKey(tabId)] || []).filter(isMediaEntry),
+      intro,
+      media: (got[capKey(tabId)] || []).filter((e) => isMediaEntry(e) && (dash || (e.kind !== "dash" && e.kind !== "file"))),
       active: isObject(got[actKey(tabId)]) ? got[actKey(tabId)] : {},
       topURL: pageURL,
+      dash,
     });
-    // For the job (5.2): the page URL (page-first) and the target video's duration.
-    if (r) Object.assign(r, { pageURL, duration: cand && isFiniteNum(cand.duration) && cand.duration > 0 ? cand.duration : null, own });
+    // For the job (5.2): the page URL (page-first), the target video's duration and
+    // the DRM signals (player: the player probe's flag; keys: the agent's mediaKeys).
+    if (r) {
+      Object.assign(r, {
+        pageURL,
+        topURL,
+        pageFrame,
+        duration: cand && isFiniteNum(cand.duration) && cand.duration > 0 ? cand.duration : null,
+        own,
+        drm: { player: Boolean(intro && intro.drm === true), keys: Boolean(cand && cand.drm === true) },
+      });
+    }
     return r;
   });
 }
 
-// For the job builder (4.3): {source, frameId, via, pageURL, duration, own} with the
-// full Source (captured headers), or null. Service-worker only; never send it to
+// For the job builder (4.3): {source, frameId, via, pageURL, topURL, pageFrame,
+// duration, own, drm: {player, keys}} with the full Source (captured headers), or null. Service-worker only; never send it to
 // a content script. Reads the probe cache only (no native call); variantURL only
 // for a variant other than the default one (variantChosen: the user chose it).
 // An own target (see correlate) uses the stored var: choice; another target only
@@ -1804,22 +2342,27 @@ async function resolveSource(tabId, target = null, variantPick = null) {
 
 // The job's sources (see "Send the job"): page first with the resolved media as
 // its fallback when the media was not pinned by the user (chooseSource, a
-// non-default chooseVariant) and the app speaks protocol 2; else the resolved
-// source alone. -> {r, source, fallback (null when none)} or null.
+// non-default chooseVariant) and the app speaks protocol 2 (a playlist source too);
+// else the resolved source alone. -> {r, source, fallback (null when none), pinned}
+// or null. pinned: the user's pick, which no DRM rule overrides.
 // target / variantPick: see resolveSource (none = the selected video, as stored).
 async function planSource(tabId, protocol, target = null, variantPick = null) {
   const r = await resolveSource(tabId, target, variantPick);
   if (!r) return null;
   const pinned = r.via === "user" || Boolean(r.variantChosen && r.source.variantURL);
-  if (r.source.type === "media" && !pinned && protocol >= 2 && r.pageURL) {
-    return { r, source: { type: "page", url: r.pageURL }, fallback: r.source };
+  if ((r.source.type === "media" || r.source.type === "playlist") && !pinned && protocol >= 2 && r.pageURL) {
+    return { r, source: { type: "page", url: r.pageURL }, fallback: r.source, pinned };
   }
-  return { r, source: r.source, fallback: null };
+  return { r, source: r.source, fallback: null, pinned };
 }
 
 // Explicit field map: no query, no headers (see the protocol).
 function summarizeSource(r) {
   if (!r) return null;
+  if (r.source.type === "playlist") {
+    const base = httpURL(r.source.baseURL);
+    return { kind: "hls", host: base ? base.host : "", file: "inline playlist", frameId: r.frameId, via: r.via };
+  }
   const u = new URL(r.source.url);
   const parts = u.pathname.split("/").filter(Boolean);
   return {
@@ -1835,12 +2378,14 @@ async function onGetSource(tabId) {
   return { ok: true, source: await describeSource(tabId, await correlate(tabId)) };
 }
 
-// The source list chooseSource indexes: the tab's hls/mp4 captures sorted by
-// frameId, then URL. Stable while no capture is added or dropped (a re-fetch moves
-// an entry to the end of cap:<tabId>, so that order would shift under the menu).
-function sourceList(entries) {
+// The source list chooseSource indexes: the tab's hls, dash, mp4 and file captures
+// (dash and file only for an app at DASH_PROTOCOL, or in Browser mode: browser true)
+// sorted by frameId, then URL.
+// Stable while no capture is added or dropped (a re-fetch moves an entry to the end of
+// cap:<tabId>, so that order would shift under the menu).
+function sourceList(entries, browser = false) {
   return entries
-    .filter(isMediaEntry)
+    .filter((e) => (browser ? isMediaEntry(e) : isAppMediaEntry(e)))
     .sort((a, b) => a.frameId - b.frameId || (a.url < b.url ? -1 : a.url > b.url ? 1 : 0));
 }
 
@@ -1848,7 +2393,7 @@ async function onChooseSource(tabId, { index }) {
   const chosen = await withTab(tabId, async () => {
     const key = capKey(tabId);
     const entries = (await chrome.storage.session.get({ [key]: [] }))[key];
-    const e = sourceList(Array.isArray(entries) ? entries : [])[index];
+    const e = sourceList(Array.isArray(entries) ? entries : [], (await readUI()).browserOnly)[index];
     if (!e) return null;
     const { selected } = await readHub(tabId);
     await chrome.storage.session.set({ [srcKey(tabId)]: { url: e.url, selected } });
@@ -1874,7 +2419,19 @@ function cleanSettings(s) {
     fullDownloadButton: o.fullDownloadButton !== false,
     ignoredDomains: cleanDomains(o.ignoredDomains),
     preferredHeight: Number.isInteger(o.preferredHeight) && o.preferredHeight >= 1 && o.preferredHeight <= MAX_HEIGHT ? o.preferredHeight : null,
+    downloadWith: DOWNLOAD_WITH.has(o.downloadWith) ? o.downloadWith : "segdown",
+    // 0 from an older app (no revision): updateUI compares revisions, never values.
+    downloadWithRev: Number.isSafeInteger(o.downloadWithRev) && o.downloadWithRev >= 0 ? o.downloadWithRev : 0,
+    otherAppName: cleanAppName(o.otherAppName),
   };
+}
+
+// A display name from the app (control characters removed, at most MAX_APP_NAME
+// code points), or null.
+function cleanAppName(name) {
+  if (typeof name !== "string") return null;
+  const text = [...name.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")].slice(0, MAX_APP_NAME).join("").trim();
+  return text || null;
 }
 
 // Hostnames like IgnoredDomain.normalize's (lowercased first), deduped, at most
@@ -1889,19 +2446,28 @@ function cleanDomains(list) {
 }
 
 // storage.local ui, checked; never pinged (nothing stored) -> every switch on, no
-// ignored domains. A value stored before ignoredDomains existed reads as [], one
-// stored before fullDownloadButton existed reads it as true.
+// ignored domains, not in Browser mode, no app revision seen. A value stored before
+// ignoredDomains existed reads as [], one stored before fullDownloadButton existed
+// reads it as true, one stored before browserOnly / appRev existed as false / null.
 async function readUI() {
   const u = (await chrome.storage.local.get(UI_KEY))[UI_KEY];
+  const mode = {
+    browserOnly: isObject(u) && u.browserOnly === true,
+    appRev: isObject(u) && (Number.isSafeInteger(u.appRev) || u.appRev === "sync") ? u.appRev : null,
+  };
   return isObject(u) && typeof u.fullClipButton === "boolean" && typeof u.playerButton === "boolean"
     ? {
         fullClipButton: u.fullClipButton,
         playerButton: u.playerButton,
         fullDownloadButton: u.fullDownloadButton !== false,
         ignoredDomains: cleanDomains(u.ignoredDomains),
+        ...mode,
       }
-    : { fullClipButton: true, playerButton: true, fullDownloadButton: true, ignoredDomains: [] };
+    : { fullClipButton: true, playerButton: true, fullDownloadButton: true, ignoredDomains: [], ...mode };
 }
+
+// Browser mode (see the protocol): no native message, no native port.
+const browserOnly = async () => (await readUI()).browserOnly;
 
 // Ignored tab: the host of top:<tabId> is one of domains or a subdomain of one
 // (no top URL -> false).
@@ -1923,29 +2489,42 @@ async function uiFor(tabId, { fullClipButton, playerButton, fullDownloadButton, 
   return { fullClipButton, playerButton, fullDownloadButton, ignored: await tabIgnored(tabId, ignoredDomains) };
 }
 
-// True once a pong has stored the switches (never cleared).
+// True once a pong or a "Download with" menu pick has stored ui (never cleared).
 async function hasStoredUI() {
   return (await chrome.storage.local.get(UI_KEY))[UI_KEY] !== undefined;
 }
 
-// After a pong: saves the switches and ignored domains when they changed (or were
-// never stored) and sends every tab its own `ui` (uiFor).
+// After a pong: saves the switches, ignored domains and Browser mode when they
+// changed (or were never stored) and sends every tab its own `ui` (uiFor).
+// Browser mode follows the newest change (see the protocol's `ui` storage line): the
+// app's downloadWith applies only when its revision is new; after a menu pick
+// (appRev "sync") the revision is recorded, not applied. Read-modify-write in the
+// UI_KEY queue, shared with onSetDownloadWith.
 async function updateUI(settings) {
-  const { fullClipButton, playerButton, fullDownloadButton, ignoredDomains } = settings;
-  const ui = { fullClipButton, playerButton, fullDownloadButton, ignoredDomains };
-  const stored = await hasStoredUI();
-  const prev = await readUI();
-  const sameDomains =
-    prev.ignoredDomains.length === ignoredDomains.length && prev.ignoredDomains.every((d, i) => d === ignoredDomains[i]);
-  if (
-    stored &&
-    prev.fullClipButton === fullClipButton &&
-    prev.playerButton === playerButton &&
-    prev.fullDownloadButton === fullDownloadButton &&
-    sameDomains
-  )
-    return;
-  await chrome.storage.local.set({ [UI_KEY]: ui });
+  const { fullClipButton, playerButton, fullDownloadButton, ignoredDomains, downloadWith, downloadWithRev: rev } = settings;
+  const ui = await withTab(UI_KEY, async () => {
+    const stored = await hasStoredUI();
+    const prev = await readUI();
+    let browser = prev.browserOnly;
+    if (prev.appRev === null) browser = browser || downloadWith === "browser"; // first pong ever
+    else if (prev.appRev !== "sync" && rev !== prev.appRev) browser = downloadWith === "browser"; // a new app change
+    const sameDomains =
+      prev.ignoredDomains.length === ignoredDomains.length && prev.ignoredDomains.every((d, i) => d === ignoredDomains[i]);
+    if (
+      stored &&
+      prev.fullClipButton === fullClipButton &&
+      prev.playerButton === playerButton &&
+      prev.fullDownloadButton === fullDownloadButton &&
+      sameDomains &&
+      prev.browserOnly === browser &&
+      prev.appRev === rev
+    )
+      return null;
+    const next = { ...prev, fullClipButton, playerButton, fullDownloadButton, ignoredDomains, browserOnly: browser, appRev: rev };
+    await chrome.storage.local.set({ [UI_KEY]: next });
+    return next;
+  });
+  if (!ui) return;
   for (const tab of await chrome.tabs.query({})) {
     if (Number.isInteger(tab.id) && tab.id >= 0) notifyAll(tab.id, { type: "ui", ui: await uiFor(tab.id, ui) });
   }
@@ -1992,16 +2571,28 @@ function applyPong(reply) {
   return { result: { missing, protocol, settings }, ui };
 }
 
+// The only way to the native host besides the status port: refuses in Browser mode
+// (a backstop; callers return early so the error never lands in a cache).
+async function sendNative(msg) {
+  if (await browserOnly()) throw new Error(BROWSER_ONLY);
+  return chrome.runtime.sendNativeMessage(NATIVE_HOST, msg);
+}
+
 // -> {missing: [tool], protocol, settings} or {missing: [], appError}. Never
-// throws. Every pong goes through applyPong (updateUI not awaited).
+// throws. Every pong goes through applyPong, and its updateUI is awaited, so a
+// caller sees the Browser mode the pong set.
 async function pingNative() {
   let reply;
   try {
-    reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "ping" });
+    reply = await sendNative({ type: "ping" });
   } catch {
     return { missing: [], appError: APP_UNREACHABLE };
   }
-  if (isPong(reply)) return applyPong(reply).result;
+  if (isPong(reply)) {
+    const { result, ui } = applyPong(reply);
+    await ui;
+    return result;
+  }
   return { missing: [], appError: "Unexpected reply from the SegDown app." };
 }
 
@@ -2009,6 +2600,9 @@ const depsCache = { ts: 0, result: null, run: null };
 
 // settings.preferredHeight from the last pong (no native call), or null.
 const preferredHeight = () => (depsCache.result && depsCache.result.settings ? depsCache.result.settings.preferredHeight : null);
+
+// The protocol of the last pong (no native call): 1 without one or when the app errored.
+const appProtocol = () => (depsCache.result && !depsCache.result.appError ? depsCache.result.protocol : 1);
 
 // The index in heights of the tallest one <= pref, else of the shortest one; -1
 // without a preference or a height (non-integers are skipped). Ties keep the first.
@@ -2024,7 +2618,9 @@ function preferredIndex(heights, pref) {
 }
 
 // retryError: a cached failure is not reused (Download asks the app again).
-function fetchDeps(retryError = false) {
+// Browser mode: no ping, the cache untouched, {missing: [], appError: BROWSER_ONLY, browser: true}.
+async function fetchDeps(retryError = false) {
+  if (await browserOnly()) return { missing: [], appError: BROWSER_ONLY, browser: true };
   const cached = depsCache.result && Date.now() - depsCache.ts < DEPS_TTL_MS;
   if (cached && !(retryError && depsCache.result.appError)) return Promise.resolve(depsCache.result);
   if (!depsCache.run) {
@@ -2039,6 +2635,18 @@ function fetchDeps(retryError = false) {
       });
   }
   return depsCache.run;
+}
+
+// The overlay's "Download with" menu (see "Browser mode" in the protocol). Never
+// calls the app; leaving Browser mode drops the cached pong so the next `view` pings.
+async function onSetDownloadWith(tabId, { browser }) {
+  await withTab(UI_KEY, async () => {
+    await chrome.storage.local.set({ [UI_KEY]: { ...(await readUI()), browserOnly: browser, appRev: "sync" } });
+  });
+  if (!browser) depsCache.result = null;
+  hubLog(`downloadWith tab=${tabId} browser=${browser}`);
+  refreshActionMenu().catch(hubWarn);
+  return { ok: true };
 }
 
 async function onDeps() {
@@ -2070,7 +2678,7 @@ async function setIgnoredNative(host, ignored, deps) {
   const shared = (async () => {
     let answer;
     try {
-      answer = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "setIgnored", host, ignored });
+      answer = await sendNative({ type: "setIgnored", host, ignored });
     } catch {
       reply = appFailure(APP_UNREACHABLE);
       return deps;
@@ -2138,7 +2746,7 @@ function cleanVariant(v) {
 async function probeNative(source) {
   let reply;
   try {
-    reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "probe", source });
+    reply = await sendNative({ type: "probe", source });
   } catch {
     // Host manifest missing, host not allowed for this extension, or it crashed.
     return { error: { code: "unreachable", message: APP_UNREACHABLE } };
@@ -2223,6 +2831,7 @@ function storeProbe(tabId, gen, url, result) {
 }
 
 async function runProbes(tabId) {
+  if (await browserOnly()) return; // no native call in Browser mode
   const gen = tabGen(tabId);
   let stored = false;
   let budget = MAX_PROBES_PER_RUN;
@@ -2359,6 +2968,7 @@ function readHeights(tabId, pageURL) {
 }
 
 async function runPageProbe(tabId, pageURL) {
+  if (await browserOnly()) return; // no native call in Browser mode
   const gen = tabGen(tabId);
   if (isFresh((await readHeights(tabId, pageURL)).rec, Date.now())) return;
   const result = await probeNative({ type: "page", url: pageURL });
@@ -2393,6 +3003,337 @@ async function onChooseHeight(tabId, { index }) {
   });
   hubLog(`chooseHeight tab=${tabId} index=${index}`);
   return { ok: true };
+}
+
+// --- player introspection (rules under "Player introspection" in the protocol) ---
+
+// Serialized into the page (executeScript func): no closure over this worker,
+// every limit comes in as an argument or a literal. Runs in the page's MAIN
+// world, so everything it reads is page data (checked again by cleanIntro).
+// -> {url?, type?, drm, manifest?} or null; never throws.
+async function playerProbe(attr, maxBytes) {
+  try {
+    const own = (o, k) => {
+      try {
+        const d = Object.getOwnPropertyDescriptor(o, k);
+        return d ? d.value : undefined; // a value only: never runs a getter
+      } catch {
+        return undefined;
+      }
+    };
+    const isTagged = (el) => {
+      try {
+        return Boolean(el) && el.nodeType === 1 && el.hasAttribute(attr); // works inside shadow roots too
+      } catch {
+        return false;
+      }
+    };
+    const holds = (root) => {
+      try {
+        return isTagged(root) || Boolean(root && root.querySelector(`[${attr}]`));
+      } catch {
+        return false;
+      }
+    };
+    // Players are duck-typed: bundled sites have no window.Hls / window.shaka.
+    // Window's own keys, newest last (the page's globals follow the built-ins).
+    const objs = [];
+    const seen = new Set();
+    const add = (o) => {
+      if (o && typeof o === "object" && !seen.has(o)) {
+        seen.add(o);
+        objs.push(o);
+      }
+    };
+    let keys = [];
+    try {
+      keys = Object.getOwnPropertyNames(window).slice(-2000);
+    } catch {
+      // no keys
+    }
+    for (const k of keys) {
+      const o = own(window, k);
+      if (!o || typeof o !== "object") continue;
+      add(o);
+      for (const p of ["hls", "_hls", "player", "shaka", "dash"]) add(own(o, p));
+    }
+    let hit = null;
+    for (const o of objs) {
+      try {
+        if (typeof o.loadSource === "function" && "url" in o && "media" in o && Array.isArray(o.levels)) {
+          if (isTagged(o.media)) hit = { url: o.url, type: "application/x-mpegurl", drm: false }; // hls.js
+        } else if (typeof o.getAssetUri === "function" && typeof o.getMediaElement === "function") {
+          if (isTagged(o.getMediaElement())) {
+            const drm = typeof o.drmInfo === "function" && o.drmInfo() != null; // Shaka
+            hit = { url: o.getAssetUri(), drm };
+          }
+        } else if (typeof o.getSource === "function" && typeof o.getVideoElement === "function") {
+          if (isTagged(o.getVideoElement())) hit = { url: o.getSource(), type: "application/dash+xml", drm: false }; // dash.js
+        }
+      } catch {
+        // not a player, or a broken one
+      }
+      if (hit) break;
+    }
+    if (!hit) {
+      try {
+        const vjs = own(window, "videojs");
+        const players = typeof vjs === "function" && typeof vjs.getPlayers === "function" ? vjs.getPlayers() : null;
+        for (const p of Object.values(players || {})) {
+          if (!p || typeof p.el !== "function" || !holds(p.el())) continue;
+          const s = p.currentSource();
+          if (s) hit = { url: s.src, type: s.type, drm: false };
+          break;
+        }
+      } catch {
+        // no video.js
+      }
+    }
+    if (!hit) {
+      try {
+        const jw = own(window, "jwplayer");
+        if (typeof jw === "function") {
+          for (const c of document.querySelectorAll(".jwplayer")) {
+            if (!holds(c)) continue;
+            const item = jw(c).getPlaylistItem();
+            if (item) {
+              const sources = Array.isArray(item.sources) ? item.sources : [];
+              const file = item.file || (sources.find((s) => s && s.file) || {}).file;
+              hit = { url: file, type: typeof item.type === "string" ? item.type : undefined, drm: Boolean(item.drm) };
+            }
+            break;
+          }
+        }
+      } catch {
+        // no JW Player
+      }
+    }
+    if (!hit) return null;
+    const out = { drm: hit.drm === true };
+    if (typeof hit.url === "string") out.url = hit.url;
+    if (typeof hit.type === "string") out.type = hit.type;
+    // A playlist that exists only in the page: read it, at most maxBytes.
+    if (out.url && out.url.startsWith(`blob:${location.origin}/`)) {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 2000);
+      try {
+        const res = await fetch(out.url, { signal: ctl.signal });
+        const reader = res.body.getReader();
+        const chunks = [];
+        let size = 0;
+        while (size <= maxBytes) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          size += value.length;
+        }
+        reader.cancel().catch(() => {});
+        if (size <= maxBytes) {
+          const bytes = new Uint8Array(size);
+          let at = 0;
+          for (const c of chunks) {
+            bytes.set(c, at);
+            at += c.length;
+          }
+          const text = new TextDecoder().decode(bytes);
+          if (/^﻿?#EXTM3U/.test(text)) out.manifest = text;
+        }
+      } catch {
+        // unreadable or too slow: no manifest
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+// Playlist text the app may get inline (a player probe's manifest, a page re-fetch;
+// untrusted): within MAX_INLINE_PLAYLIST_BYTES, no NUL, "#EXTM3U" after an optional BOM.
+function isPlaylistText(m) {
+  return (
+    typeof m === "string" &&
+    m.length <= MAX_INLINE_PLAYLIST_BYTES &&
+    !m.includes("\0") &&
+    (m.startsWith("﻿") ? m.slice(1) : m).startsWith("#EXTM3U") &&
+    new TextEncoder().encode(m).length <= MAX_INLINE_PLAYLIST_BYTES
+  );
+}
+
+// The probe's result (untrusted page data, HUB_VALIDATORS style) -> a fresh
+// {url?, kind?, drm, manifest?}, or null when it is malformed or holds nothing usable.
+function cleanIntro(raw) {
+  if (!isObject(raw)) return null;
+  if (raw.drm !== undefined && typeof raw.drm !== "boolean") return null;
+  const out = { drm: raw.drm === true };
+  const u = typeof raw.url === "string" && raw.url.length <= MAX_URL_LENGTH ? httpURL(raw.url) : null; // never blob:
+  if (u) {
+    out.url = raw.url;
+    const type = typeof raw.type === "string" && raw.type.length <= 200 ? raw.type.toLowerCase() : "";
+    const path = u.pathname.toLowerCase();
+    if (/mpegurl/.test(type) || path.endsWith(".m3u8")) out.kind = "hls";
+    else if (/dash/.test(type) || path.endsWith(".mpd")) out.kind = "dash";
+    else if (type === "video/mp4" || path.endsWith(".mp4")) out.kind = "mp4";
+  }
+  if (isPlaylistText(raw.manifest)) out.manifest = raw.manifest;
+  return out.url || out.manifest || out.drm ? out : null;
+}
+
+// Call inside withTab. The base URL and headers of a probed manifest, never from
+// the page: the frame's last chunk request, else its newest capture (its own URL,
+// so a Cookie stays scoped to the origin it was sent to), else the frame's URL
+// with the Referer / Origin a player's cross-origin request sends. -> {baseURL,
+// headers} or null when none is an http(s) URL.
+async function introBase(tabId, frameId) {
+  const got = await chrome.storage.session.get({ [actKey(tabId)]: {}, [capKey(tabId)]: [] });
+  const ok = (url) => typeof url === "string" && url.length <= MAX_URL_LENGTH && Boolean(httpURL(url));
+  const act = isObject(got[actKey(tabId)]) ? got[actKey(tabId)][frameId] : null;
+  if (isObject(act) && ok(act.lastChunkUrl)) return { baseURL: act.lastChunkUrl, headers: copyHeaders(act.headers) };
+  const entries = Array.isArray(got[capKey(tabId)]) ? got[capKey(tabId)] : [];
+  const e = entries.findLast((x) => isObject(x) && x.frameId === frameId && ok(x.url));
+  if (e) return { baseURL: e.url, headers: copyHeaders(e.headers) };
+  const url = await frameURL(tabId, frameId);
+  return url ? { baseURL: url, headers: originHeaders(url) } : null;
+}
+
+// Keeps text as the tab's manifest (newest MAX_INTRO_MANIFESTS tabs).
+function keepManifest(tabId, ts, text) {
+  introManifests.delete(tabId); // re-inserted last
+  introManifests.set(tabId, { ts, text });
+  for (const old of introManifests.keys()) {
+    if (introManifests.size <= MAX_INTRO_MANIFESTS) break;
+    introManifests.delete(old);
+  }
+}
+
+// Replaces the tab's record with intro's (null removes it), unless the tab was
+// cleared or changed page since gen. A manifest without a base URL is dropped.
+// -> the selection when its record was written or removed (its overlay should
+// ask `view` again), else null.
+function writeIntro(tabId, gen, target, intro) {
+  return withTab(tabId, async () => {
+    if (introGen(tabId) !== gen) return null;
+    const key = introKey(tabId);
+    const old = (await chrome.storage.session.get(key))[key];
+    const { selected } = await readHub(tabId);
+    introManifests.delete(tabId);
+    const base = intro && intro.manifest ? await introBase(tabId, target.frameId) : null;
+    let rec = null;
+    if (intro && (base || intro.url || intro.drm)) {
+      rec = { frameId: target.frameId, videoKey: target.videoKey, ts: Date.now(), drm: intro.drm, hasManifest: Boolean(base) };
+      if (intro.url) rec.url = intro.url;
+      if (intro.kind) rec.kind = intro.kind;
+      Object.assign(rec, base || { baseURL: null, headers: {} });
+      await chrome.storage.session.set({ [key]: rec });
+      if (base) keepManifest(tabId, rec.ts, intro.manifest);
+    } else if (old !== undefined) {
+      await chrome.storage.session.remove(key);
+    }
+    const touched = (rec && sameSelection(selected, target)) || (isObject(old) && sameSelection(selected, old));
+    return selected && touched ? selected : null;
+  });
+}
+
+let mainWorldOff = false; // executeScript refused world "MAIN": no probe for this worker's life
+
+// Rejects with Error("timeout") after ms.
+function withTimeout(promise, ms) {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timeout")), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+// One player probe of target ({frameId, videoKey}); every run replaces the
+// tab's record (see the protocol). Never call inside withTab.
+async function runIntro(tabId, target) {
+  const gen = introGen(tabId);
+  const log = (what) => hubLog(`intro tab=${tabId} frame=${target.frameId} video=${target.videoKey} ${what}`);
+  let intro = null;
+  if (typeof chrome.scripting?.executeScript === "function" && !mainWorldOff) {
+    const hex = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
+    const attr = `data-segdown-${hex}`;
+    const tag = await askAgent(tabId, target.frameId, { type: "tag", videoKey: target.videoKey, attr });
+    if (tag.ok !== true) log("tag-refused");
+    else {
+      try {
+        const results = await withTimeout(
+          chrome.scripting.executeScript({
+            target: { tabId, frameIds: [target.frameId] },
+            world: "MAIN",
+            func: playerProbe,
+            args: [attr, MAX_INLINE_PLAYLIST_BYTES],
+          }),
+          INTRO_TIMEOUT_MS
+        );
+        intro = cleanIntro(Array.isArray(results) && results[0] ? results[0].result : null);
+        log(intro ? `found kind=${intro.kind || "none"} manifest=${Boolean(intro.manifest)} drm=${intro.drm}` : "none");
+      } catch (err) {
+        const message = String(err && err.message ? err.message : err);
+        if (/\bworld\b/i.test(message)) {
+          mainWorldOff = true;
+          console.warn("[SegDown] hub: no MAIN world for executeScript; player introspection is off");
+        }
+        log(message === "timeout" ? "timeout" : "error");
+      } finally {
+        askAgent(tabId, target.frameId, { type: "untag", attr }).catch(hubWarn);
+      }
+    }
+  }
+  const selected = await writeIntro(tabId, gen, target, intro);
+  if (selected) notifyOverlay(tabId, selected.frameId, { type: "sourceChanged" });
+}
+
+// The tab's record for target, or null. fresh: younger than INTRO_TTL_MS with
+// its manifest (if any) still in memory, else null.
+function readIntro(tabId, target, fresh = false) {
+  return withTab(tabId, async () => {
+    const rec = (await chrome.storage.session.get(introKey(tabId)))[introKey(tabId)];
+    if (!isObject(rec) || !sameSelection(rec, target)) return null;
+    if (!fresh) return rec;
+    const kept = introManifests.get(tabId);
+    return Date.now() - rec.ts < INTRO_TTL_MS && (!rec.hasManifest || (kept && kept.ts === rec.ts)) ? rec : null;
+  });
+}
+
+// Is target a candidate whose currentSrc is blob:?
+async function isBlobTarget(tabId, target) {
+  const cands = await withTab(tabId, () => readCands(tabId));
+  return (cands[target.frameId] || []).some((v) => v.videoKey === target.videoKey && v.blob === true);
+}
+
+// tabId -> {target, run}: the player probe in flight (one per tab at a time).
+const introRuns = new Map();
+
+// The tab's player probe record for target, probing first when needed (blob:
+// videos only). Without fresh, a recent record is reused and a run in flight
+// for the same target is shared (the panel). fresh (Download) waits for a run
+// in flight, then always probes, so its result is never from before the click.
+// The run is registered before any await, so callers in one turn share it.
+// Reads the record back (what the generation guard let through); never rejects.
+function ensureIntro(tabId, target, { fresh = false } = {}) {
+  const busy = introRuns.get(tabId);
+  let run;
+  if (busy && !fresh && sameSelection(busy.target, target)) run = busy.run;
+  else {
+    run = (busy ? busy.run : Promise.resolve())
+      .then(async () => {
+        if (!fresh && (await readIntro(tabId, target, true))) return;
+        if (await isBlobTarget(tabId, target)) await runIntro(tabId, target);
+      })
+      .catch(hubWarn)
+      .finally(() => {
+        if (introRuns.get(tabId) && introRuns.get(tabId).run === run) introRuns.delete(tabId);
+      });
+    introRuns.set(tabId, { target, run });
+  }
+  return run.then(() => readIntro(tabId, target)).catch((err) => {
+    hubWarn(err);
+    return null;
+  });
 }
 
 // --- Download full button (rules under fullOptions in the protocol) ---
@@ -2449,6 +3390,7 @@ function probeOnce(tabId, source) {
   const key = `${tabId} ${source.url}`;
   if (probeOnceRuns.has(key)) return probeOnceRuns.get(key);
   const run = (async () => {
+    if (await browserOnly()) return; // no native call in Browser mode
     const gen = tabGen(tabId);
     if (isFresh((await readProbeRec(tabId, source.url)).rec, Date.now())) return;
     const result = await probeNative(source);
@@ -2465,10 +3407,16 @@ function probeOnce(tabId, source) {
 async function onFullOptions(tabId, frameId, { videoKey, probe }) {
   const t = await fullTarget(tabId, frameId, videoKey);
   if (!t.ok) return t;
+  // Browser and Another-app modes take the whole file: no list, the button downloads at once.
+  const whole = { ok: true, kind: "none", items: [], defaultIndex: 0, pending: false };
+  if (await browserOnly()) return whole;
+  // The button hovers: a player probe is started, never awaited (Download awaits its own).
+  if (probe) ensureIntro(tabId, t.target).catch(hubWarn);
   // probe: ask the app (it may launch it); else the last pong only. A failing app
   // counts as protocol 1 (no heights), so the button downloads at once and gets the
   // app's error from downloadFull.
   const app = probe ? await fetchDeps() : depsCache.result;
+  if (otherAppMode(app)) return whole;
   const protocol = !app ? null : app.appError ? 1 : app.protocol;
   const o = await fullOptionsFor(tabId, t.target, protocol);
   // Not awaited: the reply never waits for a probe (the button polls).
@@ -2512,7 +3460,7 @@ async function onDownloadFull(tabId, frameId, { videoKey, kind, index }, from) {
 async function enqueueNative(job) {
   let reply;
   try {
-    reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "enqueue", job });
+    reply = await sendNative({ type: "enqueue", job });
   } catch {
     return { ok: false, error: "app-unreachable", message: APP_UNREACHABLE };
   }
@@ -2526,7 +3474,27 @@ async function enqueueNative(job) {
   return { ok: false, error: "app-error", code: "internal", message: "Unexpected reply from the SegDown app." };
 }
 
-// The tab's title (never the message body or the sending frame's document).
+// "(3) ▶ Clip - YouTube" on www.youtube.com -> "Clip" (rules in the protocol
+// comment's "Send the job"). Pure; host "" (or an IP) has no site rule.
+function tidyTitle(title, host) {
+  let t = title;
+  const cut = (re) => {
+    const rest = t.replace(re, "").trim();
+    if (rest) t = rest;
+  };
+  cut(/^\(\d{1,4}\+?\)\s+/);
+  cut(/^[\u25b6\u25ba]\ufe0f?\s*/);
+  const labels = host.toLowerCase().split(".").filter(Boolean);
+  if (!labels.length || host.includes(":") || /^\d+(\.\d+){3}$/.test(host)) return t;
+  const norm = (s) => s.toLowerCase().replace(/[\s.-]/g, "");
+  const sites = [norm(labels.length > 1 ? labels[labels.length - 2] : labels[0]), norm(labels.slice(-2).join("."))];
+  const m = /^(.*\S)\s+[-\u2013\u2014|]\s+(\S.*)$/.exec(t);
+  if (m && sites.includes(norm(m[2]))) t = m[1];
+  return t;
+}
+
+// The tab's title (never the message body or the sending frame's document),
+// tidied for the host of top:<tabId>.
 async function tabTitle(tabId, from) {
   let title = typeof from.tabTitle === "string" ? from.tabTitle : "";
   if (!title) {
@@ -2537,7 +3505,14 @@ async function tabTitle(tabId, from) {
       // the tab is gone
     }
   }
-  return cleanTitle(title);
+  const top = await withTab(tabId, async () => (await chrome.storage.session.get(topKey(tabId)))[topKey(tabId)]);
+  let host = "";
+  try {
+    host = new URL(top).hostname;
+  } catch {
+    // no top-frame URL
+  }
+  return tidyTitle(cleanTitle(title), host);
 }
 
 // A failed ping as a Download reply.
@@ -2547,9 +3522,53 @@ function appFailure(appError) {
     : { ok: false, error: "app-error", code: "internal", message: appError };
 }
 
+// Asks the frame that captured the hls playlist url to fetch it again (see "Send the
+// job"). -> null when it does not apply (no hls capture with that URL, or a service
+// worker's), else {entry, text} (text null when the page got nothing usable). Never
+// holds the tab queue while it waits.
+async function refetchPlaylist(tabId, url) {
+  const entries = await withTab(tabId, async () => (await chrome.storage.session.get({ [capKey(tabId)]: [] }))[capKey(tabId)]);
+  const entry = Array.isArray(entries) ? entries.find((e) => isObject(e) && e.url === url && e.kind === "hls") : null;
+  if (!entry || entry.sw === true || !Number.isInteger(entry.frameId)) return null;
+  const headers = copyHeaders(entry.headers);
+  // "include" fails CORS against Access-Control-Allow-Origin: *; hls.js sends "same-origin".
+  const frame = await frameURL(tabId, entry.frameId);
+  const sameOrigin = frame !== null && httpURL(frame).origin === httpURL(entry.url).origin;
+  const msg = {
+    to: "agent",
+    type: "refetch",
+    url: entry.url,
+    credentials: headers.Cookie || sameOrigin ? "include" : "same-origin",
+    maxBytes: MAX_INLINE_PLAYLIST_BYTES,
+  };
+  if (headers.Referer) msg.referrer = headers.Referer; // the agent keeps it only when same-origin
+  const key = refetchKey(tabId, entry.frameId, entry.url);
+  const now = Date.now();
+  for (const [k, expiry] of refetching) if (expiry <= now) refetching.delete(k);
+  refetching.set(key, now + REFETCH_TIMEOUT_MS + 1000);
+  let timer;
+  try {
+    // Not askAgent: a frame that cannot answer is not dropped for this.
+    const reply = await Promise.race([
+      Promise.resolve()
+        .then(() => chrome.tabs.sendMessage(tabId, msg, { frameId: entry.frameId }))
+        .catch(() => null),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, REFETCH_TIMEOUT_MS + 1000, null);
+      }),
+    ]);
+    const text = isObject(reply) && reply.ok === true && isPlaylistText(reply.text) ? reply.text : null;
+    return { entry, text };
+  } finally {
+    clearTimeout(timer);
+    refetching.delete(key);
+  }
+}
+
 // aim (downloadFull only): {target, pick: {kind, index} | null}, a video that may
 // not be the selected one and a pick from its fullOptions list for this one job.
 async function onDownload(tabId, from, body, aim = null) {
+  if (await browserOnly()) return downloadInBrowser(tabId, from, aim && aim.target);
   // A full clip never reads segs:<tabId>: its one segment comes from the plan below.
   // The page key is read with the segments, so a later navigation cannot relink them.
   let { segments, pageId } = body.full
@@ -2558,22 +3577,57 @@ async function onDownload(tabId, from, body, aim = null) {
         segments: await readSegments(tabId),
         pageId: pageKeyOf((await chrome.storage.session.get(topKey(tabId)))[topKey(tabId)]),
       }));
-  if (segments && !segments.length) return { ok: false, error: "no-segments" };
   // Settings, protocol and the incognito default come from a pong: without one
   // the job cannot follow the user's incognito choice.
   const app = await fetchDeps(true);
   if (app.appError) return appFailure(app.appError);
+  // Another app gets the whole video's link: no segments needed.
+  if (otherAppMode(app)) return openInOtherApp(tabId, from, aim && aim.target);
+  if (segments && !segments.length) return { ok: false, error: "no-segments" };
   const incognito = (await withTab(tabId, () => tabIncognito(tabId, from))).on || body.incognito;
   if (incognito && app.protocol < 2) return { ok: false, error: "app-outdated", message: INCOGNITO_NEEDS_UPDATE };
   const variantPick = aim && aim.pick && aim.pick.kind === "variants" ? aim.pick.index : null;
+  // A job never uses a cached player probe: probe again now (blob: videos only).
+  const target = aim ? aim.target : (await withTab(tabId, () => readHub(tabId))).selected;
+  if (target) await ensureIntro(tabId, target, { fresh: true });
   const plan = await planSource(tabId, app.protocol, aim && aim.target, variantPick); // own withTab turns; never nest
   if (!plan) return { ok: false, error: "no-source" };
+  // DRM (see "Send the job"): the player's own flag refuses the job; bare mediaKeys
+  // only drops a page-first job's captured fallback. A pinned source skips both.
+  const drm = plan.r.drm.player ? "player" : plan.r.drm.keys ? "keys" : null;
+  const sourceKind = (s) => (s.type === "page" || s.type === "playlist" ? s.type : s.kind);
+  const tags = ` via=${plan.r.via}${drm ? ` drm=${drm}` : ""}${plan.r.pageFrame ? " page=frame" : ""}`;
+  if (drm && !plan.pinned) {
+    if (drm === "player" || plan.source.type !== "page") {
+      hubLog(`download tab=${tabId} kind=${sourceKind(plan.source)}${tags} error=drm`);
+      return { ok: false, error: "drm" };
+    }
+    plan.fallback = null;
+  }
   if (body.full) {
     // The end is the hub's own duration of the target video, never the message's.
     const d = plan.r.duration;
     if (!isFiniteNum(d) || !(d > 0)) return { ok: false, error: "no-duration" };
     if (app.settings.maxDuration !== null && d > app.settings.maxDuration) return { ok: false, error: "over-limit" };
     segments = [{ start: 0, end: d }];
+  }
+  // A hls capture the app was refused (its probe record says "unavailable", which the
+  // host also answers while the app is not running: then one extra, usually cached,
+  // GET): the frame that played it fetches it again and the text goes as a playlist.
+  const slot = plan.fallback ? "fallback" : "source";
+  const media = plan[slot];
+  let refetched = "";
+  if (
+    media.type === "media" &&
+    media.kind === "hls" &&
+    app.protocol >= PLAYLIST_PROTOCOL &&
+    (await readProbeRec(tabId, media.url)).rec?.error?.code === "unavailable"
+  ) {
+    const got = await refetchPlaylist(tabId, media.url);
+    if (got) {
+      refetched = ` refetch=${got.text ? "ok" : "fail"}`;
+      if (got.text) plan[slot] = { type: "playlist", text: got.text, baseURL: got.entry.url, headers: copyHeaders(got.entry.headers) };
+    }
   }
   const title = await tabTitle(tabId, from);
   const mode = body.mode || app.settings.mode;
@@ -2594,11 +3648,12 @@ async function onDownload(tabId, from, body, aim = null) {
     if (height) job.maxHeight = height;
   }
   if (plan.r.duration !== null) job.mediaDuration = plan.r.duration;
-  if (plan.r.pageURL) job.pageURL = plan.r.pageURL;
+  // The Downloads card links to the page the user watched: the top URL when a subframe's was used.
+  const cardURL = plan.r.pageFrame ? plan.r.topURL : plan.r.pageURL;
+  if (cardURL) job.pageURL = cardURL;
   if (incognito) job.incognito = true;
   const result = await enqueueNative(job);
-  const kind = (s) => (s.type === "page" ? "page" : s.kind);
-  hubLog(`download tab=${tabId} kind=${kind(plan.source)}${plan.fallback ? `+${kind(plan.fallback)}` : ""} segments=${segments.length}${job.maxHeight ? ` maxHeight=${job.maxHeight}` : ""} ${result.ok ? "enqueued" : `error=${result.code || result.error}`}`);
+  hubLog(`download tab=${tabId} kind=${sourceKind(plan.source)}${plan.fallback ? `+${sourceKind(plan.fallback)}` : ""}${refetched}${tags} segments=${segments.length}${job.maxHeight ? ` maxHeight=${job.maxHeight}` : ""} ${result.ok ? "enqueued" : `error=${result.code || result.error}`}`);
   if (result.ok) {
     // Incognito jobs: id and timestamp only, nothing in jobt.
     const entry = incognito ? { jobId: result.jobId, ts: Date.now() } : { jobId: result.jobId, title, ts: Date.now() };
@@ -2612,6 +3667,178 @@ async function onDownload(tabId, from, body, aim = null) {
     if (!incognito) await rememberJob(result.jobId, title, pageId ? { key: pageId, ranges: job.segments } : null);
     fetchStatus(); // the running badge counts the new job
   }
+  return result;
+}
+
+// --- Browser mode and Another app (rules under "Browser mode" and "Send the job" in the protocol) ---
+
+// The app's last pong (a fetchDeps result, or null) has Another app on and speaks openWith.
+const otherAppMode = (app) =>
+  Boolean(app && !app.appError && app.settings && app.settings.downloadWith === "otherApp" && app.protocol >= OPEN_WITH_PROTOCOL);
+
+// Pure: the resolved media is the whole stream: the video's own http currentSrc or the
+// user's chooseSource pick, or a playlist or manifest. An mp4 / file from the capture
+// tiers or the player probe is not: on MSE sites it is one ranged track (video or audio).
+function directMedia(r) {
+  if (!r || r.source.type !== "media") return false;
+  return r.via === "currentSrc" || r.via === "user" || r.source.kind === "hls" || r.source.kind === "dash";
+}
+
+// "hls" | "dash" | "mp4" | "file" | "page" | "playlist".
+const kindOf = (r) => (r.source.type === "media" ? r.source.kind : r.source.type);
+
+// Pure: the lowercased extension of url's last path component (".webm"), else "".
+function urlExt(url) {
+  const u = httpURL(url);
+  const name = u ? u.pathname.slice(u.pathname.lastIndexOf("/") + 1) : "";
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot).toLowerCase() : "";
+}
+
+// Pure: a file name base from the tab title: / \ : * ? " < > | and control characters
+// become spaces, runs of spaces collapse, no leading or trailing dots or spaces, at
+// most MAX_SAVE_BASE code points; empty -> "video".
+function saveBase(title) {
+  const trim = (t) => t.replace(/^[. ]+|[. ]+$/g, "");
+  const cleaned = trim(title.replace(/[/\\:*?"<>|\u0000-\u001f\u007f]/g, " ").replace(/ {2,}/g, " "));
+  return trim([...cleaned].slice(0, MAX_SAVE_BASE).join("")) || "video";
+}
+
+// Pure: "SegDown/<base><ext>" for chrome.downloads (ext: the URL's when it is one of
+// SAVE_EXTS, else ".mp4" for kind mp4), or null for a file of another extension (no
+// filename: the browser names it from the response).
+function saveName(title, url, kind) {
+  const ext = urlExt(url);
+  if (SAVE_EXTS.includes(ext)) return `SegDown/${saveBase(title)}${ext}`;
+  return kind === "mp4" ? `SegDown/${saveBase(title)}.mp4` : null;
+}
+
+// The player probe Download makes (see onDownload): fresh, for target or the selected video.
+async function freshIntro(tabId, target) {
+  const t = target || (await withTab(tabId, () => readHub(tabId))).selected;
+  if (t) await ensureIntro(tabId, t, { fresh: true });
+}
+
+// Browser mode's Download and Download full video: the whole file, saved by the
+// browser (no job, no jobs:<tabId>, no native call). target: see onDownload's aim.
+async function downloadInBrowser(tabId, from, target) {
+  await freshIntro(tabId, target);
+  const r = await resolveSource(tabId, target);
+  const kind = r ? kindOf(r) : "none";
+  const done = (reply) => {
+    hubLog(`download tab=${tabId} with=browser kind=${kind} ${reply.ok ? `saved=${reply.saved}` : `error=${reply.error}`}`);
+    return reply;
+  };
+  if (!r) return done({ ok: false, error: "no-source" });
+  if (kind === "playlist") return done({ ok: false, error: "inline-only" });
+  if (!directMedia(r) || (kind !== "mp4" && kind !== "file")) return done({ ok: false, error: "copy-only" });
+  // Chrome's spanning worker belongs to the normal profile: the file would land there.
+  if ((await withTab(tabId, () => tabIncognito(tabId, from))).forced) return done({ ok: false, error: "private-window" });
+  const url = r.source.url;
+  if (typeof chrome.downloads?.download !== "function") {
+    // No downloads API (Safari): the file opens in a new tab, where the browser's Save works.
+    try {
+      await chrome.tabs.create({ url });
+    } catch {
+      return done({ ok: false, error: "browser-download" });
+    }
+    return done({ ok: true, saved: "tab" });
+  }
+  // No headers option: the browser refuses Referer, Origin, Cookie and User-Agent there.
+  const options = { url, saveAs: false, conflictAction: "uniquify" };
+  const save = (o) => Promise.resolve().then(() => chrome.downloads.download(o)).then(() => true, () => false);
+  const filename = saveName(await tabTitle(tabId, from), url, kind);
+  // A refused filename (invalid on this system): once more without one.
+  const started = (filename !== null && (await save({ ...options, filename }))) || (await save(options));
+  return done(started ? { ok: true, saved: "browser" } : { ok: false, error: "browser-download" });
+}
+
+// Pure: a POSIX single-quoted shell word ('\'' for a quote), so a pasted value never runs code.
+const shq = (s) => `'${s.replaceAll("'", "'\\''")}'`;
+
+// Pure: the copyText text for what ("link" | "ytdlp" | "ffmpeg"), resolved source r and
+// the tab's title -> {ok: true, text} | {ok: false, error: "copy-only" | "bad-url"}.
+// Headers: Referer, User-Agent and Origin only; never Cookie (every app reads the clipboard).
+function copyCommand(what, r, title) {
+  const { source } = r;
+  const direct = directMedia(r);
+  if (what === "ffmpeg" && !direct) return { ok: false, error: "copy-only" };
+  // yt-dlp gets the page, never one MSE track (planSource's page-first rule).
+  const url = what === "ytdlp" && !direct && r.pageURL ? r.pageURL : source.url;
+  const h = isObject(source.headers) ? source.headers : {};
+  const header = (name) => (typeof h[name] === "string" && h[name] ? h[name] : null);
+  const [referer, agent, origin] = [header("Referer"), header("User-Agent"), header("Origin")];
+  if ([url, referer, agent, origin].some((v) => v !== null && /[\u0000-\u001f\u007f]/.test(v))) {
+    return { ok: false, error: "bad-url" };
+  }
+  if (what === "link") return { ok: true, text: url };
+  const words = [];
+  if (what === "ytdlp") {
+    words.push("yt-dlp");
+    if (referer) words.push("--referer", shq(referer));
+    if (agent) words.push("--user-agent", shq(agent));
+    if (origin) words.push("--add-header", shq(`Origin:${origin}`));
+    words.push(shq(url));
+  } else {
+    // mp4 for hls and mp4; a file keeps its own container (VP8 does not fit in mp4), mkv when unknown.
+    const ext = source.kind !== "file" ? ".mp4" : SAVE_EXTS.includes(urlExt(url)) ? urlExt(url) : ".mkv";
+    words.push("ffmpeg");
+    if (agent) words.push("-user_agent", shq(agent));
+    if (referer) words.push("-referer", shq(referer));
+    if (origin) words.push("-headers", shq(`Origin: ${origin}`));
+    words.push("-i", shq(url), "-c", "copy", shq(`./${saveBase(title)}${ext}`));
+  }
+  return { ok: true, text: words.join(" ") };
+}
+
+// copyText (Browser mode only): the selected video's link, or a command, for the clipboard.
+async function onCopyText(tabId, from, { what }) {
+  if (!(await browserOnly())) return { ok: false, error: "bad-message" };
+  await freshIntro(tabId, null);
+  const r = await resolveSource(tabId);
+  const kind = r ? kindOf(r) : "none";
+  let result;
+  if (!r) result = { ok: false, error: "no-source" };
+  else if (kind === "playlist") result = { ok: false, error: "inline-only" };
+  // ffmpeg has no dash demuxer here, and a page needs yt-dlp.
+  else if (what === "ffmpeg" && !["hls", "mp4", "file"].includes(kind)) result = { ok: false, error: "bad-message" };
+  else result = copyCommand(what, r, await tabTitle(tabId, from));
+  hubLog(`copy tab=${tabId} what=${what} kind=${kind}${result.ok ? "" : ` error=${result.error}`}`);
+  return result;
+}
+
+// openWith (Another app): only the URL goes to the app, never headers or Cookie.
+async function openWithNative(url) {
+  let reply;
+  try {
+    reply = await sendNative({ type: "openWith", url });
+  } catch {
+    return { ok: false, error: "app-unreachable", message: APP_UNREACHABLE };
+  }
+  if (isObject(reply) && reply.type === "opened" && typeof reply.app === "string") {
+    return { ok: true, opened: cleanAppName(reply.app) || "the chosen app" };
+  }
+  if (isObject(reply) && reply.type === "error" && typeof reply.code === "string") {
+    const text = typeof reply.message === "string" ? reply.message.slice(0, MAX_MESSAGE_CHARS) : "";
+    return { ok: false, error: "app-error", code: reply.code.slice(0, 32), message: text || "SegDown could not open the link." };
+  }
+  return { ok: false, error: "app-error", code: "internal", message: "Unexpected reply from the SegDown app." };
+}
+
+// Another-app mode's Download and Download full video: the app opens the whole video's
+// link in the app the user chose. The media URL only when it is the whole stream, else
+// the page URL. No job, no jobs:<tabId>. target: see onDownload's aim.
+async function openInOtherApp(tabId, from, target) {
+  await freshIntro(tabId, target);
+  const r = await resolveSource(tabId, target);
+  const kind = r ? kindOf(r) : "none";
+  let result;
+  if (!r) result = { ok: false, error: "no-source" };
+  else if (kind === "playlist") result = { ok: false, error: "inline-only" };
+  // A private window's link never leaves the browser.
+  else if ((await withTab(tabId, () => tabIncognito(tabId, from))).forced) result = { ok: false, error: "private-window" };
+  else result = await openWithNative(directMedia(r) ? r.source.url : r.pageURL || r.source.url);
+  hubLog(`download tab=${tabId} with=otherApp kind=${kind} ${result.ok ? "opened" : `error=${result.code || result.error}`}`);
   return result;
 }
 
@@ -2849,12 +4076,17 @@ function fetchStatus() {
 }
 
 async function statusOnce() {
+  // Browser mode: no status call and no port; the running badge clears (and its poll stops).
+  if (await browserOnly()) {
+    showActiveJobs([]);
+    return { error: BROWSER_ONLY };
+  }
   const msg = { type: "status" };
   let reply;
   try {
     if (statusPort.fallbackNext || !HAS_STATUS_PORT) {
       statusPort.fallbackNext = false;
-      reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, msg);
+      reply = await sendNative(msg);
     } else {
       reply = await portRequest(msg);
     }
@@ -2894,7 +4126,7 @@ async function onJobs(tabId) {
 async function cancelNative(id) {
   let reply;
   try {
-    reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: "cancel", id });
+    reply = await sendNative({ type: "cancel", id });
   } catch {
     return { ok: false, error: "app-unreachable", message: APP_UNREACHABLE };
   }
@@ -2945,12 +4177,16 @@ function depsProblem(missing, plan) {
 }
 
 async function onView(tabId, from) {
-  const app = await fetchDeps();
-  const settings = app.settings || cleanSettings(null);
+  // Browser mode asks the app nothing. Read again after the ping: its pong may have
+  // just turned Browser mode on (the user picked Browser only in the app).
+  let browser = await browserOnly();
+  const app = browser ? null : await fetchDeps();
+  if (!browser) browser = await browserOnly();
+  const settings = (!browser && app.settings) || cleanSettings(null);
   // Before the segments are read: its status call may flag downloaded ones.
-  const newest = (await onJobs(tabId)).jobs[0];
+  const newest = browser ? null : (await onJobs(tabId)).jobs[0];
   // No tab jobs (e.g. reloaded before the job finished): ask the app for this page's pending one.
-  if (!newest && (await pageJobPending(tabId))) await fetchStatus();
+  if (!browser && !newest && (await pageJobPending(tabId))) await fetchStatus();
   const { hub, segments, cands, entries, inc } = await withTab(tabId, async () => ({
     hub: await readHub(tabId),
     segments: await readSegments(tabId),
@@ -2958,9 +4194,11 @@ async function onView(tabId, from) {
     entries: (await chrome.storage.session.get({ [capKey(tabId)]: [] }))[capKey(tabId)],
     inc: await tabIncognito(tabId, from),
   }));
-  const protocol = app.appError ? null : app.protocol;
-  const plan = await planSource(tabId, protocol);
-  const source = plan ? await describeSource(tabId, plan.r) : null;
+  const protocol = browser || app.appError ? null : app.protocol;
+  // Browser mode: the resolved source as is (no page first) and no probe.
+  const plan = browser ? null : await planSource(tabId, protocol);
+  const r = browser ? await resolveSource(tabId) : plan && plan.r;
+  const source = browser ? summarizeSource(r) : plan ? await describeSource(tabId, plan.r) : null;
   if (source && source.variants) source.variants = source.variants.map((v) => ({ ...v, label: variantLabel(v) }));
   // The overlay's HLS Quality section wins; else the page's heights (Page resolution picker).
   const hlsQuality =
@@ -2978,8 +4216,8 @@ async function onView(tabId, from) {
       Object.assign(source, { heights: list, height });
     }
   }
-  const list = sourceList(Array.isArray(entries) ? entries : []);
-  const sourceIndex = plan && plan.r.source.type === "media" ? list.findIndex((e) => e.url === plan.r.source.url) : -1;
+  const list = sourceList(Array.isArray(entries) ? entries : [], browser);
+  const sourceIndex = r && r.source.type === "media" ? list.findIndex((e) => e.url === r.source.url) : -1;
   const pool = mergeCandidates(cands).filter((c) => c.excluded === null || sameSelection(c, hub.selected));
   const videoIndex = pool.findIndex((c) => sameSelection(c, hub.selected));
   const total = segments.reduce((sum, s) => sum + (s.end - s.start), 0);
@@ -3009,7 +4247,21 @@ async function onView(tabId, from) {
           ({ id, state, segmentIndex, segmentCount, fraction, bytes, message, fallbackUsed }))(newest)
       : null,
   };
-  const problem = depsProblem(app.missing, plan);
+  if (browser) {
+    const kind = r ? kindOf(r) : null;
+    const direct = directMedia(r);
+    reply.downloadWith = "browser";
+    reply.saveable = direct && (kind === "mp4" || kind === "file");
+    reply.copy = !r || kind === "playlist" ? [] : direct && kind !== "dash" ? ["link", "ytdlp", "ffmpeg"] : ["link", "ytdlp"];
+    if (kind === "playlist") reply.inlineOnly = true;
+    return reply;
+  }
+  // The app's "browser" while the extension is not in Browser mode counts as "segdown".
+  const other = otherAppMode(app);
+  reply.downloadWith = other ? "otherApp" : "segdown";
+  reply.otherApp = other ? settings.otherAppName : null;
+  // Another app needs no tool: it gets the link only.
+  const problem = other ? null : depsProblem(app.missing, plan);
   if (problem) reply.depsProblem = problem;
   if (app.appError) reply.appError = app.appError;
   return reply;
@@ -3083,6 +4335,10 @@ function route(tabId, frameId, type, body, from) {
       return onView(tabId, from);
     case "ignoreSite":
       return setSiteIgnored(tabId, true);
+    case "setDownloadWith":
+      return onSetDownloadWith(tabId, body);
+    case "copyText":
+      return onCopyText(tabId, from, body);
     default:
       return Promise.resolve({ ok: false, error: "bad-message" });
   }
@@ -3101,6 +4357,7 @@ function replyAsync(promise, sendResponse) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id || !isObject(msg)) return undefined;
   if (!HUB_VALIDATORS.has(msg.type)) return undefined; // not a hub message
+  if (sender.documentLifecycle === "prerender") return undefined; // not shown yet (Chrome 106+)
   const tabId = sender.tab && sender.tab.id;
   if (!Number.isInteger(tabId) || tabId < 0 || !Number.isInteger(sender.frameId) || sender.frameId < 0) {
     return undefined;
@@ -3147,18 +4404,21 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
 });
 
 // A subframe that navigates takes its videos with it (top-frame navigation clears
-// the whole tab in the capture section).
+// the whole tab in the capture section). A prerendered page's outermost frame has
+// frameId > 0 but is not a subframe (frameType; Firefox and Safari have none).
 chrome.webNavigation.onCommitted.addListener((details) => {
-  if (details.frameId > 0) dropFrame(details.tabId, details.frameId);
+  const sub = details.frameType ? details.frameType === "sub_frame" : details.frameId > 0;
+  if (sub) dropFrame(details.tabId, details.frameId);
 });
 
 // Safari has no onHistoryStateUpdated: SPA navigations there keep the old page key.
 chrome.webNavigation.onHistoryStateUpdated?.addListener((details) => {
-  if (details.frameId !== 0) return;
+  if (!isActiveTop(details)) return;
   setTopURL(details.tabId, details.url)
     .then(() => refreshActionMenu())
     .catch(hubWarn);
-  onPageChanged(details.tabId, details.url).catch(hubWarn);
+  const at = Number.isFinite(details.timeStamp) ? details.timeStamp : Date.now();
+  onPageChanged(details.tabId, details.url, at).catch(hubWarn);
 });
 
 // Content scripts never reach storage.local; only this worker reads and writes it.
@@ -3180,8 +4440,8 @@ function flashBadge(tabId, text) {
 // Overlay toggle: the toolbar button and the "toggle-panel" shortcut (see the protocol).
 async function toggleOverlay(tabId) {
   if (await tabIgnored(tabId, (await readUI()).ignoredDomains)) {
-    // The list may have changed in the app: ask it first. The pong's own settings,
-    // not storage.local (updateUI is not awaited by the ping).
+    // The list may have changed in the app: ask it first. The pong's own settings;
+    // without them (Browser mode, a failing app) the stored list.
     const deps = await fetchDeps().catch(() => ({}));
     const domains = deps.settings ? deps.settings.ignoredDomains : (await readUI()).ignoredDomains;
     if (await tabIgnored(tabId, domains)) return flashBadge(tabId, "off");
@@ -3248,12 +4508,14 @@ function updateMenuItem(id, props) {
 const siteOf = (host) => (host.startsWith("www.") && host.slice(4).includes(".") ? host.slice(4) : host);
 
 // Shows the item for the active tab of the last-focused window: none without an
-// http(s) top URL, else "Turn off" (not ignored) or "Turn on" (ignored).
+// http(s) top URL or in Browser mode (the list lives in the app), else "Turn off"
+// (not ignored) or "Turn on" (ignored).
 async function refreshActionMenu() {
   if (!ACTION_MENU) return;
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  const host = tab && Number.isInteger(tab.id) && tab.id >= 0 ? await topHost(tab.id) : null;
-  const domain = host && (await readUI()).ignoredDomains.find((d) => host === d || host.endsWith(`.${d}`));
+  const ui = await readUI();
+  const host = !ui.browserOnly && tab && Number.isInteger(tab.id) && tab.id >= 0 ? await topHost(tab.id) : null;
+  const domain = host && ui.ignoredDomains.find((d) => host === d || host.endsWith(`.${d}`));
   updateMenuItem("site-off", host && !domain ? { visible: true, title: `Turn off SegDown on ${siteOf(host)}` } : { visible: false });
   updateMenuItem("site-on", domain ? { visible: true, title: `Turn on SegDown on ${domain}` } : { visible: false });
 }

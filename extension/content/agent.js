@@ -5,6 +5,9 @@
 // 3.6: `[` / `]` mark keys while the overlay is open.
 // 5.3: shares the selected video and the hub's state with overlay.js (below).
 // Also shares the app's ui switches and the eligible videos with button.js.
+// Flags blob: (MSE) and EME videos, and carries the hub's player-probe marker (tag / untag).
+// Fetches a playlist again for the hub when the app was refused it (refetch).
+// Scores a background loop down and the frame's last played video up.
 // Once per frame (a re-injection next to a live copy is a no-op); tears down
 // once orphaned by an extension reload or update.
 
@@ -28,6 +31,9 @@
   const MAX_CANDIDATES = 20;
   const MIN_AREA = 200 * 112;
   const MAX_SCORE_DURATION = 3 * 3600;
+  const BACKGROUND_FACTOR = 0.1; // score of a background loop (isBackground)
+  const PLAYED_FACTOR = 4; // score of the frame's last played video
+  const MEDIA_EVENTS = ["loadedmetadata", "durationchange", "resize", "play", "volumechange"];
   // Ad containers, matched per class token so that "thread-container" or
   // "download-container" is not an ad: ima-ad-container / ad-container / any
   // "-ad-container" or "_ad-container" token, a token containing "preroll", or
@@ -37,11 +43,16 @@
   const MAX_SHADOW_DEPTH = 4;
   const ON_FACEBOOK = location.hostname === "facebook.com" || location.hostname.endsWith(".facebook.com");
   const FB_VIDEO_ID = /^\d{1,25}$/;
+  const TAG_ATTR = /^data-segdown-[0-9a-f]{16}$/; // the hub's player-probe marker (tag / untag)
+  const TAG_MS = 5000;
+  const REFETCH_TIMEOUT_MS = 5000; // the hub waits 1 s more
+  const MAX_REFETCH_BYTES = 1024 * 1024;
 
   const keyOf = new WeakMap(); // video -> videoKey
   const videos = new Map(); // videoKey -> video (pruned on rescan)
   let nextKey = 1;
   let selectedKey = null;
+  let lastPlayedKey = null; // the last tracked video that played while not a background loop
   let lastReport = "[]"; // signature of the last candidates sent (see scan)
   let scanTimer = null;
   let observer = null;
@@ -50,6 +61,7 @@
   let stateSeen = false; // a broadcast beats the boot getState reply
   let ui = { fullClipButton: true, playerButton: true, fullDownloadButton: true, ignored: false }; // the app's switches and this tab's Ignored sites flag (getState, `ui` broadcast)
   const observedRoots = new WeakSet(); // open shadow roots already under the observer
+  const tagged = new Map(); // attr -> video carrying the hub's probe marker (tag / untag)
   let dead = false; // orphaned and torn down: nothing re-arms
 
   // False once the extension reloads or updates: this copy is then an orphan
@@ -79,13 +91,14 @@
     clearTimeout(scanTimer);
     scanTimer = null;
     for (const v of videos.values()) {
-      for (const type of ["loadedmetadata", "durationchange", "resize"]) v.removeEventListener(type, onMediaEvent);
+      for (const type of MEDIA_EVENTS) v.removeEventListener(type, onMediaEvent);
     }
     window.removeEventListener("keydown", onKeyDown, true);
     window.removeEventListener("resize", scheduleScan);
     window.removeEventListener("scroll", scheduleScan);
     window.removeEventListener("pagehide", onPageHide);
     window.removeEventListener("pageshow", onPageShow);
+    document.removeEventListener("prerenderingchange", onActivated);
     try {
       chrome.runtime.onMessage.removeListener(onMessage);
     } catch {
@@ -137,10 +150,17 @@
     return null;
   }
 
+  // A landing page's hero loop. Feed and reel players (muted until tapped, custom
+  // controls) match too: a score penalty only, never an exclusion; it ends once unmuted.
+  function isBackground(v) {
+    return v.muted && v.loop && !v.controls && getComputedStyle(v).objectFit === "cover";
+  }
+
   function describe(videoKey, v) {
     const area = visibleArea(v);
     const duration = durationOf(v);
     const excluded = exclusionOf(v);
+    const base = excluded || duration === null ? 0 : area * Math.min(duration, MAX_SCORE_DURATION);
     const out = {
       videoKey,
       area,
@@ -148,12 +168,14 @@
       live: v.duration === Infinity,
       paused: v.paused,
       excluded,
-      score: excluded || duration === null ? 0 : area * Math.min(duration, MAX_SCORE_DURATION),
+      score: base && base * (isBackground(v) ? BACKGROUND_FACTOR : 1) * (videoKey === lastPlayedKey ? PLAYED_FACTOR : 1),
       width: v.videoWidth, // the hub keeps the pair only when both are > 0
       height: v.videoHeight,
     };
     const src = v.currentSrc;
     if (/^https?:/i.test(src) && src.length <= 8192) out.currentSrc = src;
+    if (/^blob:/i.test(src)) out.blob = true; // MSE: the hub may ask the page's player (on demand)
+    if (v.mediaKeys) out.drm = true; // EME attached (false positives: clear content can have keys)
     // Facebook plays MSE (no http currentSrc); the container's data-video-id names the clip.
     const box = ON_FACEBOOK && v.closest("[data-video-id]");
     if (box && box.querySelectorAll("video").length === 1) {
@@ -163,8 +185,14 @@
     return out;
   }
 
+  // A click on a player starts it (play); unmuting a reel ends its penalty (volumechange).
   function onMediaEvent(e) {
-    if (e.type === "loadedmetadata" || e.type === "durationchange" || e.type === "resize") scheduleScan();
+    const v = e.target;
+    if ((e.type === "play" || e.type === "volumechange") && !v.paused && !isBackground(v)) {
+      const key = keyOf.get(v);
+      if (key && videos.get(key) === v) lastPlayedKey = key;
+    }
+    scheduleScan();
   }
 
   function track(v) {
@@ -176,7 +204,7 @@
     const key = `v${nextKey++}`;
     keyOf.set(v, key);
     videos.set(key, v);
-    for (const type of ["loadedmetadata", "durationchange", "resize"]) {
+    for (const type of MEDIA_EVENTS) {
       v.addEventListener(type, onMediaEvent);
     }
   }
@@ -210,10 +238,12 @@
     scanTimer = null;
     if (gone()) return;
     if (ui.ignored) return; // Ignored sites: nothing to report (applyUI sent [])
+    if (document.prerendering) return; // not shown yet: reported on activation (onActivated)
     for (const v of findVideos()) track(v);
     for (const [key, v] of videos) {
       if (!v.isConnected) {
         videos.delete(key);
+        if (key === lastPlayedKey) lastPlayedKey = null;
         if (key === selectedKey) {
           selectedKey = null;
           changed();
@@ -230,11 +260,11 @@
 
   // What the hub uses. Scrolling changes the visible area, and so
   // the score, all the time: only a score bucket change (factor ~1.19) or a new
-  // order inside this frame re-sends. `paused` is a snapshot and play/pause does
-  // not re-send either.
+  // order inside this frame re-sends. `paused` is a snapshot: a play re-sends only
+  // through the score (the last played factor), a pause never.
   function signature(list) {
     const bucket = (score) => (score > 0 ? Math.round(Math.log2(score) * 4) : -1);
-    const rows = list.map((c) => [c.videoKey, c.duration, c.live, c.excluded, c.currentSrc, c.videoId, c.width, c.height, bucket(c.score)]);
+    const rows = list.map((c) => [c.videoKey, c.duration, c.live, c.excluded, c.currentSrc, c.videoId, c.width, c.height, c.blob, c.drm, bucket(c.score)]);
     const order = [...list].sort((a, b) => b.score - a.score || b.area - a.area).map((c) => c.videoKey);
     return JSON.stringify([rows, order]);
   }
@@ -246,11 +276,100 @@
 
   const isTime = (n) => typeof n === "number" && Number.isFinite(n) && n >= 0;
 
+  // Removes the hub's marker attr from the video that carries it (if any).
+  function untag(attr) {
+    const el = tagged.get(attr);
+    if (el) el.removeAttribute(attr);
+    tagged.delete(attr);
+  }
+
+  // The hub's checks for a refetch, or null. A referrer of another origin is dropped
+  // (the frame's own URL is the default).
+  function refetchOptions(msg) {
+    const isHttp = (s, max) => {
+      if (typeof s !== "string" || s.length > max) return null;
+      try {
+        const u = new URL(s);
+        return u.protocol === "http:" || u.protocol === "https:" ? u : null;
+      } catch {
+        return null;
+      }
+    };
+    if (!isHttp(msg.url, 8192)) return null;
+    if (msg.credentials !== "include" && msg.credentials !== "same-origin") return null;
+    if (!Number.isInteger(msg.maxBytes) || msg.maxBytes < 1 || msg.maxBytes > MAX_REFETCH_BYTES) return null;
+    const ref = isHttp(msg.referrer, 8192);
+    const referrer = ref && ref.origin === location.origin ? msg.referrer : undefined;
+    return { url: msg.url, credentials: msg.credentials, referrer, maxBytes: msg.maxBytes };
+  }
+
+  // Fetches a playlist the frame already loaded (usually from the HTTP cache), in the
+  // isolated world. The reply never carries the URL, status text or headers.
+  async function refetch({ url, credentials, referrer, maxBytes }) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), REFETCH_TIMEOUT_MS);
+    try {
+      // redirect "error": the hub resolves relative URIs against this exact URL.
+      const init = { cache: "force-cache", credentials, redirect: "error", signal: ctl.signal };
+      if (referrer) init.referrer = referrer;
+      const res = await fetch(url, init);
+      if (!res.ok) return { ok: false, error: "http" };
+      const reader = res.body.getReader();
+      const chunks = [];
+      let size = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > maxBytes) {
+          reader.cancel().catch(() => {});
+          return { ok: false, error: "too-big" };
+        }
+        chunks.push(value);
+      }
+      const bytes = new Uint8Array(size);
+      let at = 0;
+      for (const c of chunks) {
+        bytes.set(c, at);
+        at += c.byteLength;
+      }
+      return { ok: true, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+    } catch {
+      return { ok: false, error: "failed" }; // CORS, abort, decode
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // A Promise for refetch (onMessage replies once it settles), else the reply.
   function handle(msg) {
+    if (msg.type === "refetch") {
+      const opts = refetchOptions(msg);
+      return opts ? refetch(opts) : { ok: false, error: "bad-message" };
+    }
     if (msg.type === "select") {
       selectedKey = typeof msg.videoKey === "string" && videos.has(msg.videoKey) ? msg.videoKey : null;
       changed();
       return { ok: msg.videoKey === null || selectedKey !== null };
+    }
+    // The hub's player probe finds its target video in the page's MAIN world by
+    // this short-lived attribute; removed by untag or after TAG_MS.
+    if (msg.type === "tag") {
+      const v = typeof msg.videoKey === "string" ? videos.get(msg.videoKey) : undefined;
+      if (typeof msg.attr !== "string" || !TAG_ATTR.test(msg.attr) || !v || !v.isConnected) return { ok: false };
+      const attr = msg.attr;
+      untag(attr);
+      v.setAttribute(attr, "1");
+      tagged.set(attr, v);
+      setTimeout(() => {
+        if (tagged.get(attr) === v) untag(attr);
+      }, TAG_MS);
+      return { ok: true };
+    }
+    if (msg.type === "untag") {
+      if (typeof msg.attr !== "string" || !TAG_ATTR.test(msg.attr)) return { ok: false };
+      untag(msg.attr);
+      return { ok: true };
     }
     const v = typeof msg.videoKey === "string" ? videos.get(msg.videoKey) : undefined;
     if (!v || !v.isConnected) return { ok: false, error: "no-video" };
@@ -352,7 +471,12 @@
       return undefined;
     }
     if (msg.to !== "agent") return undefined;
-    sendResponse(handle(msg));
+    const r = handle(msg);
+    if (r instanceof Promise) {
+      r.then(sendResponse);
+      return true; // the reply comes later (refetch)
+    }
+    sendResponse(r);
     return undefined;
   }
 
@@ -457,8 +581,24 @@
 
   window.addEventListener("pageshow", onPageShow);
 
-  requestState();
-  if (dead) return; // already orphaned at boot: requestState tore down
+  // A prerendered page (Chrome speculation rules) reports nothing until it is shown
+  // (the hub ignores it; its activation clears the tab): then report everything anew.
+  function onActivated() {
+    if (gone()) return;
+    lastReport = null;
+    selectedKey = null;
+    stateSeen = false;
+    changed();
+    requestState();
+    scheduleScan();
+  }
+
+  if (document.prerendering) {
+    document.addEventListener("prerenderingchange", onActivated, { once: true });
+  } else {
+    requestState();
+    if (dead) return; // already orphaned at boot: requestState tore down
+  }
 
   observer = new MutationObserver(scheduleScan);
   observe(document.documentElement);

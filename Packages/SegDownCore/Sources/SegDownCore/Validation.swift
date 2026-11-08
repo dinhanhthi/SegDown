@@ -23,6 +23,11 @@ public enum Validation {
     public static let maxSegmentEnd: Double = 7 * 86_400
     /// Tallest `maxHeight` a job may ask yt-dlp for (8K).
     public static let maxHeightLimit = 8640
+    /// Largest `playlist` source text, in UTF-8 bytes. `JSONEncoder` at most doubles it, so the
+    /// enqueue line stays under `IPC.maxLineBytes`.
+    public static let maxInlinePlaylistBytes = 256 * 1024
+    /// Longest link `validateHandoff` accepts, in UTF-8 bytes (the extension's `MAX_URL_LENGTH`).
+    public static let maxURLLength = 8192
 
     /// Validates a job before it is enqueued. Returns the request with normalized header names.
     public static func validate(_ request: JobRequest) throws -> JobRequest {
@@ -60,8 +65,9 @@ public enum Validation {
         var validated = request
         validated.source = try validate(request.source)
         if let fallback = request.fallback {
-            guard case .media = fallback else {
-                throw JobError.invalid("fallback must be a media source")
+            switch fallback {
+            case .media, .playlist: break
+            case .page: throw JobError.invalid("fallback must be a media or playlist source")
             }
             guard case .page = request.source else {
                 throw JobError.invalid("fallback is only allowed with a page source")
@@ -101,7 +107,36 @@ public enum Validation {
         case let .page(url):
             try checkScheme(url, field: "url")
             return source
+        case let .playlist(text, baseURL, headers):
+            try checkScheme(baseURL, field: "baseURL")
+            guard text.utf8.count <= maxInlinePlaylistBytes else {
+                throw JobError.invalid("The playlist is larger than 256 KB")
+            }
+            guard !text.unicodeScalars.contains("\0") else {
+                throw JobError.invalid("The playlist contains a NUL character")
+            }
+            let body = text.hasPrefix("\u{FEFF}") ? text.dropFirst() : Substring(text)
+            guard body.hasPrefix("#EXTM3U") else {
+                throw JobError.invalid("Not an HLS playlist")
+            }
+            return .playlist(text: text, baseURL: baseURL, headers: try normalizedHeaders(headers))
         }
+    }
+
+    /// Validates a link before it is handed to another app (`openWith`): http(s), a host, no
+    /// credentials (they never go to another app) and at most `maxURLLength` bytes.
+    public static func validateHandoff(_ url: URL) throws -> URL {
+        try checkScheme(url, field: "url")
+        guard let host = url.host(percentEncoded: true), !host.isEmpty else {
+            throw JobError.invalid("The link has no host")
+        }
+        guard url.user(percentEncoded: true) == nil, url.password(percentEncoded: true) == nil else {
+            throw JobError.invalid("The link must not contain a user name or password")
+        }
+        guard url.absoluteString.utf8.count <= maxURLLength else {
+            throw JobError.invalid("The link is too long")
+        }
+        return url
     }
 
     /// `H:MM:SS` (or `M:SS` under an hour) with integer math, whatever the locale.

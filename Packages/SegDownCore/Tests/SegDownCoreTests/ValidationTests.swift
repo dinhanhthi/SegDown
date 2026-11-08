@@ -79,6 +79,17 @@ struct ValidationTests {
         }
         #expect(headers == ["Referer": "https://example.com/"])
 
+        let playlist = Source.playlist(
+            text: "#EXTM3U\n", baseURL: URL(string: "https://cdn.example.com/1.ts")!,
+            headers: ["referer": "https://example.com/"]
+        )
+        let validatedPlaylist = try Validation.validate(request(source: page, fallback: playlist))
+        guard case let .playlist(_, _, playlistHeaders)? = validatedPlaylist.fallback else {
+            Issue.record("Expected a playlist fallback")
+            return
+        }
+        #expect(playlistHeaders == ["Referer": "https://example.com/"])
+
         let rejected = [
             request(source: page, fallback: media("https://cdn.example.com/master.m3u8", headers: ["Authorization": "Bearer x"])),
             request(source: page, fallback: media("file:///etc/passwd", headers: [:])),
@@ -88,6 +99,36 @@ struct ValidationTests {
         for request in rejected {
             #expect(throws: JobError.self) {
                 try Validation.validate(request)
+            }
+        }
+    }
+
+    @Test func playlistSourceNeedsAnHTTPBaseURLAndASmallHLSText() throws {
+        func request(_ text: String, baseURL: String = "https://cdn.example.com/1.ts") -> JobRequest {
+            JobRequest(
+                source: .playlist(text: text, baseURL: URL(string: baseURL)!, headers: [:]), title: "Clip",
+                segments: [Segment(start: 10, end: 20)], mode: .separate, precision: .precise
+            )
+        }
+        let small = "#EXTM3U\n#EXTINF:4,\nhttps://cdn.example.com/1.ts\n"
+
+        #expect(try Validation.validate(request(small)).source == request(small).source)
+        #expect(throws: JobError.invalid("The playlist is larger than 256 KB")) {
+            try Validation.validate(request(small + String(repeating: "#", count: Validation.maxInlinePlaylistBytes)))
+        }
+        #expect(throws: JobError.invalid("baseURL must use http or https")) {
+            try Validation.validate(request(small, baseURL: "file:///etc/passwd"))
+        }
+    }
+
+    @Test func handoffNeedsAnHTTPLinkWithoutCredentialsWithinTheCap() throws {
+        let link = URL(string: "https://example.com/v.mp4")!
+        #expect(try Validation.validateHandoff(link) == link)
+
+        let long = "https://example.com/" + String(repeating: "a", count: 9000)
+        for bad in ["file:///etc/passwd", "https://user:pw@example.com/v.mp4", long] {
+            #expect(throws: JobError.self) {
+                try Validation.validateHandoff(URL(string: bad)!)
             }
         }
     }

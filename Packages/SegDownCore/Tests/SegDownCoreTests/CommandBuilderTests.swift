@@ -9,12 +9,13 @@ struct CommandBuilderTests {
 
     private func segmentArgs(
         precision: Precision,
+        kind: MediaKind = .hls,
         headers: [String: String] = ["Referer": "https://example.com/", "User-Agent": "UA"],
         source: URL? = nil
     ) -> [String] {
         CommandBuilder.ffmpegSegment(
             input: input,
-            kind: .hls,
+            kind: kind,
             audio: nil,
             headers: headers,
             source: source ?? input,
@@ -74,6 +75,12 @@ struct CommandBuilderTests {
         #expect(zip(format, inputs).allSatisfy { f, i in
             f < i && !hls[f..<i].contains("-i")
         })
+        // A segment that fails to open is fetched again instead of skipped.
+        let retry = hls.indices.filter { hls[$0] == "-seg_max_retry" && hls[$0 + 1] == "2" }
+        #expect(retry.count == 2)
+        #expect(zip(retry, inputs).allSatisfy { r, i in
+            r < i && !hls[r..<i].contains("-i")
+        })
 
         let mp4 = CommandBuilder.ffmpegSegment(
             input: URL(string: "https://cdn.example.com/v.mp4")!, kind: .mp4, audio: nil, headers: [:],
@@ -81,12 +88,33 @@ struct CommandBuilderTests {
         )
         #expect(!mp4.contains("-extension_picky"))
         #expect(!mp4.contains("-f"))
+        #expect(mp4.firstIndex(of: "-multiple_requests").map { mp4[$0 + 1] } == "1")
+        #expect(mp4.firstIndex(of: "-reconnect").map { mp4[$0 + 1] } == "1")
+        #expect(!mp4.contains("-seg_max_retry"))
     }
 
     @Test func fastModeCopiesStreams() throws {
         let args = segmentArgs(precision: .fast)
         let c = try #require(args.firstIndex(of: "-c"))
         #expect(args[c + 1] == "copy")
+
+        // VP8/Vorbis/Theora cannot be copied into mp4: a `file` input is re-encoded in fast mode too.
+        let file = segmentArgs(precision: .fast, kind: .file)
+        #expect(file.contains("libx264"))
+        #expect(!file.contains("copy"))
+
+        // DASH, the main SegmentTemplate path: source start 10 s, video window offset 8, audio
+        // window offset 6 -> `segment.start` 2 and `audioShift` -2.
+        let dash = CommandBuilder.ffmpegSegment(
+            input: URL(fileURLWithPath: "/tmp/job/dash/video.mp4"), kind: .dash,
+            audio: URL(fileURLWithPath: "/tmp/job/dash/audio.mp4"), headers: [:], source: input,
+            segment: Segment(start: 2, end: 7), precision: .fast, output: output, audioShift: -2
+        )
+        let dashCopy = try #require(dash.firstIndex(of: "-c"))
+        #expect(dash[dashCopy + 1] == "copy")
+        let priorss = try #require(dash.firstIndex(of: "-copypriorss"))
+        #expect(dash[priorss + 1] == "0")
+        #expect(dash.indices.filter { dash[$0] == "-ss" }.map { dash[$0 + 1] } == ["2.000", "4.000"])
     }
 
     @Test func mergeHasNoProtocolWhitelist() {
@@ -119,6 +147,37 @@ struct CommandBuilderTests {
             tempDirectory: URL(fileURLWithPath: "/tmp/job")
         )
         #expect(Array(args.suffix(2)) == ["--", url.absoluteString])
+        // yt-dlp's ffmpeg downloader gets the reconnect flags before its `-i`.
+        let downloaderArgs = args.firstIndex(of: "--downloader-args")
+        #expect(downloaderArgs.map { args[$0 + 1] }
+            == "ffmpeg_i:-reconnect 1 -reconnect_on_network_error 1 -reconnect_delay_max 10")
+        #expect((downloaderArgs ?? .max) < (args.firstIndex(of: "--") ?? -1))
+    }
+
+    @Test func ytDlpPrintsTitleOnlyWhenAskedAndParsesIt() throws {
+        let url = URL(string: "https://www.youtube.com/watch?v=aqz-KE-bpKQ")!
+        func args(printTitle: Bool) -> [String] {
+            CommandBuilder.ytDlp(
+                url: url,
+                segments: [Segment(start: 1, end: 2)],
+                precision: .fast,
+                ffmpeg: URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg"),
+                tempDirectory: URL(fileURLWithPath: "/tmp/job"),
+                printTitle: printTitle
+            )
+        }
+        // `--print` implies `--quiet`, which hides the progress lines; `--no-quiet` keeps them.
+        let printing = args(printTitle: true)
+        let print = try #require(printing.firstIndex(of: "--print"))
+        #expect(Array(printing[print..<print + 3])
+            == ["--print", "before_dl:segdown-title:%(extractor_key)s:%(title)s", "--no-quiet"])
+        #expect(print + 3 <= (printing.firstIndex(of: "--") ?? -1))
+        #expect(!args(printTitle: false).contains("--print"))
+
+        #expect(CommandBuilder.printedTitle("segdown-title:Youtube:Big Buck Bunny: 4K") == "Big Buck Bunny: 4K")
+        // The generic extractor's title is the tab's own `<title>`.
+        #expect(CommandBuilder.printedTitle("segdown-title:Generic:src") == nil)
+        #expect(CommandBuilder.printedTitle("[download]  42.0% of 1.00MiB") == nil)
     }
 
     @Test func ytDlpSortsByMaxHeightOnlyWhenSet() throws {

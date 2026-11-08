@@ -15,6 +15,7 @@
 //     {"type": "probe", "source": {…Source…}}
 //     {"type": "probe", "source": {"type": "page", "url": "…"}}   // protocol 3
 //     {"type": "setIgnored", "host": "www.example.com", "ignored": true}  // protocol 4; → pong
+//     {"type": "openWith", "url": "https://…"}                         // protocol 7; → opened
 //
 // Responses
 //
@@ -26,12 +27,16 @@
 //                   "fullClipConfirm": true,                             // absent → true
 //                   "fullDownloadButton": true,                          // absent → true
 //                   "preferredHeight": 720,                              // optional; absent → Best
-//                   "ignoredDomains": ["example.com"]}}                  // absent → []
+//                   "ignoredDomains": ["example.com"],                   // absent → []
+//                   "downloadWith": "otherApp",                          // absent or unknown → "segdown"
+//                   "downloadWithRev": 3,                                // absent → 0
+//                   "otherAppName": "IINA"}}                             // optional
 //     {"type": "enqueued", "id": "…"}
 //     {"type": "status", "jobs": [{…JobStatus…}]}
 //     {"type": "cancelled", "id": "…"}
 //     {"type": "variants", "variants": [{…HLSVariant…}]}   // [] for a media playlist or an mp4
 //     {"type": "formats", "heights": [1080, 720]}           // page probe; [] when unknown
+//     {"type": "opened", "app": "IINA"}
 //     {"type": "error", "code": "invalid", "message": "…"}
 //
 // Error codes: "invalid" (bad request), "notFound" (unknown job id), "unavailable" (cannot serve
@@ -48,15 +53,17 @@ public enum IPCRequest: Sendable, Hashable {
     /// Adds the site of `host` to the ignored sites (`ignored: true`) or removes every listed domain
     /// that covers it (`false`). `host` is the top page's raw hostname; the app answers with `pong`.
     case setIgnored(host: String, ignored: Bool)
+    /// Opens `url` in the app chosen in Settings (`downloadWith == .otherApp`); no headers, no cookies.
+    case openWith(url: URL)
 }
 
 extension IPCRequest: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, job, ids, id, source, host, ignored
+        case type, job, ids, id, source, host, ignored, url
     }
 
     private enum RequestType: String, Codable {
-        case ping, enqueue, status, cancel, probe, setIgnored
+        case ping, enqueue, status, cancel, probe, setIgnored, openWith
     }
 
     public init(from decoder: any Decoder) throws {
@@ -72,6 +79,7 @@ extension IPCRequest: Codable {
                 host: try c.decode(String.self, forKey: .host),
                 ignored: try c.decode(Bool.self, forKey: .ignored)
             )
+        case .openWith: self = .openWith(url: try c.decode(URL.self, forKey: .url))
         }
     }
 
@@ -96,6 +104,9 @@ extension IPCRequest: Codable {
             try c.encode(RequestType.setIgnored, forKey: .type)
             try c.encode(host, forKey: .host)
             try c.encode(ignored, forKey: .ignored)
+        case let .openWith(url):
+            try c.encode(RequestType.openWith, forKey: .type)
+            try c.encode(url, forKey: .url)
         }
     }
 }
@@ -108,7 +119,11 @@ extension IPCRequest: Codable {
 /// `preferredHeight` is the height the extension's quality picker takes by default (the tallest
 /// quality up to it); `nil`, or absent from an older app, means the best quality. `ignoredDomains`
 /// lists the sites (and their subdomains) where the extension stays off, as `IgnoredDomain.normalize`
-/// output; an older app's missing key decodes to `[]`.
+/// output; an older app's missing key decodes to `[]`. `downloadWith` is decoded leniently: absent
+/// (an older app) or a value from a newer app decodes to `.segdown`, so it never fails the whole
+/// pong. `downloadWithRev` grows by one on each change of `downloadWith` in the app (absent → 0).
+/// `otherAppName` is the chosen app's display name, without ".app"; `nil` unless `downloadWith` is
+/// `.otherApp` and an app is chosen.
 public struct ClientSettings: Codable, Sendable, Hashable {
     public var mode: OutputMode
     public var incognitoDefault: Bool
@@ -119,6 +134,9 @@ public struct ClientSettings: Codable, Sendable, Hashable {
     public var fullDownloadButton: Bool
     public var preferredHeight: Int?
     public var ignoredDomains: [String]
+    public var downloadWith: DownloadWith
+    public var downloadWithRev: Int
+    public var otherAppName: String?
 
     public init(
         mode: OutputMode,
@@ -129,7 +147,10 @@ public struct ClientSettings: Codable, Sendable, Hashable {
         playerButton: Bool = true,
         fullDownloadButton: Bool = true,
         preferredHeight: Int? = nil,
-        ignoredDomains: [String] = []
+        ignoredDomains: [String] = [],
+        downloadWith: DownloadWith = .segdown,
+        downloadWithRev: Int = 0,
+        otherAppName: String? = nil
     ) {
         self.mode = mode
         self.incognitoDefault = incognitoDefault
@@ -140,11 +161,14 @@ public struct ClientSettings: Codable, Sendable, Hashable {
         self.fullDownloadButton = fullDownloadButton
         self.preferredHeight = preferredHeight
         self.ignoredDomains = ignoredDomains
+        self.downloadWith = downloadWith
+        self.downloadWithRev = downloadWithRev
+        self.otherAppName = otherAppName
     }
 
     private enum CodingKeys: String, CodingKey {
         case mode, incognitoDefault, maxDuration, fullClipButton, fullClipConfirm, playerButton, preferredHeight
-        case fullDownloadButton, ignoredDomains
+        case fullDownloadButton, ignoredDomains, downloadWith, downloadWithRev, otherAppName
     }
 
     public init(from decoder: any Decoder) throws {
@@ -158,6 +182,10 @@ public struct ClientSettings: Codable, Sendable, Hashable {
         fullDownloadButton = try c.decodeIfPresent(Bool.self, forKey: .fullDownloadButton) ?? true
         preferredHeight = try c.decodeIfPresent(Int.self, forKey: .preferredHeight)
         ignoredDomains = try c.decodeIfPresent([String].self, forKey: .ignoredDomains) ?? []
+        downloadWith = try c.decodeIfPresent(String.self, forKey: .downloadWith)
+            .flatMap(DownloadWith.init(rawValue:)) ?? .segdown
+        downloadWithRev = try c.decodeIfPresent(Int.self, forKey: .downloadWithRev) ?? 0
+        otherAppName = try c.decodeIfPresent(String.self, forKey: .otherAppName)
     }
 }
 
@@ -173,6 +201,8 @@ public enum IPCResponse: Sendable, Hashable {
     case variants([HLSVariant])
     /// Video heights yt-dlp lists for a page probe, tallest first; empty when unknown.
     case formats(heights: [Int])
+    /// `openWith` handed the link to `app` (its display name).
+    case opened(app: String)
     /// `code` is one of `IPCResponse.ErrorCode`.
     case error(code: String, message: String)
 
@@ -187,11 +217,11 @@ public enum IPCResponse: Sendable, Hashable {
 
 extension IPCResponse: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, version, missing, `protocol`, settings, id, jobs, variants, heights, code, message
+        case type, version, missing, `protocol`, settings, id, jobs, variants, heights, app, code, message
     }
 
     private enum ResponseType: String, Codable {
-        case pong, enqueued, status, cancelled, variants, formats, error
+        case pong, enqueued, status, cancelled, variants, formats, opened, error
     }
 
     public init(from decoder: any Decoder) throws {
@@ -209,6 +239,7 @@ extension IPCResponse: Codable {
         case .cancelled: self = .cancelled(id: try c.decode(String.self, forKey: .id))
         case .variants: self = .variants(try c.decode([HLSVariant].self, forKey: .variants))
         case .formats: self = .formats(heights: try c.decode([Int].self, forKey: .heights))
+        case .opened: self = .opened(app: try c.decode(String.self, forKey: .app))
         case .error:
             self = .error(
                 code: try c.decode(String.self, forKey: .code),
@@ -241,6 +272,9 @@ extension IPCResponse: Codable {
         case let .formats(heights):
             try c.encode(ResponseType.formats, forKey: .type)
             try c.encode(heights, forKey: .heights)
+        case let .opened(app):
+            try c.encode(ResponseType.opened, forKey: .type)
+            try c.encode(app, forKey: .app)
         case let .error(code, message):
             try c.encode(ResponseType.error, forKey: .type)
             try c.encode(code, forKey: .code)
@@ -288,8 +322,11 @@ public enum IPC {
     /// `pong.settings`. The optional `JobRequest.pageURL` came later without a bump: older apps ignore it.
     /// 3 adds `JobRequest.maxHeight` and the page probe's `formats` reply. The optional
     /// `ClientSettings.preferredHeight` came later without a bump: older extensions ignore it, as
-    /// did `ClientSettings.ignoredDomains`. 4 adds the `setIgnored` request.
-    public static let protocolVersion = 4
+    /// did `ClientSettings.ignoredDomains`. 4 adds the `setIgnored` request. 5 adds the `playlist`
+    /// source. 6 adds the `dash` and `file` media kinds. 7 adds the `openWith` request and its `opened`
+    /// reply. `ClientSettings.downloadWith`, `downloadWithRev` and `otherAppName` came with it; older
+    /// extensions ignore them.
+    public static let protocolVersion = 7
     /// Same cap as a native messaging frame.
     public static let maxLineBytes = 1024 * 1024
     public static let defaultTimeout: TimeInterval = 30

@@ -8,6 +8,10 @@
 // video (the spot is kept until the page reloads).
 // Talks to the hub in background.js (the protocol is documented there) and reads
 // the video through agent.js (globalThis.segdownAgent, same isolated world).
+// Download with (the ▾ menu's first section): in Browser mode (no SegDown app) and
+// Another-app mode Download takes the whole file and the marks are not used; Browser
+// mode adds the Copy items (link, yt-dlp / ffmpeg command). Only then does the overlay
+// hold a link and its Referer / User-Agent / Origin (never Cookie), for the clipboard.
 // Page data is untrusted: the DOM is built with textContent only, handlers act on
 // trusted events only, and the hub gets menu choices only (never URLs, titles or
 // times; a click on the bar seeks the video element here).
@@ -46,12 +50,19 @@
     "not-selected-frame": "The video changed; try again.",
     "no-segments": "Mark a segment first.",
     "no-source": "No video source found on this page.",
+    "drm": "This video is DRM-protected: SegDown can't download it.",
     "no-duration": "The video's duration is unknown.",
     "over-limit": "The video is longer than the Max total duration in SegDown Settings.",
     "incognito-forced": "Incognito is always on in a private window.",
     "no-reply": "SegDown did not answer. Reload the page.",
     "no-site": "SegDown can't be turned off on this page.",
+    "copy-only": "The browser can't save this stream: copy its link or a command from ▾.",
+    "inline-only": "This stream exists only in the page; install the SegDown app to download it.",
+    "private-window": "The browser download is off in a private window: copy the link from ▾.",
+    "browser-download": "The browser refused the download.",
+    "bad-url": "This link can't be copied safely.",
   };
+  const COPY_LABELS = { link: "Copy link", ytdlp: "Copy yt-dlp command", ffmpeg: "Copy ffmpeg command" };
   // Undoes the page's and the popover UA styles on the host; the UI inside opts
   // back into pointer events, so the player's controls stay clickable elsewhere.
   const HOST_STYLE = [
@@ -137,6 +148,11 @@
     .segrow { display: flex; align-items: center; }
     .segrow .text { flex: 1; padding: 2px 6px; font-variant-numeric: tabular-nums; }
     .segrow button { background: transparent; padding: 1px 7px; color: #aeaeb2; }
+    .copyfield {
+      all: unset; box-sizing: border-box; display: block; width: calc(100% - 12px); margin: 2px 6px; padding: 3px 6px;
+      border-radius: 5px; background: #1c1c1e; border: 1px solid #3a3a3c; color: #f2f2f7; font: 11px ui-monospace, Menlo, monospace;
+      user-select: text; -webkit-user-select: text;
+    }
   `;
 
   let host = null; // the mounted host, or null
@@ -146,7 +162,9 @@
   let view = null; // the last `view` reply
   let job = null; // the shown job (view.job, then the `jobs` poll)
   let mode = null; // the Output choice (the hub keeps none; null = view.mode)
-  let note = ""; // the last action's error
+  let note = ""; // the last action's error, or its success text while noteOk
+  let noteOk = false; // note is a success ("Copied", "Saved by the browser"): not shown in red
+  let copyField = null; // the text the menu shows for ⌘C (the clipboard refused it) until it closes or the next copy
   let busy = false; // a download call is in flight
   let menuOpen = false;
   let fullArmed = 0; // Date.now() when Full clip asked to confirm; 0 = not asking
@@ -297,6 +315,7 @@
     host.remove();
     host = ui = rect = view = job = drag = null;
     menuOpen = false;
+    copyField = null;
     note = "";
     disarmFull();
     detach();
@@ -469,6 +488,7 @@
 
   function setMenu(open) {
     menuOpen = open;
+    if (!open) copyField = null;
     ui.more.setAttribute("aria-expanded", String(open));
     render();
   }
@@ -532,7 +552,7 @@
         view = r;
         if (!pollTimer) job = r.job || null; // the poll's answer is newer
       } else if (r.error !== "not-selected-frame") {
-        note = errorText(r); // the frame lost the selection: sync() closes it
+        [note, noteOk] = [errorText(r), false]; // the frame lost the selection: sync() closes it
       }
       ensurePolling();
       render();
@@ -567,7 +587,7 @@
   function act(msg) {
     note = "";
     ask(msg).then((r) => {
-      if (!r.ok) note = errorText(r);
+      if (!r.ok) [note, noteOk] = [errorText(r), false];
       render();
       scheduleRefresh();
     });
@@ -585,25 +605,67 @@
     ask(msg).then((r) => {
       busy = false;
       if (!host) return;
-      if (r.ok) {
+      if (r.ok && r.jobId) {
         job = { state: "queued" };
         poll();
+      } else if (r.ok) {
+        // Browser and Another-app modes: no job to follow.
+        note = r.saved === "browser" ? "Saved by the browser"
+          : r.saved === "tab" ? "Opened in a new tab: use the browser's Save"
+          : `Opened in ${String(r.opened || "the chosen app")}`;
+        noteOk = true;
       } else {
-        note = errorText(r);
+        [note, noteOk] = [errorText(r), false];
       }
       render();
     });
   }
 
+  // A Copy item (Browser mode): the hub builds the text, written to the clipboard
+  // within this click's activation; when the clipboard refuses, the menu shows it
+  // selected in a field for ⌘C.
+  function copy(what) {
+    note = "";
+    copyField = null;
+    ask({ type: "copyText", what }).then((r) => {
+      if (!host) return;
+      if (!r.ok || typeof r.text !== "string") {
+        [note, noteOk] = [errorText(r), false];
+        return render();
+      }
+      const text = r.text;
+      Promise.resolve()
+        .then(() => navigator.clipboard.writeText(text))
+        .then(
+          () => {
+            [note, noteOk] = ["Copied", true];
+            render();
+          },
+          () => {
+            copyField = text;
+            render();
+          }
+        );
+    });
+  }
+
+  // Browser and Another-app modes take the whole file: no marks, no Full clip.
+  const whole = () => Boolean(view && view.downloadWith !== "segdown");
+
   // -> {text, warn} when Download must stay disabled, else null.
   function downloadBlock() {
     if (busy) return { text: "Sending…" };
     if (!view) return { text: "Loading…" };
-    const list = segments();
-    if (!list.length) return { text: "Mark a segment first: Mark start ([), then Mark end (])." };
-    if (view.overLimit) {
-      const text = `Total ${fmtTime(totalOf(list))} is over the ${fmtTime(view.maxDuration)} limit (Max total duration in SegDown Settings).`;
-      return { text, warn: true };
+    if (whole()) {
+      if (!view.source) return { text: ERRORS["no-source"] };
+      if (view.downloadWith === "browser" && !view.saveable) return { text: ERRORS[view.inlineOnly ? "inline-only" : "copy-only"] };
+    } else {
+      const list = segments();
+      if (!list.length) return { text: "Mark a segment first: Mark start ([), then Mark end (])." };
+      if (view.overLimit) {
+        const text = `Total ${fmtTime(totalOf(list))} is over the ${fmtTime(view.maxDuration)} limit (Max total duration in SegDown Settings).`;
+        return { text, warn: true };
+      }
     }
     if (typeof view.depsProblem === "string") return { text: view.depsProblem, warn: true };
     if (typeof view.appError === "string") return { text: view.appError, warn: true };
@@ -782,7 +844,7 @@
     ui.jobLine.hidden = !jt;
     ui.jobLine.className = job && job.state === "failed" ? "err" : "";
     let text = note;
-    let cls = note ? "err" : "";
+    let cls = note && !noteOk ? "err" : "";
     if (!text && fullArmed) text = "Download the whole video? Click Confirm full clip; Esc cancels.";
     if (!text && block && !busy) [text, cls] = [block.text, block.warn ? "warn" : ""];
     if (!text) {
@@ -813,8 +875,11 @@
     ui.end.classList.toggle("next", !ui.end.disabled);
     const block = downloadBlock();
     ui.main.disabled = Boolean(block);
-    ui.main.title = block ? block.text : "Download the marked segments";
-    ui.full.hidden = !(view && view.fullClip === true);
+    const mainTitle = !whole() ? "Download the marked segments"
+      : view.downloadWith === "browser" ? "Save the whole file with the browser (marked segments are not used)"
+      : `Open the link in ${String(view.otherApp || "the chosen app")} (marked segments are not used)`;
+    ui.main.title = block ? block.text : mainTitle;
+    ui.full.hidden = !(view && view.fullClip === true) || whole();
     const fb = fullBlock();
     if (fullArmed && (fb || ui.full.hidden)) disarmFull();
     ui.full.disabled = Boolean(fb);
@@ -860,17 +925,27 @@
   }
 
   function fillMenu() {
-    heading("Output");
-    for (const [value, label] of [["separate", "Separate files"], ["merged", "Merged into one file"]]) {
-      item(label, currentMode() === value, () => {
-        mode = value;
-        render();
-      });
-    }
+    const browser = view.downloadWith === "browser";
+    heading("Download with");
+    const appLabel = view.otherApp ? `SegDown app → ${String(view.otherApp)}` : "SegDown app";
+    item(appLabel, !browser, () => act({ type: "setDownloadWith", browser: false }));
+    item("Browser", browser, () => act({ type: "setDownloadWith", browser: true }));
 
-    const inc = view.incognito || { on: false, forced: false };
-    heading("Privacy");
-    item(inc.forced ? "Incognito (private window)" : "Incognito", inc.on, () => act({ type: "setIncognito", on: !inc.on }), inc.forced);
+    // Output, Privacy and Site need the app.
+    if (browser) fillCopy();
+    else {
+      heading("Output");
+      for (const [value, label] of [["separate", "Separate files"], ["merged", "Merged into one file"]]) {
+        item(label, currentMode() === value, () => {
+          mode = value;
+          render();
+        });
+      }
+
+      const inc = view.incognito || { on: false, forced: false };
+      heading("Privacy");
+      item(inc.forced ? "Incognito (private window)" : "Incognito", inc.on, () => act({ type: "setIncognito", on: !inc.on }), inc.forced);
+    }
 
     const src = view.source;
     if (src && src.kind === "hls") {
@@ -931,8 +1006,28 @@
     });
     item("Clear all segments", null, () => act({ type: "clearSegments" }), !list.length);
 
+    if (browser) return;
     heading("Site");
     item("Ignore this site", null, () => act({ type: "ignoreSite" }));
+  }
+
+  // Browser mode's Copy section; the ⌘C field stays while the menu is open (re-renders
+  // rebuild it) and goes when it closes or with the next copy.
+  function fillCopy() {
+    heading("Copy");
+    if (view.inlineOnly) return muted(ERRORS["inline-only"]);
+    const kinds = (Array.isArray(view.copy) ? view.copy : []).filter((k) => Object.hasOwn(COPY_LABELS, k));
+    if (!kinds.length) return muted("Nothing to copy yet.");
+    for (const what of kinds) item(COPY_LABELS[what], null, () => copy(what));
+    muted("Commands carry no cookies: a stream that needs them fails.");
+    if (copyField === null) return;
+    const field = make("input", "copyfield");
+    field.readOnly = true;
+    field.value = copyField;
+    ui.menu.append(field);
+    muted("Press ⌘C to copy.");
+    field.focus();
+    field.select();
   }
 
   // --- hub messages (to "overlay") ---
@@ -942,7 +1037,7 @@
     if (sender.id !== chrome.runtime.id || !msg || msg.to !== "overlay") return undefined;
     if (msg.type === "toggleOverlay") return void sync();
     if (!host) return undefined;
-    if (msg.type === "markError") note = errorText({ error: msg.error });
+    if (msg.type === "markError") [note, noteOk] = [errorText({ error: msg.error }), false];
     else if (msg.type === "mark") note = "";
     else if (msg.type === "segments" && view && Array.isArray(msg.segments)) view.segments = msg.segments;
     render();

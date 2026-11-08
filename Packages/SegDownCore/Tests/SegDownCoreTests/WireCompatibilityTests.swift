@@ -31,6 +31,16 @@ struct WireCompatibilityTests {
         #expect(job.mediaDuration == nil)
         #expect(job.pageURL == nil)
         #expect(job.maxHeight == nil)
+
+        // Protocol 6 kinds decode, and re-encode to the same raw value.
+        #expect(try ["dash", "file"].allSatisfy { kind in
+            let request = try IPC.decodeLine(
+                IPCRequest.self, from: Data(line.replacingOccurrences(of: #""kind":"hls""#, with: #""kind":"\#(kind)""#).utf8)
+            )
+            guard case let .enqueue(job) = request, case .media(_, let decoded, _, _, _) = job.source else { return false }
+            let encoded = String(decoding: try IPC.encodeLine(request), as: UTF8.self)
+            return decoded.rawValue == kind && encoded.contains(#""kind":"\#(kind)""#)
+        })
     }
 
     @Test func enqueueWithMaxHeightDecodesAndReencodesTheKey() throws {
@@ -44,6 +54,26 @@ struct WireCompatibilityTests {
         }
         #expect(job.maxHeight == 720)
         #expect(String(decoding: try IPC.encodeLine(request), as: UTF8.self).contains(#""maxHeight":720"#))
+    }
+
+    @Test func enqueueWithPlaylistSourceDecodesAndReencodesItsKeys() throws {
+        let line = ##"{"type":"enqueue","job":{"source":{"type":"playlist","text":"#EXTM3U\n#EXTINF:4,\nhttps://cdn.example.com/1.ts\n","baseURL":"https://cdn.example.com/1.ts"},"title":"T","segments":[{"start":1,"end":2}],"mode":"separate","precision":"precise"}}"##
+
+        let request = try IPC.decodeLine(IPCRequest.self, from: Data(line.utf8))
+
+        guard case let .enqueue(job) = request else {
+            Issue.record("expected .enqueue, got \(request)")
+            return
+        }
+        let text = "#EXTM3U\n#EXTINF:4,\nhttps://cdn.example.com/1.ts\n"
+        let baseURL = try #require(URL(string: "https://cdn.example.com/1.ts"))
+        #expect(job.source == .playlist(text: text, baseURL: baseURL, headers: [:]))
+        let encoded = try IPC.encodeLine(request)
+        let object = try #require(try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let source = try #require((object["job"] as? [String: Any])?["source"] as? [String: Any])
+        #expect(source["type"] as? String == "playlist")
+        #expect(source["text"] as? String == text)
+        #expect(source["baseURL"] as? String == "https://cdn.example.com/1.ts")
     }
 
     @Test func setIgnoredDecodesHostAndFlag() throws {
@@ -76,7 +106,10 @@ struct WireCompatibilityTests {
                 playerButton: false,
                 fullDownloadButton: false,
                 preferredHeight: 1080,
-                ignoredDomains: ["example.com", "www.youtube.com"]
+                ignoredDomains: ["example.com", "www.youtube.com"],
+                downloadWith: .otherApp,
+                downloadWithRev: 3,
+                otherAppName: "IINA"
             )
         )
 
@@ -86,7 +119,31 @@ struct WireCompatibilityTests {
         #expect(String(decoding: line, as: UTF8.self).contains(#""preferredHeight":1080"#))
         #expect(String(decoding: line, as: UTF8.self).contains(#""fullDownloadButton":false"#))
         #expect(String(decoding: line, as: UTF8.self).contains(#""ignoredDomains":["example.com","www.youtube.com"]"#))
+        #expect(String(decoding: line, as: UTF8.self).contains(#""downloadWith":"otherApp""#))
+        #expect(String(decoding: line, as: UTF8.self).contains(#""downloadWithRev":3"#))
+        #expect(String(decoding: line, as: UTF8.self).contains(#""otherAppName":"IINA""#))
         #expect(try IPC.decodeLine(IPCResponse.self, from: line) == pong)
+    }
+
+    @Test func openWithAndOpenedRoundTripAndAnOlderPongDownloadsWithSegDown() throws {
+        let request = try IPC.decodeLine(
+            IPCRequest.self, from: Data(#"{"type":"openWith","url":"https://example.com/v.mp4"}"#.utf8))
+        #expect(request == .openWith(url: URL(string: "https://example.com/v.mp4")!))
+
+        let opened = IPCResponse.opened(app: "IINA")
+        let line = try IPC.encodeLine(opened)
+        #expect(String(decoding: line, as: UTF8.self).contains(#""type":"opened""#))
+        #expect(try IPC.decodeLine(IPCResponse.self, from: line) == opened)
+
+        let pong = #"{"type":"pong","version":"0.6.12","missing":[],"protocol":6,"settings":{"mode":"merged","incognitoDefault":false}}"#
+        guard case let .pong(_, _, _, settings) = try IPC.decodeLine(IPCResponse.self, from: Data(pong.utf8)) else {
+            Issue.record("expected .pong")
+            return
+        }
+        let decoded = try #require(settings)
+        #expect(decoded.downloadWith == .segdown)
+        #expect(decoded.downloadWithRev == 0)
+        #expect(decoded.otherAppName == nil)
     }
 
     @Test func protocol2PongWithoutButtonKeysDecodesWithBothButtonsOn() throws {

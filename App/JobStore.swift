@@ -2,6 +2,7 @@
 // start immediately and run concurrently. Every enqueued job and every probed source passes
 // `Validation` before anything is fetched or run. Error messages never echo header values.
 // Finished jobs are kept in `JobHistory` (never incognito ones) and listed again at launch.
+import AppKit
 import Foundation
 import Observation
 import os
@@ -159,6 +160,8 @@ final class JobStore {
     /// - `setIgnored(host, ignored)` → adds the host's site to (or removes every domain covering the
     ///   host from) `ignoredDomains`, then `pong` like `ping` (without re-checking the tools); not a
     ///   hostname or a full list → `error("invalid")`.
+    /// - `openWith(url)` → opens `url` in the chosen app, `opened(app)`; not set to Another app, no app
+    ///   chosen or a bad URL → `error("invalid")`; the app is gone or refuses → `error("unavailable")`.
     func handle(_ request: IPCRequest) async -> IPCResponse {
         switch request {
         case .ping:
@@ -179,6 +182,8 @@ final class JobStore {
             return await probe(source)
         case let .setIgnored(host, ignored):
             return setIgnored(host: host, ignored: ignored)
+        case let .openWith(url):
+            return await openWith(url)
         }
     }
 
@@ -206,6 +211,40 @@ final class JobStore {
             settings.update { $0.ignoredDomains.append(site) }
         }
         return pong()
+    }
+
+    /// Hands `url` alone (no headers, no cookies) to the app chosen under Download with; no job, no
+    /// history entry. Refused unless the user picked Another app, so a page cannot make SegDown
+    /// launch anything otherwise. The log line never holds the URL.
+    private func openWith(_ url: URL) async -> IPCResponse {
+        guard settings.settings.downloadWith == .otherApp, let path = settings.settings.otherAppPath else {
+            logger.info("openWith refused: no app chosen")
+            return .error(code: IPCResponse.ErrorCode.invalid,
+                          message: "Choose an app under Download with in SegDown Settings.")
+        }
+        do {
+            _ = try Validation.validateHandoff(url)
+        } catch {
+            logger.info("openWith refused: invalid link")
+            return .error(code: IPCResponse.ErrorCode.invalid, message: Self.message(for: error))
+        }
+        let name = AppSettings.appName(path)
+        guard FileManager.default.fileExists(atPath: path) else {
+            logger.info("openWith failed: app missing")
+            return .error(code: IPCResponse.ErrorCode.unavailable, message: "\(name) is not installed any more.")
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        do {
+            _ = try await NSWorkspace.shared.open(
+                [url], withApplicationAt: URL(filePath: path, directoryHint: .isDirectory),
+                configuration: configuration)
+        } catch {
+            logger.info("openWith failed: the app refused")
+            return .error(code: IPCResponse.ErrorCode.unavailable, message: "\(name) could not open the link.")
+        }
+        logger.info("openWith opened")
+        return .opened(app: name)
     }
 
     // MARK: - Jobs
@@ -299,7 +338,7 @@ final class JobStore {
         case let .page(url):
             sourceKind = .page
             pageURL = pageURL ?? url
-        case .media: sourceKind = .media
+        case .media, .playlist: sourceKind = .media
         }
         // Listed before returning, so a `status` request right after `enqueued` finds it.
         items.insert(

@@ -2,14 +2,15 @@
   "manifest_version": 3,
   "name": "SegDown",
   "version": "0.6.12",
-  "description": "Mark segments on a web video and download them with the SegDown app.",
+  "description": "Download web videos: the whole video, or only the time ranges you mark.",
   "permissions": [
     "nativeMessaging",
     "storage",
     "webRequest",
     "webNavigation",
     "contextMenus",
-    "scripting"
+    "scripting",
+    "downloads"
   ],
   "host_permissions": [
     "<all_urls>"

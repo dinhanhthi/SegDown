@@ -80,16 +80,32 @@ public struct HLSPlaylist: Sendable, Hashable {
     /// False when the playlist has an `EXT-X-KEY` (METHOD other than NONE), `EXT-X-MAP` or
     /// `EXT-X-BYTERANGE` tag: its segments are then never treated as disguised (`DisguisedHLS`).
     public var isPlain: Bool
+    /// The `URI` of the first `EXT-X-MAP` tag (the fMP4 init section), absolute and http(s).
+    public var mapURL: URL?
+    /// The number of `EXT-X-MAP` tags.
+    public var mapCount: Int
+    /// True when the playlist has an `EXT-X-KEY` tag with a METHOD other than NONE.
+    public var hasKey: Bool
+    /// True when the playlist has an `EXT-X-BYTERANGE` tag, or an `EXT-X-MAP` with `BYTERANGE`.
+    public var hasByteRange: Bool
+    /// Segment or `EXT-X-MAP` URIs dropped because they do not resolve to http(s) (`blob:`, `data:`…).
+    public var skippedURIs: Int
 
     public init(
         isMaster: Bool, variants: [HLSVariant] = [], audioRenditions: [HLSAudioRendition] = [],
-        segments: [HLSMediaSegment] = [], isPlain: Bool = true
+        segments: [HLSMediaSegment] = [], isPlain: Bool = true, mapURL: URL? = nil, mapCount: Int = 0,
+        hasKey: Bool = false, hasByteRange: Bool = false, skippedURIs: Int = 0
     ) {
         self.isMaster = isMaster
         self.variants = variants
         self.audioRenditions = audioRenditions
         self.segments = segments
         self.isPlain = isPlain
+        self.mapURL = mapURL
+        self.mapCount = mapCount
+        self.hasKey = hasKey
+        self.hasByteRange = hasByteRange
+        self.skippedURIs = skippedURIs
     }
 
     // MARK: Fetch
@@ -171,9 +187,24 @@ public struct HLSPlaylist: Sendable, Hashable {
             } else if line.hasPrefix(keyTag) {
                 if attributes(line.dropFirst(keyTag.count))["METHOD"]?.uppercased() != "NONE" {
                     playlist.isPlain = false
+                    playlist.hasKey = true
                 }
-            } else if line.hasPrefix("#EXT-X-MAP:") || line.hasPrefix("#EXT-X-BYTERANGE:") {
+            } else if line.hasPrefix(mapTag) {
                 playlist.isPlain = false
+                playlist.mapCount += 1
+                let map = attributes(line.dropFirst(mapTag.count))
+                if map["BYTERANGE"] != nil { playlist.hasByteRange = true }
+                // Never resolve an empty URI: it would resolve to `baseURL` itself.
+                if let uri = map["URI"], !uri.isEmpty {
+                    if let url = resolve(uri, baseURL: baseURL) {
+                        if playlist.mapCount == 1 { playlist.mapURL = url }
+                    } else {
+                        playlist.skippedURIs += 1
+                    }
+                }
+            } else if line.hasPrefix("#EXT-X-BYTERANGE:") {
+                playlist.isPlain = false
+                playlist.hasByteRange = true
             } else if line.hasPrefix("#ENC-") {
                 encrypted = true
             } else if line.hasPrefix("#") {
@@ -188,6 +219,8 @@ public struct HLSPlaylist: Sendable, Hashable {
                 pendingDuration = nil
                 if let url = resolve(line, baseURL: baseURL) {
                     playlist.segments.append(HLSMediaSegment(url: url, duration: duration))
+                } else {
+                    playlist.skippedURIs += 1
                 }
             }
         }
@@ -225,6 +258,7 @@ public struct HLSPlaylist: Sendable, Hashable {
     private static let mediaTag = "#EXT-X-MEDIA:"
     private static let extInfTag = "#EXTINF:"
     private static let keyTag = "#EXT-X-KEY:"
+    private static let mapTag = "#EXT-X-MAP:"
 
     private static func variant(_ attributes: [String: String], uri: String, baseURL: URL) -> HLSVariant? {
         guard let url = resolve(uri, baseURL: baseURL) else { return nil }
