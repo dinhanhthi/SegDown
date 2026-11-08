@@ -11,12 +11,16 @@
 // Page data is untrusted: the DOM is built with textContent only, handlers act on
 // trusted events only, and the hub gets menu choices only (never URLs, titles or
 // times; a click on the bar seeks the video element here).
+// Loads once per agent; tears down for good once the agent is orphaned (an
+// extension update), and hides the hosts of older, orphaned copies.
 
 "use strict";
 
 (() => {
   const agent = globalThis.segdownAgent;
   if (!agent) return;
+  if (agent.overlayLoaded) return; // a re-injection next to this live agent
+  agent.overlayLoaded = true;
 
   const HIDE_MS = 2000; // auto-hide after the mouse stops over the video
   const PLACE_MS = 500; // re-place tick (parent-frame scroll, layout changes)
@@ -157,6 +161,7 @@
   let hideTimer = null;
   let placeFrame = 0;
   let segsKey = ""; // the drawn segments (renderBar)
+  let dead = false; // the agent is orphaned: torn down, never mounts again
 
   // --- helpers ---
 
@@ -222,11 +227,38 @@
     });
   }
 
+  // True once the agent is orphaned (an extension reload or update); the first
+  // call that notices tears down: unmount (host, timers, mount listeners) plus
+  // the boot listeners, so nothing mounts again.
+  function gone() {
+    if (dead) return true;
+    if (typeof agent.alive !== "function" || agent.alive()) return false;
+    dead = true;
+    unmount();
+    window.removeEventListener("pagehide", unmount);
+    try {
+      chrome.runtime.onMessage.removeListener(onMessage);
+    } catch {
+      // context gone
+    }
+    if (agent.onChange === sync) agent.onChange = null;
+    return true;
+  }
+
+  // Older copies left by an extension update keep re-showing their own host:
+  // hide those (never remove them, they would append it again).
+  function hideOthers() {
+    for (const el of document.querySelectorAll("segdown-overlay")) {
+      if (el !== host) el.style.setProperty("display", "none", "important");
+    }
+  }
+
   // --- mount / unmount ---
 
   // Shows the overlay when the hub says it is open and this frame holds the
   // selected video; hides it otherwise. Runs on every agent change.
   function sync() {
+    if (gone()) return;
     const st = agent.state();
     const v = agent.video();
     if (!(st && st.panelOpen === true && v && v.isConnected)) return unmount();
@@ -286,6 +318,7 @@
   // (Re-)enters the top layer last, so it sits above a new fullscreen element.
   function show() {
     if (!host.isConnected) document.documentElement.append(host);
+    hideOthers();
     try {
       if (host.matches(":popover-open")) host.hidePopover();
       host.showPopover();
@@ -381,6 +414,7 @@
 
   // A detached video only hides the host (place); the agent's rescan drops it.
   function onPlaceTick() {
+    if (gone()) return;
     if (agent.video() !== video) return sync();
     if (!host.isConnected) show();
     else place();
@@ -389,7 +423,7 @@
   // A plain re-show leaves the popover under the new fullscreen element (spike 1.2).
   function onFullscreen() {
     requestAnimationFrame(() => {
-      if (host) show();
+      if (host && !gone()) show();
     });
   }
 
@@ -416,7 +450,7 @@
   }
 
   function updateHide() {
-    if (!ui) return;
+    if (!ui || gone()) return;
     const idle = Date.now() - lastMove;
     const hide = idle >= HIDE_MS && !pinned();
     ui.wrap.classList.toggle("hidden", hide);
@@ -490,6 +524,7 @@
 
   function refresh() {
     refreshTimer = null;
+    if (gone()) return;
     const seq = ++viewSeq;
     ask({ type: "view" }).then((r) => {
       if (!host || seq !== viewSeq) return;
@@ -515,6 +550,7 @@
   }
 
   function poll() {
+    if (gone()) return;
     ask({ type: "jobs" }).then((r) => {
       if (!host) return;
       if (r.ok && Array.isArray(r.jobs)) {
@@ -901,7 +937,8 @@
 
   // --- hub messages (to "overlay") ---
 
-  chrome.runtime.onMessage.addListener((msg, sender) => {
+  function onMessage(msg, sender) {
+    if (dead) return undefined;
     if (sender.id !== chrome.runtime.id || !msg || msg.to !== "overlay") return undefined;
     if (msg.type === "toggleOverlay") return void sync();
     if (!host) return undefined;
@@ -911,7 +948,9 @@
     render();
     scheduleRefresh();
     return undefined;
-  });
+  }
+
+  chrome.runtime.onMessage.addListener(onMessage);
 
   window.addEventListener("pagehide", unmount);
 

@@ -29,13 +29,23 @@ const MAX_PENDING = 500;
 // Request types that never carry media we can download.
 const IGNORED_TYPES = new Set(["script", "stylesheet", "image", "font"]);
 
-const HLS_TYPES = new Set(["application/vnd.apple.mpegurl", "application/x-mpegurl"]);
+const HLS_TYPES = new Set([
+  "application/vnd.apple.mpegurl",
+  "application/x-mpegurl",
+  "audio/mpegurl",
+  "audio/x-mpegurl",
+]);
 const MP4_TYPES = new Set(["video/mp4"]);
 const CHUNK_TYPES = new Set(["video/mp2t", "video/iso.segment"]);
 // A small fetch/XHR response with one of these types may be a disguised playlist (e.g.
 // master.html served as text/html): captured as kind "maybe" until the app's probe tells.
 const MAYBE_HLS_TYPES = new Set(["text/html", "text/plain", "application/octet-stream", ""]);
 const MAX_MAYBE_HLS_BYTES = 256 * 1024; // larger ones are segments, not playlists
+// A numbered .mp4/.m4v/.m4a whose whole file is smaller than this is an fMP4 piece, not a video.
+const MAX_PIECE_BYTES = 64 * 1024;
+// Query params that pick a byte range of the same file (fbcdn bytestart/byteend): stripped so
+// ranged fetches of one video collapse into one entry.
+const RANGE_PARAMS = new Set(["bytestart", "byteend", "range", "rbuf"]);
 
 // ---------------------------------------------------------------------------
 // Media capture: pending request headers (memory only, short-lived)
@@ -78,6 +88,17 @@ function httpURL(url) {
   }
 }
 
+// The URL without its RANGE_PARAMS; unchanged (same string) when it has none. Other params
+// keep their exact encoding (signed CDN URLs).
+function stripRangeParams(url) {
+  const u = new URL(url);
+  const pairs = u.search.slice(1).split("&");
+  const kept = pairs.filter((p) => !RANGE_PARAMS.has(p.split("=")[0]));
+  if (kept.length === pairs.length) return url;
+  u.search = kept.join("&");
+  return u.href;
+}
+
 function contentType(responseHeaders) {
   const h = (responseHeaders || []).find((x) => String(x.name).toLowerCase() === "content-type");
   return h && typeof h.value === "string" ? h.value.split(";")[0].trim().toLowerCase() : "";
@@ -90,13 +111,33 @@ function contentLength(responseHeaders) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Whole file size in bytes: the N of a 206's Content-Range (bytes a-b/N), a 200's Content-Length,
+// else null (also when N is * or unparseable).
+function totalSize(responseHeaders, status) {
+  if (status === 200) return contentLength(responseHeaders);
+  if (status !== 206) return null;
+  const h = (responseHeaders || []).find((x) => String(x.name).toLowerCase() === "content-range");
+  const m = h && typeof h.value === "string" ? /\/\s*(\d+)\s*$/.exec(h.value) : null;
+  return m ? Number(m[1]) : null;
+}
+
 // Returns "hls" | "mp4" | "chunk" | "maybe" | null. A .ts/.m4s path wins over the Content-Type,
 // because fMP4 segments are often served as video/mp4. "maybe": a fetch/XHR response that
 // could be a playlist under another name (a GET with a body: MAYBE_HLS_TYPES, at most
-// MAX_MAYBE_HLS_BYTES; never a 204 or an empty body).
-function classify(pathname, ctype, type, length, method, status) {
+// MAX_MAYBE_HLS_BYTES; never a 204 or an empty body). A would-be mp4 (video/mp4 or a .mp4
+// path) is a chunk too when it is an init segment (init.mp4, seg_init-1.m4v, ...) or a numbered
+// piece (seg-12.mp4) whose total (whole file, from Content-Range for a 206) is under
+// MAX_PIECE_BYTES; never a Range's own length, so a big progressive mp4 stays an mp4.
+function classify(pathname, ctype, type, length, method, status, total) {
   const path = pathname.toLowerCase();
   if (path.endsWith(".ts") || path.endsWith(".m4s") || CHUNK_TYPES.has(ctype)) return "chunk";
+  if (
+    (MP4_TYPES.has(ctype) || path.endsWith(".mp4")) &&
+    (/(?:^|[-_.\/])init(?:[-_.][\w-]*)?\.(?:mp4|m4v|m4a)$/i.test(path) ||
+      (total !== null && total < MAX_PIECE_BYTES && /\d\.(?:mp4|m4v|m4a)$/i.test(path)))
+  ) {
+    return "chunk";
+  }
   if (HLS_TYPES.has(ctype)) return "hls";
   if (MP4_TYPES.has(ctype)) return "mp4";
   if (path.endsWith(".m3u8")) return "hls";
@@ -300,7 +341,8 @@ chrome.webRequest.onHeadersReceived.addListener(
       details.type,
       contentLength(details.responseHeaders),
       details.method,
-      details.statusCode
+      details.statusCode,
+      totalSize(details.responseHeaders, details.statusCode)
     );
     if (!kind) return;
     const ts = Date.now();
@@ -312,7 +354,8 @@ chrome.webRequest.onHeadersReceived.addListener(
     const p = pending.get(requestId);
     const headers = p ? p.headers : {};
     // isMaster: from an earlier probe of this URL (addEntry), else set by the 4.2 probe.
-    withTab(tabId, () => addEntry(tabId, { url, frameId, kind, headers, ts })).catch(logError);
+    // Without its range params, so addEntry's dedupe by URL collapses ranged fetches (chunks keep theirs).
+    withTab(tabId, () => addEntry(tabId, { url: stripRangeParams(url), frameId, kind, headers, ts })).catch(logError);
   },
   { urls: ["<all_urls>"] },
   ["responseHeaders"]
@@ -3066,12 +3109,41 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return replyAsync(hubDispatch(tabId, sender.frameId, msg, from), sendResponse);
 });
 
+// Chrome does not inject the manifest's content_scripts into tabs already open at
+// install/update; this does, in the manifest's order (overlay and button read the
+// agent's globalThis.segdownAgent). Firefox may inject them itself: the content
+// scripts' own guard makes the second injection a no-op. storage.session was wiped,
+// so each tab's top URL and saved segments come back first. Restricted pages (the
+// Web Store) throw; one tab never stops the others. Some Safari builds lack scripting.
+async function injectOpenTabs() {
+  if (typeof chrome.scripting?.executeScript !== "function") return;
+  const tabs = await chrome.tabs.query({});
+  const open = tabs.filter((tab) => Number.isInteger(tab.id) && httpURL(tab.url) && !tab.discarded);
+  await Promise.all(
+    open.map(async (tab) => {
+      try {
+        await setTopURL(tab.id, tab.url);
+        await restoreSegments(tab.id);
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: true },
+          files: ["content/agent.js", "content/overlay.js", "content/button.js"],
+        });
+      } catch (err) {
+        hubWarn(err);
+      }
+    })
+  );
+}
+
 // The app's settings as soon as the extension is installed or updated, not only
 // when the overlay first opens. Not on a browser update ("chrome_update"): the
 // ping launches the app.
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   setupActionMenu();
-  if (reason === "install" || reason === "update") fetchDeps().catch(hubWarn);
+  if (reason === "install" || reason === "update") {
+    fetchDeps().catch(hubWarn);
+    injectOpenTabs().catch(hubWarn);
+  }
 });
 
 // A subframe that navigates takes its videos with it (top-frame navigation clears

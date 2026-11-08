@@ -20,12 +20,16 @@
 // built from numbers, set with textContent), handlers act on trusted events
 // only, and the hub gets a videoKey (and an index into its own list) only (the
 // frame comes from the sender).
+// Loads once per agent; tears down for good once the agent is orphaned (an
+// extension update), and hides the hosts of older, orphaned copies.
 
 "use strict";
 
 (() => {
   const agent = globalThis.segdownAgent;
   if (!agent || typeof agent.eligible !== "function" || typeof agent.ui !== "function") return;
+  if (agent.buttonLoaded) return; // a re-injection next to this live agent
+  agent.buttonLoaded = true;
 
   const HIDE_MS = 2000; // auto-hide after the mouse stops over the video
   const MIN_TICK_MS = 500; // the hide re-check while the pointer rests on the buttons
@@ -168,6 +172,7 @@
   let busy = 0; // the pending downloadFull's number, 0 when none
   let downloads = 0;
   let feedbackTimer = null; // the check mark or the error line shows
+  let dead = false; // the agent is orphaned: torn down, never shows again
 
   // The hub's reply is not needed; errors (also "Extension context invalidated"
   // once the extension reloads) are ignored.
@@ -335,12 +340,50 @@
     el.style.left = `${x - hostLeft}px`;
   }
 
+  // --- orphan teardown ---
+
+  // True once the agent is orphaned (an extension reload or update); the first
+  // call that notices tears down: host, timers, frame and every listener, so
+  // nothing shows again. Checked on the pointer's frame and the hide tick.
+  function gone() {
+    if (dead) return true;
+    if (typeof agent.alive !== "function" || agent.alive()) return false;
+    dead = true;
+    hide();
+    if (host) {
+      resetFull(); // the menu's timer and listeners, the feedback timer
+      host.remove();
+    }
+    clearTimeout(hideTimer);
+    hideTimer = null;
+    cancelAnimationFrame(frame);
+    frame = 0;
+    window.removeEventListener("keydown", onMenuKey, true);
+    window.removeEventListener("pointerdown", onOutside, true);
+    window.removeEventListener("mousemove", onMove, { capture: true });
+    window.removeEventListener("scroll", hide, { capture: true });
+    document.removeEventListener("fullscreenchange", hide);
+    document.removeEventListener("webkitfullscreenchange", hide);
+    window.removeEventListener("pagehide", hide);
+    return true;
+  }
+
+  // Older copies left by an extension update keep re-showing their own host:
+  // hide those (never remove them, they would append it again).
+  function hideOthers() {
+    for (const el of document.querySelectorAll("segdown-button")) {
+      if (el !== host) el.style.setProperty("display", "none", "important");
+    }
+  }
+
   // --- show / hide ---
 
   // (Re-)enters the top layer last, so it sits above a fullscreen element.
   function show(r) {
+    if (gone()) return;
     if (!host) build();
     if (!host.isConnected) document.documentElement.append(host);
+    hideOthers();
     layout();
     position(r);
     host.style.setProperty("visibility", "visible", "important");
@@ -378,7 +421,7 @@
   // Never an idle hide while the menu, the busy state or the feedback shows.
   function onHideTick() {
     hideTimer = null;
-    if (!shown) return;
+    if (gone() || !shown) return;
     if (!wanted() || !target.video.isConnected || overlayOn(target.video)) return hide();
     relayout();
     if (stuck() || wrap.matches(":hover")) {
@@ -411,6 +454,7 @@
 
   function onFrame() {
     frame = 0;
+    if (gone()) return;
     if (!wanted()) return hide();
     if (shown) relayout();
     const hit = hitTest(pointX, pointY);

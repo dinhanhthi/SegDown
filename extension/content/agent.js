@@ -5,10 +5,25 @@
 // 3.6: `[` / `]` mark keys while the overlay is open.
 // 5.3: shares the selected video and the hub's state with overlay.js (below).
 // Also shares the app's ui switches and the eligible videos with button.js.
+// Once per frame (a re-injection next to a live copy is a no-op); tears down
+// once orphaned by an extension reload or update.
 
 "use strict";
 
 (() => {
+  // A live copy already runs in this frame (the manifest injection and the
+  // hub's re-injection after an update can both arrive). Orphans of 0.6.12 and
+  // older have no alive() and are replaced.
+  const prev = globalThis.segdownAgent;
+  if (prev && typeof prev.alive === "function" && prev.alive()) return;
+  // Any SegDown host already in the page belongs to an orphan (Chrome gives each
+  // extension load its own isolated world, so its globalThis is not ours): hidden,
+  // never removed (an orphan re-appends a removed host). An orphan's open overlay
+  // would otherwise stay up until ours opens.
+  for (const h of document.querySelectorAll("segdown-button, segdown-overlay")) {
+    h.style.setProperty("display", "none", "important");
+  }
+
   const SCAN_DELAY_MS = 500;
   const MAX_CANDIDATES = 20;
   const MIN_AREA = 200 * 112;
@@ -35,13 +50,59 @@
   let stateSeen = false; // a broadcast beats the boot getState reply
   let ui = { fullClipButton: true, playerButton: true, fullDownloadButton: true, ignored: false }; // the app's switches and this tab's Ignored sites flag (getState, `ui` broadcast)
   const observedRoots = new WeakSet(); // open shadow roots already under the observer
+  let dead = false; // orphaned and torn down: nothing re-arms
 
-  // Throws once the extension reloads ("Extension context invalidated"); ignore.
-  function send(msg) {
+  // False once the extension reloads or updates: this copy is then an orphan
+  // (chrome.runtime.id reads undefined, every chrome.runtime call throws).
+  function alive() {
     try {
-      chrome.runtime.sendMessage(msg).catch(() => {});
+      return Boolean(chrome.runtime && chrome.runtime.id);
+    } catch {
+      return false;
+    }
+  }
+
+  // True once orphaned; the first call that notices tears down.
+  function gone() {
+    if (dead) return true;
+    if (alive()) return false;
+    teardown();
+    return true;
+  }
+
+  // Once: stops the observer, the scan timer and every listener added at boot,
+  // then tells overlay.js (dead is set first: it re-enters through changed()).
+  function teardown() {
+    dead = true;
+    shared.dead = true;
+    if (observer) observer.disconnect();
+    clearTimeout(scanTimer);
+    scanTimer = null;
+    for (const v of videos.values()) {
+      for (const type of ["loadedmetadata", "durationchange", "resize"]) v.removeEventListener(type, onMediaEvent);
+    }
+    window.removeEventListener("keydown", onKeyDown, true);
+    window.removeEventListener("resize", scheduleScan);
+    window.removeEventListener("scroll", scheduleScan);
+    window.removeEventListener("pagehide", onPageHide);
+    window.removeEventListener("pageshow", onPageShow);
+    try {
+      chrome.runtime.onMessage.removeListener(onMessage);
     } catch {
       // context gone
+    }
+    changed();
+  }
+
+  // Throws once the extension reloads ("Extension context invalidated"): tear down.
+  function send(msg) {
+    if (gone()) return;
+    try {
+      chrome.runtime.sendMessage(msg).catch(() => {
+        gone();
+      });
+    } catch {
+      gone(); // context gone
     }
   }
 
@@ -147,6 +208,7 @@
 
   function scan() {
     scanTimer = null;
+    if (gone()) return;
     if (ui.ignored) return; // Ignored sites: nothing to report (applyUI sent [])
     for (const v of findVideos()) track(v);
     for (const [key, v] of videos) {
@@ -178,7 +240,8 @@
   }
 
   function scheduleScan() {
-    if (scanTimer === null) scanTimer = setTimeout(scan, SCAN_DELAY_MS);
+    if (scanTimer !== null || gone()) return;
+    scanTimer = setTimeout(scan, SCAN_DELAY_MS);
   }
 
   const isTime = (n) => typeof n === "number" && Number.isFinite(n) && n >= 0;
@@ -252,8 +315,11 @@
   // playerButton is off or ignored is true; fullDownloadButton shows its Download
   // full video button) and eligible():
   // the tracked videos that are connected, not excluded and of a finite
-  // duration > 0, as [{videoKey, video}].
+  // duration > 0, as [{videoKey, video}]. alive() turns false (and dead true)
+  // once this copy is orphaned; overlay.js and button.js then tear down too.
   const shared = {
+    alive: () => !dead && alive(),
+    dead: false,
     video: () => (selectedKey && videos.get(selectedKey)) || null,
     state: () => hubState,
     ui: () => ui,
@@ -273,7 +339,8 @@
     if (typeof shared.onChange === "function") shared.onChange();
   }
 
-  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  function onMessage(msg, sender, sendResponse) {
+    if (dead) return undefined;
     if (sender.id !== chrome.runtime.id || !msg) return undefined;
     if (msg.to === "all" && msg.type === "state") {
       stateSeen = true;
@@ -287,7 +354,9 @@
     if (msg.to !== "agent") return undefined;
     sendResponse(handle(msg));
     return undefined;
-  });
+  }
+
+  chrome.runtime.onMessage.addListener(onMessage);
 
   // --- keyboard (3.6) ---
 
@@ -356,33 +425,40 @@
           applyUI(r.ui);
           if (!stateSeen) applyHubState(r.state);
         },
-        () => {}
+        () => {
+          gone();
+        }
       );
     } catch {
-      // context gone
+      gone(); // context gone
     }
   }
 
   // Leaving the page (or entering the back/forward cache): the hub drops this
   // frame's videos, also when an iframe is removed without a navigation event.
-  window.addEventListener("pagehide", () => {
+  function onPageHide() {
     lastReport = "[]";
     send({ type: "candidates", videos: [] });
-  });
+  }
+
+  window.addEventListener("pagehide", onPageHide);
 
   // Back/forward cache restore: the top-frame commit cleared the hub's tab state
   // and this script does not run again, so report everything anew.
-  window.addEventListener("pageshow", (e) => {
-    if (!e.persisted) return;
+  function onPageShow(e) {
+    if (!e.persisted || gone()) return;
     lastReport = null;
     selectedKey = null; // the hub sends `select` again after its auto-pick
     stateSeen = false;
     changed();
     requestState();
     scheduleScan();
-  });
+  }
+
+  window.addEventListener("pageshow", onPageShow);
 
   requestState();
+  if (dead) return; // already orphaned at boot: requestState tore down
 
   observer = new MutationObserver(scheduleScan);
   observe(document.documentElement);
