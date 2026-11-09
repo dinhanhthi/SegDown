@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-08
+
+### Fixed
+
+- The extension's player buttons now follow the video when it moves or resizes (scrolling, entering full screen, layout changes) instead of staying in the old position.
+
 ## [0.7.0] - 2026-11-08
 
 ### Added
