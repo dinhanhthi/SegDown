@@ -399,12 +399,10 @@ private struct DownloadCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            // An error gets its own row above the buttons; other messages sit beside them.
-            if status.state == .failed, let message = status.message {
-                Text(verbatim: message)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
+            // An error (failed) or a warning (done with a message) gets its own box above the buttons; progress
+            // messages sit beside them.
+            if let message = status.message, let tint = Self.noticeTint(status.state) {
+                NoticeBox(message: message, tint: tint)
             }
             HStack(spacing: 8) {
                 if status.state == .done, !status.outputs.isEmpty {
@@ -473,7 +471,7 @@ private struct DownloadCard: View {
                 .fixedSize()
                 .help("Remove the download from the list, or also move its files to the Trash")
                 Spacer(minLength: 8)
-                if status.state != .failed, let message = status.message {
+                if Self.noticeTint(status.state) == nil, let message = status.message {
                     Text(verbatim: message)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -511,6 +509,16 @@ private struct DownloadCard: View {
 
     /// The `GlassCard` shape, for the selection.
     private static let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
+
+    /// The message's box color: red for an error, orange for a warning on a finished download; nil for progress
+    /// messages, which sit beside the buttons.
+    static func noticeTint(_ state: JobState) -> Color? {
+        switch state {
+        case .failed: .red
+        case .done: .orange
+        default: nil
+        }
+    }
 
     /// Heavier files stand out more: plain under 100 MB, then yellow, orange from 500 MB, red from 1 GB, purple from
     /// 2 GB (decimal units, as `ByteCountFormatter` shows them).
@@ -565,6 +573,53 @@ private struct DownloadCard: View {
 
     private var existingOutputs: [URL] {
         item.status.outputs.filter { FileManager.default.fileExists(atPath: $0) }.map { URL(filePath: $0) }
+    }
+}
+
+/// An error or warning in a faint box of its color, with a Copy button that shows a checkmark for a moment once copied.
+private struct NoticeBox: View {
+    let message: String
+    let tint: Color
+    @State private var copied = false
+    @State private var resetTask: Task<Void, Never>?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            // Messages can quote untrusted page data: plain text, never markdown.
+            Text(verbatim: message)
+                .font(.caption)
+                .foregroundStyle(tint)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: copy) {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(copied ? Color.green : tint)
+                    .contentTransition(.symbolEffect(.replace))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(copied ? "Copied" : "Copy the message")
+            .accessibilityLabel(copied ? "Copied" : "Copy")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tint.opacity(0.12)))
+        .onDisappear { resetTask?.cancel() }
+    }
+
+    private func copy() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message, forType: .string)
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) { copied = true }
+        resetTask?.cancel()
+        resetTask = Task {
+            try? await Task.sleep(for: .seconds(1.2))
+            guard !Task.isCancelled else { return }
+            withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) { copied = false }
+        }
     }
 }
 
