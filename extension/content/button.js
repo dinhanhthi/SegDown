@@ -365,7 +365,8 @@
       const pos = getComputedStyle(el).position;
       if (pos !== "fixed" && pos !== "sticky") continue;
       const h = el.getBoundingClientRect();
-      if (h.top > 1 || h.width < 0.9 * window.innerWidth) continue;
+      // a full-page layer (an ad's click catcher, inset 0) is no header
+      if (h.top > 1 || h.width < 0.9 * window.innerWidth || h.height > window.innerHeight / 2) continue;
       if (h.bottom > top) top = h.bottom;
       break;
     }
