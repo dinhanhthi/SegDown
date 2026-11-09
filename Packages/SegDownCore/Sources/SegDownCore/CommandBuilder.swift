@@ -75,13 +75,17 @@ public enum CommandBuilder {
         segment: Segment,
         precision: Precision,
         output: URL,
-        audioShift: Double = 0
+        audioShift: Double = 0,
+        collapseGaps: Bool = false
     ) -> [String] {
         let startMs = milliseconds(segment.start)
         let durationMs = max(0, milliseconds(segment.end) - startMs)
         let start = format(milliseconds: startMs)
 
         var args = ["-hide_banner", "-nostdin", "-y"]
+        // A local playlist missing its empty segments: its timestamps jump over them. ffmpeg only
+        // closes jumps over 10 s by default; 1 s closes every gap (checked: a 9.3 s gap stayed).
+        if collapseGaps { args += ["-dts_delta_threshold", "1"] }
         args += inputArguments(url: input, kind: kind, source: source, start: start, headers: headers)
         if let audio {
             let audioStart = format(milliseconds: milliseconds(segment.start - audioShift))

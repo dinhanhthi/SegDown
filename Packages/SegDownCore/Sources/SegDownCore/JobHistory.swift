@@ -17,6 +17,8 @@ public struct JobRecord: Codable, Sendable, Hashable, Identifiable {
     public var outputs: [String]
     public var message: String?
     public var fallbackUsed: Bool?
+    /// The done job's `JobStatus.warning`.
+    public var warning: String?
     public var pageURL: URL?
     /// `nil` when not archived.
     public var archived: Bool?
@@ -33,6 +35,7 @@ public struct JobRecord: Codable, Sendable, Hashable, Identifiable {
         outputs: [String] = [],
         message: String? = nil,
         fallbackUsed: Bool? = nil,
+        warning: String? = nil,
         pageURL: URL? = nil,
         archived: Bool? = nil
     ) {
@@ -47,6 +50,7 @@ public struct JobRecord: Codable, Sendable, Hashable, Identifiable {
         self.outputs = outputs
         self.message = message
         self.fallbackUsed = fallbackUsed
+        self.warning = warning
         self.pageURL = pageURL
         self.archived = archived
     }
@@ -78,11 +82,12 @@ public struct JobHistory: Sendable {
         records = decoded
     }
 
-    /// Stores `record` (message scrubbed) as the newest, unless `incognito`, which drops it entirely.
+    /// Stores `record` (message and warning scrubbed) as the newest, unless `incognito`, which drops it entirely.
     public mutating func append(_ record: JobRecord, incognito: Bool) throws {
         guard !incognito else { return }
         var record = record
         record.message = record.message.map(Self.scrubURLs)
+        record.warning = record.warning.map(Self.scrubURLs)
         records.removeAll { $0.id == record.id }
         records.insert(record, at: 0)
         if records.count > Self.maxRecords { records.removeLast(records.count - Self.maxRecords) }

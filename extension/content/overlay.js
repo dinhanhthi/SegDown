@@ -713,6 +713,7 @@
     }
     if (j.fallbackUsed === true) parts.push("Switched to the captured media");
     if (typeof j.message === "string" && j.message) parts.push(j.message);
+    if (typeof j.warning === "string" && j.warning) parts.push(`Warning: ${j.warning}`);
     return parts.join(" · ");
   }
 

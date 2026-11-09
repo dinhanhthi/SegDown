@@ -392,7 +392,7 @@ final class JobStore {
             createdAt: item.createdAt, finishedAt: item.finishedAt ?? Date(),
             segmentCount: item.segmentCount, totalDuration: item.totalDuration,
             bytes: item.bytes, outputs: item.status.outputs, message: item.status.message,
-            fallbackUsed: item.fallbackUsed ? true : nil, pageURL: item.pageURL,
+            fallbackUsed: item.fallbackUsed ? true : nil, warning: item.status.warning, pageURL: item.pageURL,
             archived: item.archived ? true : nil
         )
     }
@@ -404,7 +404,7 @@ final class JobStore {
             segmentIndex: done ? max(record.segmentCount - 1, 0) : 0,
             segmentCount: record.segmentCount, fraction: done ? 1 : 0,
             message: record.message, outputs: record.outputs,
-            bytes: record.bytes, fallbackUsed: record.fallbackUsed
+            bytes: record.bytes, fallbackUsed: record.fallbackUsed, warning: record.warning
         )
         return Item(
             id: record.id, title: record.title, status: status,

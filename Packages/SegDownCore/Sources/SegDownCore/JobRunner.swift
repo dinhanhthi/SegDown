@@ -43,6 +43,9 @@ public actor JobRunner {
         /// Pieces `downloadPieces` keeps in flight; lowered on refusals, kept for the rest of the
         /// job (every window, the fallback attempt too).
         var pieceLimit = DisguisedHLS.parallelPieces
+        /// Playlist positions (1-based) of the skipped empty segments and their sizes
+        /// (`DisguisedHLS.EmptySegment`), across every window: the done job's `warning`.
+        var emptySegments: [Int: Int64] = [:]
     }
 
     private let binaries: Binaries
@@ -127,6 +130,7 @@ public actor JobRunner {
                 message: jobs[id]?.compressionFailed == true ? "Compression failed; saved uncompressed" : nil,
                 outputs: outputs.map(\.path)
             )
+            final.warning = DisguisedHLS.emptyWarning(jobs[id]?.emptySegments ?? [:])
         } catch {
             // Checked first: an abort goes through the cancel path, so `cancelled` is set too.
             if let reason = jobs[id]?.abortReason {
@@ -477,6 +481,7 @@ public actor JobRunner {
             tracker.begin(index: index, message: "Downloading segment \(index + 1) of \(count)")
             var segmentInput = input
             var shifted = segment
+            var collapseGaps = false
             // The segments left in place if staging stops midway, and the folder they move to.
             var staged: [URL] = []
             defer { for file in staged { try? FileManager.default.removeItem(at: file) } }
@@ -487,15 +492,19 @@ public actor JobRunner {
                     segmentExtension: staging.mapURL == nil ? "ts" : "m4s", withInit: staging.mapURL != nil
                 )
                 staged = files.segments + [files.initFile].compactMap { $0 } + [files.folder]
-                segmentInput = try await stageDisguised(
+                let skipped: Set<Int>
+                (segmentInput, skipped) = try await stageDisguised(
                     id: id, plan: staging, range: window.range, files: files, headers: headers,
                     source: source, tracker: tracker
                 )
-                shifted = Segment(start: segment.start - window.offset, end: segment.end - window.offset)
+                // The local playlist lists only the kept segments: times count from its start.
+                let local = { DisguisedHLS.localTime($0, segments: staging.segments, range: window.range, skipped: skipped) }
+                shifted = Segment(start: local(segment.start), end: local(segment.end))
+                collapseGaps = !skipped.isEmpty
             }
             let arguments = CommandBuilder.ffmpegSegment(
                 input: segmentInput, kind: kind, audio: audio, headers: headers, source: source, segment: shifted,
-                precision: request.precision, output: part
+                precision: request.precision, output: part, collapseGaps: collapseGaps
             )
             try await runSegment(
                 id: id, arguments: arguments, ffmpeg: ffmpeg, segment: segment, index: index, part: part,
@@ -702,12 +711,14 @@ public actor JobRunner {
     /// `plan.stripPrefix`, several at a time (`downloadPieces`), counted by the size cap meanwhile.
     /// Then moves them into `files.folder`, out of its count before ffmpeg writes the part, and
     /// writes `files.playlist` listing them. The downloads fill the first 90% of the segment's
-    /// progress. Returns the playlist's file URL.
+    /// progress. Empty segments (`DisguisedHLS.EmptySegment`) are left out of the playlist and
+    /// recorded in the job's `emptySegments`; a window of only empty segments throws. Returns the
+    /// playlist's file URL and the indices of `range` left out.
     private func stageDisguised(
         id: String, plan: StagedHLS, range: Range<Int>,
         files: DisguisedHLS.StagedFiles, headers: [String: String],
         source: URL, tracker: ProgressTracker
-    ) async throws -> URL {
+    ) async throws -> (playlist: URL, skipped: Set<Int>) {
         let segments = plan.segments
         var pieces: [DisguisedHLS.Piece] = []
         if let mapURL = plan.mapURL, let initFile = files.initFile {
@@ -722,19 +733,31 @@ public actor JobRunner {
                 stripPrefix: plan.stripPrefix
             ))
         }
-        try await downloadPieces(id: id, pieces: pieces, headers: headers, source: source, tracker: tracker)
+        let empty = try await downloadPieces(
+            id: id, pieces: pieces, headers: headers, source: source, tracker: tracker
+        )
         try checkCancelled(id)
+        for segment in empty { jobs[id]?.emptySegments[segment.number] = segment.bytes }
+        let skipped = Set(empty.map { $0.number - 1 })
+        // Positions in the window (`files.segments`), not playlist indices.
+        let kept = (0..<range.count).filter { !skipped.contains(range.lowerBound + $0) }
+        guard !kept.isEmpty else {
+            throw JobError.invalid(DisguisedHLS.emptyWarning(
+                Dictionary(uniqueKeysWithValues: empty.map { ($0.number, $0.bytes) })
+            ) ?? "No segment has video data")
+        }
         // A rename: the playlist lists bare names, so they resolve next to it.
         try FileManager.default.createDirectory(at: files.folder, withIntermediateDirectories: true)
-        for file in files.segments + [files.initFile].compactMap({ $0 }) {
+        let keptFiles = kept.map { files.segments[$0] }
+        for file in keptFiles + [files.initFile].compactMap({ $0 }) {
             try FileManager.default.moveItem(at: file, to: files.folder.appendingPathComponent(file.lastPathComponent))
         }
         let text = DisguisedHLS.playlist(
-            durations: range.map { segments[$0].duration }, fileNames: files.segments.map(\.lastPathComponent),
-            mapFileName: files.initFile?.lastPathComponent
+            durations: kept.map { segments[range.lowerBound + $0].duration },
+            fileNames: keptFiles.map(\.lastPathComponent), mapFileName: files.initFile?.lastPathComponent
         )
         try text.write(to: files.playlist, atomically: true, encoding: .utf8)
-        return files.playlist
+        return (files.playlist, skipped)
     }
 
     /// Downloads `pieces` (`DisguisedHLS.download`), at most the job's `pieceLimit` at a time. Each
@@ -747,17 +770,20 @@ public actor JobRunner {
     /// - 403 from a child launched while several could run: the limit drops to 1 for the rest of
     ///   the job (today's sequential behaviour) and the piece is queued again first, without using
     ///   a retry. A 403 from a child that ran alone, or a 410, fails as `JobError.linkExpired`;
+    /// - `DisguisedHLS.EmptySegment`: counted as finished and returned, the others go on;
     /// - anything else (also a 429/503 out of retries) cancels the other children and throws.
     /// The task group awaits every child before it returns, also on a throw, so no child still
     /// writes once the caller removes the files. A cancel reaches the children through the job's task.
+    @discardableResult
     private func downloadPieces(
         id: String, pieces: [DisguisedHLS.Piece], headers: [String: String], source: URL, tracker: ProgressTracker
-    ) async throws {
+    ) async throws -> [DisguisedHLS.EmptySegment] {
         try checkCancelled(id)
-        guard !pieces.isEmpty else { return }
+        guard !pieces.isEmpty else { return [] }
         var queue = Array(pieces.indices)
         var retries = [Int](repeating: 0, count: pieces.count)
         var finished = 0
+        var empty: [DisguisedHLS.EmptySegment] = []
         // No piece starts before this deadline (the latest `Retry-After` wins).
         var notBefore: ContinuousClock.Instant?
         try await withThrowingTaskGroup(of: (index: Int, limit: Int, result: Result<Void, Error>).self) { group in
@@ -795,6 +821,10 @@ public actor JobRunner {
                 case .success:
                     finished += 1
                     tracker.progress(0.9 * Double(finished) / Double(pieces.count))
+                case let .failure(segment as DisguisedHLS.EmptySegment):
+                    empty.append(segment)
+                    finished += 1
+                    tracker.progress(0.9 * Double(finished) / Double(pieces.count))
                 case let .failure(refused as DisguisedHLS.Refused) where refused.status == 403:
                     guard limit > 1 else { throw JobError.linkExpired }
                     jobs[id]?.pieceLimit = 1
@@ -817,6 +847,7 @@ public actor JobRunner {
                 }
             }
         }
+        return empty
     }
 
     /// One yt-dlp run for all segments; it writes `<tmp>/part-NNN.<ext>` in segment order.

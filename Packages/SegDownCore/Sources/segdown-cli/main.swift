@@ -111,6 +111,7 @@ func describe(_ status: JobStatus) -> String {
     let percent = String(format: "%5.1f%%", status.fraction * 100)
     let segment = "\(min(status.segmentIndex + 1, status.segmentCount))/\(status.segmentCount)"
     return "[\(status.state.rawValue)] \(percent) seg \(segment)" + (status.message.map { " \($0)" } ?? "")
+        + (status.warning.map { " (warning: \($0))" } ?? "")
 }
 
 func run(_ request: JobRequest, base: URL) async -> Int32 {

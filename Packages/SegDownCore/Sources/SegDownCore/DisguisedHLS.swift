@@ -7,7 +7,8 @@ import Foundation
 
 enum DisguisedHLS {
     /// Bytes of the first segment read to detect a disguise; also the head of each downloaded
-    /// segment searched for its TS start, and its write chunk size.
+    /// segment searched for its TS start, and its write chunk size. A segment that ends within it
+    /// holding no TS is an `EmptySegment`, skipped with a warning.
     static let probeBytes = 64 * 1024
     /// Segments larger than this are rejected, also without a job size cap; real ones are a few MB.
     static let maxSegmentBytes: Int64 = 256 * 1024 * 1024
@@ -163,6 +164,58 @@ enum DisguisedHLS {
         var retryAfter: Double?
     }
 
+    /// True when `data` starts with a PNG, JPEG, GIF or WebP signature.
+    static func isImage(_ data: Data) -> Bool {
+        let bytes = [UInt8](data.prefix(12))
+        func starts(_ signature: [UInt8], at offset: Int = 0) -> Bool {
+            bytes.count >= offset + signature.count && Array(bytes[offset..<offset + signature.count]) == signature
+        }
+        return starts([0x89, 0x50, 0x4E, 0x47]) || starts([0xFF, 0xD8, 0xFF]) || starts(Array("GIF8".utf8))
+            || (starts(Array("RIFF".utf8)) && starts(Array("WEBP".utf8), at: 8))
+    }
+
+    /// A disguised segment (`stripPrefix`) whose whole body, `bytes` long, is under `probeBytes`,
+    /// holds no MPEG-TS and starts like an image (`isImage`): the server returned only the cover
+    /// image. Any other short body without TS (empty, an error page) still fails the job. `JobRunner` skips it and warns
+    /// (`emptyWarning`). Not a `JobError` case: those go on the wire.
+    struct EmptySegment: Error {
+        var number: Int
+        var bytes: Int64
+    }
+
+    /// The warning for the skipped empty segments, `[number: bytes]`; nil when there are none.
+    static func emptyWarning(_ empty: [Int: Int64]) -> String? {
+        guard !empty.isEmpty else { return nil }
+        let numbers = empty.keys.sorted().map(String.init).joined(separator: ", ")
+        let sizes = Set(empty.values)
+        if empty.count == 1, let size = sizes.first {
+            return "Segment \(numbers) has no video data (the server returned only a \(size)-byte image); "
+                + "this video is broken on the site"
+        }
+        let images = sizes.count == 1 ? "\(sizes.first!)-byte images" : "images"
+        return "Segments \(numbers) have no video data (the server returned only \(images)); "
+            + "this video is broken on the site"
+    }
+
+    /// Where source time `time` falls in a local playlist of `segments[range]` without the indices
+    /// in `skipped`: the kept durations before it, plus its offset into its segment when kept. A
+    /// time inside a skipped segment snaps to the next kept one's start.
+    static func localTime(
+        _ time: Double, segments: [HLSMediaSegment], range: Range<Int>, skipped: Set<Int>
+    ) -> Double {
+        var source = segments[..<range.lowerBound].reduce(0) { $0 + $1.duration }
+        var local = 0.0
+        for index in range {
+            let duration = segments[index].duration
+            if time < source + duration {
+                return skipped.contains(index) ? local : local + max(time - source, 0)
+            }
+            source += duration
+            if !skipped.contains(index) { local += duration }
+        }
+        return local
+    }
+
     /// One file to download (`download`): `segment` into `file`, `number` its 1-based playlist or
     /// manifest position for the errors (0 for an init section).
     struct Piece: Sendable {
@@ -178,7 +231,8 @@ enum DisguisedHLS {
     /// by one. Only the first `probeBytes` (plus the chunks not yet written) are held in memory to
     /// find that start; the rest streams into `file` in chunks, so the job's size cap, which watches
     /// the temp dir, and a cancel can stop it. Throws when it is larger than `maxSegmentBytes`, holds
-    /// no MPEG-TS (`stripPrefix`), or the task is cancelled. On a throw `file` may hold a partial
+    /// no MPEG-TS (`stripPrefix`; `EmptySegment` when the whole body is shorter than `probeBytes`),
+    /// or the task is cancelled. On a throw `file` may hold a partial
     /// segment: the caller removes it.
     static func download(
         _ segment: HLSMediaSegment, number: Int, headers: [String: String], source: URL, to file: URL,
@@ -200,11 +254,14 @@ enum DisguisedHLS {
         // The first probeBytes until the TS start is found in them, then the next chunk to write.
         var buffer = Data()
         var foundStart = false
-        func flush() throws {
+        var received: Int64 = 0
+        func flush(atEnd: Bool) throws {
             guard let handle else { throw JobError.processFailed("Segment \(number) response is not HTTP") }
             var start = 0
             if stripPrefix, !foundStart {
                 guard let offset = tsStart(in: buffer.prefix(probeBytes)) else {
+                    // The whole body is a short image: the cover alone, the video data gone.
+                    if atEnd, isImage(buffer) { throw EmptySegment(number: number, bytes: received) }
                     throw JobError.processFailed("Segment \(number) is not MPEG-TS")
                 }
                 start = offset
@@ -213,7 +270,6 @@ enum DisguisedHLS {
             try handle.write(contentsOf: buffer.dropFirst(start))
             buffer.removeAll(keepingCapacity: true)
         }
-        var received: Int64 = 0
         for try await event in events {
             switch event {
             case let .response(response):
@@ -227,12 +283,12 @@ enum DisguisedHLS {
                 received += Int64(chunk.count)
                 if received > maxSegmentBytes { throw tooLarge }
                 buffer.append(contentsOf: chunk)
-                if buffer.count >= probeBytes { try flush() }
+                if buffer.count >= probeBytes { try flush(atEnd: false) }
             }
         }
         // A cancel ends the stream without an error: never write it as a whole segment.
         try Task.checkCancellation()
-        try flush()
+        try flush(atEnd: true)
     }
 
     /// The delegate of one `download` data task: yields its response and its body chunks into a

@@ -404,6 +404,10 @@ private struct DownloadCard: View {
             if let message = status.message, let tint = Self.noticeTint(status.state) {
                 NoticeBox(message: message, tint: tint)
             }
+            // What a done download left out (empty segments skipped).
+            if let warning = status.warning {
+                NoticeBox(message: warning, tint: .yellow)
+            }
             HStack(spacing: 8) {
                 if status.state == .done, !status.outputs.isEmpty {
                     Button(action: play) {

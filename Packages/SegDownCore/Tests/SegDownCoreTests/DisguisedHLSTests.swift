@@ -112,6 +112,28 @@ struct DisguisedHLSTests {
         #expect(past.offset == 15)
     }
 
+    /// Source times map onto a local playlist without the skipped segments; a time inside a
+    /// skipped one snaps to the next kept segment's start.
+    @Test func localTimeSkipsEmptySegments() {
+        let url = URL(string: "https://cdn.example.com/s.png")!
+        let segments = Array(repeating: HLSMediaSegment(url: url, duration: 5), count: 6)
+        let local = { DisguisedHLS.localTime($0, segments: segments, range: 1..<5, skipped: [2, 4]) }
+        #expect(local(7) == 2)
+        #expect(local(12) == 5)
+        #expect(local(17) == 7)
+        #expect(local(24) == 10)
+        #expect(DisguisedHLS.localTime(7, segments: segments, range: 1..<5, skipped: []) == 2)
+    }
+
+    @Test func emptyWarningNamesTheSkippedSegments() {
+        #expect(DisguisedHLS.emptyWarning([:]) == nil)
+        #expect(DisguisedHLS.emptyWarning([4: 90]) == "Segment 4 has no video data "
+            + "(the server returned only a 90-byte image); this video is broken on the site")
+        #expect(DisguisedHLS.emptyWarning([11: 90, 4: 90]) == "Segments 4, 11 have no video data "
+            + "(the server returned only 90-byte images); this video is broken on the site")
+        #expect(DisguisedHLS.emptyWarning([4: 90, 5: 120])?.contains("returned only images") == true)
+    }
+
     /// The size cap counts staged segments while they download, and no longer once they move into
     /// the playlist's folder, so a window is never counted next to the part ffmpeg writes from it.
     @Test func stagedSegmentsAreCountedAndPlaylistFolderIsNot() throws {
@@ -217,6 +239,16 @@ struct DisguisedHLSTests {
         await #expect(throws: JobError.linkExpired) {
             _ = try await download("/gone", to: "gone.ts")
         }
+
+        // A bare image with no TS: an empty segment, skipped by `JobRunner`.
+        let empty = await #expect(throws: DisguisedHLS.EmptySegment.self) {
+            _ = try await download("/empty.png", to: "empty.ts")
+        }
+        #expect(empty?.bytes == 90)
+        // A short body that is no image (an error page) still fails: it is not the cover alone.
+        await #expect(throws: JobError.processFailed("Segment 1 is not MPEG-TS")) {
+            _ = try await download("/error", to: "error.ts")
+        }
     }
 }
 
@@ -239,6 +271,8 @@ private final class StubProtocol: URLProtocol, @unchecked Sendable {
             "/seg.png": Route(status: 200, body: segment),
             "/busy": Route(status: 429, headers: ["Retry-After": "3"]),
             "/gone": Route(status: 410),
+            "/empty.png": Route(status: 200, body: png + Data(repeating: 0x00, count: 82)),
+            "/error": Route(status: 200, body: Data("<html>Too many requests</html>".utf8)),
         ]
     }()
 

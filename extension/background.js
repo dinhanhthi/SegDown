@@ -1180,7 +1180,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //              video again and retry."), outputs (file names only, never
 //              folders), bytes (integer >= 0 downloaded so far, null when the
 //              app does not say), fallbackUsed (true once the job switched to
-//              its media fallback)}. title: the stored one, else "Job " + the
+//              its media fallback), warning (string | null, what a done job
+//              left out, e.g. its empty segments)}. title: the stored one, else "Job " + the
 //              id's first 8 characters (incognito jobs store none). "unknown":
 //              the app's status does not list the id (the app restarted or
 //              dropped it). An empty jobs:<tabId> answers []
@@ -1247,7 +1248,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 //                appError (the ping failed),
 //                job (this tab's newest job from `jobs`: {id, state,
 //                  segmentIndex, segmentCount, fraction, bytes, message,
-//                  fallbackUsed}, or null),
+//                  fallbackUsed, warning}, or null),
 //                downloadWith ("segdown" | "otherApp" from the pong, the app's
 //                  "browser" counting as "segdown" outside Browser mode; then
 //                  depsProblem is left out for "otherApp", which needs no
@@ -3963,6 +3964,7 @@ function cleanJobStatus(s) {
     outputs: outputs.map(baseName).filter(Boolean),
     bytes: Number.isSafeInteger(s.bytes) && s.bytes >= 0 ? s.bytes : null,
     fallbackUsed: s.fallbackUsed === true,
+    warning: typeof s.warning === "string" && s.warning ? s.warning.slice(0, MAX_MESSAGE_CHARS) : null,
   };
 }
 
@@ -4113,7 +4115,7 @@ async function onJobs(tabId) {
   const st = await fetchStatus();
   const list = st.jobs || lastJobs;
   const byId = new Map(list.map((j) => [j.id, j]));
-  const unknown = (id) => ({ id, state: "unknown", segmentIndex: 0, segmentCount: 0, fraction: 0, message: null, outputs: [], bytes: null, fallbackUsed: false });
+  const unknown = (id) => ({ id, state: "unknown", segmentIndex: 0, segmentCount: 0, fraction: 0, message: null, outputs: [], bytes: null, fallbackUsed: false, warning: null });
   const jobs = tabJobs
     .slice()
     .reverse()
@@ -4243,8 +4245,8 @@ async function onView(tabId, from) {
     overLimit,
     maxDuration: settings.maxDuration, // null = no limit
     job: newest
-      ? (({ id, state, segmentIndex, segmentCount, fraction, bytes, message, fallbackUsed }) =>
-          ({ id, state, segmentIndex, segmentCount, fraction, bytes, message, fallbackUsed }))(newest)
+      ? (({ id, state, segmentIndex, segmentCount, fraction, bytes, message, fallbackUsed, warning }) =>
+          ({ id, state, segmentIndex, segmentCount, fraction, bytes, message, fallbackUsed, warning }))(newest)
       : null,
   };
   if (browser) {

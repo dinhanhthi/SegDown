@@ -325,7 +325,8 @@ public enum IPC {
     /// did `ClientSettings.ignoredDomains`. 4 adds the `setIgnored` request. 5 adds the `playlist`
     /// source. 6 adds the `dash` and `file` media kinds. 7 adds the `openWith` request and its `opened`
     /// reply. `ClientSettings.downloadWith`, `downloadWithRev` and `otherAppName` came with it; older
-    /// extensions ignore them.
+    /// extensions ignore them. The optional `JobStatus.warning` came later without a bump: older
+    /// extensions ignore it.
     public static let protocolVersion = 7
     /// Same cap as a native messaging frame.
     public static let maxLineBytes = 1024 * 1024
