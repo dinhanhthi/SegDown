@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-08
+
+### Added
+
+- SegDown now works as a video download manager: it can save the whole video, or only the time ranges you mark.
+- For a video played by hls.js, Shaka, dash.js, video.js or JW Player, SegDown asks the page's player for the real stream when you open the panel or click Download. This also finds playlists that exist only inside the page, which could not be downloaded before.
+- DASH streams (.mpd), and WebM, MOV and other video files, can be downloaded in full or by time range. Files that cannot be copied into an mp4 are re-encoded.
+- Use the extension alone: a new "Download with" choice (SegDown, Browser only, or Another app) in Settings and in the overlay's menu. In Browser mode the extension never contacts the SegDown app: it saves whole files with the browser's own downloader, and for streams it copies a link, a yt-dlp command or an ffmpeg command (never with cookies). Another app opens the link in a Mac app you choose, such as Downie or IINA. The extension now asks for the downloads permission ("Manage your downloads") for this.
+- Playlists whose link expired are fetched again from the page that played them, so single-use playlist links work.
+
+### Changed
+
+- Downloads are faster: segments are fetched four at a time, backing off when a server asks for it, and a dropped connection resumes instead of failing.
+- Link capture finds more videos: media loaded by a page's service worker, redirected video files, playlists served with a wrong type, and prerendered pages. The previous video is no longer picked after a page changes without reloading.
+- The automatic video pick skips background loops and prefers the video you played.
+- The player buttons stay inside a clipped video card and below a fixed page header. The Download full video button stays visible while the overlay is open.
+- File names lose "(3) " counters, "▶" and a trailing " - Site".
+
+
 ## [0.6.12] - 2026-11-06
 
 ### Added
