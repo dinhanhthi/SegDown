@@ -1,5 +1,5 @@
 // The Downloads page: one card per job, newest first, with selection; remove from the list, or also move the files to
-// the Trash after a confirmation. The Archived button switches between the downloads and the archived ones; Search
+// the Trash after a confirmation. The Filter menu shows every download, those of one state, or the archived ones; Search
 // filters the cards shown by title.
 import AppKit
 import SegDownCore
@@ -8,14 +8,14 @@ import UniformTypeIdentifiers
 
 /// The jobs as cards. Click selects one, ⌘-click toggles, ⇧-click extends from the last clicked card; ⌘A (the Edit
 /// menu's Select All) and ⌫ (remove from the list) work while the page has focus, which a click on a card gives it.
-/// The list shows either the downloads or, with the Archived button on, the archived ones; the header, selection and
-/// Remove All act on the list shown. Search grows into a field beside the title and fuzzy-filters that list by title,
-/// best match first; X or Escape closes it and shows the whole list again.
+/// The list shows the downloads the Filter menu picks (all, downloading, completed, errors, warnings, or the archived
+/// ones); the header, selection and Remove All act on the list shown. Search grows into a field beside the title and
+/// fuzzy-filters that list by title, best match first; X or Escape closes it and shows the whole list again.
 struct DownloadsView: View {
     let store: JobStore
     @State private var selection: Set<String> = []
-    /// The archived list instead of the downloads; the Archived button shows once a download is archived.
-    @State private var showArchived = false
+    /// The cards shown; the Archived option shows once a download is archived.
+    @State private var filter = DownloadFilter.all
     @State private var anchor: String?
     @State private var confirmTrash = false
     /// The jobs the Trash sheet is about: the selection, or every job shown for Move All to Trash.
@@ -31,9 +31,9 @@ struct DownloadsView: View {
     @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// The jobs of the list shown, before the search: the downloads, or the archived ones.
+    /// The jobs of the list shown, before the search: those the filter picks.
     private var scoped: [JobStore.Item] {
-        store.items.filter { $0.archived == showArchived }
+        store.items.filter(filter.includes)
     }
 
     /// The jobs of the list shown, matching the search best first while there is a query.
@@ -66,9 +66,10 @@ struct DownloadsView: View {
         .onChange(of: shown.map(\.id)) { _, ids in
             selection.formIntersection(ids)
         }
-        // The last archived job unarchived or removed: back to the downloads, as the Archived button is gone.
+        .onChange(of: filter) { selection.removeAll() }
+        // The last archived job unarchived or removed: back to every download, as the Archived option is gone.
         .onChange(of: store.items.contains(where: \.archived)) { _, anyArchived in
-            if !anyArchived { showArchived = false }
+            if !anyArchived, filter == .archived { filter = .all }
         }
         // Every job gone: the empty page replaces the header, so the next download is not hidden by an old search.
         .onChange(of: store.items.isEmpty) { _, empty in
@@ -104,7 +105,7 @@ struct DownloadsView: View {
 
     private var list: some View {
         ScrollView {
-            // The header stays, so the Archived button can switch back.
+            // The header stays, so the Filter menu can switch back.
             if shown.isEmpty {
                 Text(scoped.isEmpty ? "No downloads" : "No matching downloads")
                     .foregroundStyle(.secondary)
@@ -140,7 +141,7 @@ struct DownloadsView: View {
     /// The title and count stay while searching; the search field takes the rest of the row.
     private var header: some View {
         HStack(spacing: 12) {
-            Text(showArchived ? "Archived" : "Downloads")
+            Text(filter.title)
                 .font(.title2.weight(.semibold))
             Text(verbatim: String(shown.count))
                 .font(.callout.weight(.semibold))
@@ -186,18 +187,33 @@ struct DownloadsView: View {
                 .fixedSize()
                 .help("Remove the selected downloads from the list (⌫), or also move their files to the Trash")
             }
-            if store.items.contains(where: \.archived) {
-                Button {
-                    showArchived.toggle()
-                    selection.removeAll()
-                } label: {
-                    Label("Archived", systemImage: showArchived ? "archivebox.fill" : "archivebox")
-                        .labelStyle(.iconOnly)
-                        .foregroundStyle(showArchived ? Color.accentColor : .primary)
+            Menu {
+                Picker("Show", selection: $filter) {
+                    ForEach(DownloadFilter.allCases.filter { $0 != .archived }) { option in
+                        Label(option.menuTitle, systemImage: option.systemImage).tag(option)
+                    }
+                    if store.items.contains(where: \.archived) {
+                        Divider()
+                        Label(DownloadFilter.archived.menuTitle, systemImage: DownloadFilter.archived.systemImage)
+                            .tag(DownloadFilter.archived)
+                    }
                 }
-                .buttonStyle(RaisedButtonStyle(height: Self.controlHeight))
-                .help(showArchived ? "Show downloads" : "Show archived downloads")
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: filter == .all
+                          ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                        .foregroundStyle(filter == .all ? Color.primary : Color.accentColor)
+                        .accessibilityLabel("Filter")
+                    MenuChevron()
+                }
             }
+            .menuStyle(.button)
+            .buttonStyle(RaisedButtonStyle(height: Self.controlHeight, horizontalPadding: 10))
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Show every download, or only those downloading, completed, with an error or a warning, or archived")
             Menu {
                 Button("Remove All from List", action: removeAllFromList)
                 Button("Move All to Trash…", action: askTrashAll)
@@ -344,6 +360,54 @@ struct DownloadsView: View {
         }
         selection.formUnion(ids[min(from, to)...max(from, to)])
         focused = true
+    }
+}
+
+/// The cards the Downloads page shows. Only Archived shows archived downloads; Completed includes those with a warning.
+enum DownloadFilter: CaseIterable, Identifiable {
+    case all, downloading, completed, errors, warnings, archived
+
+    var id: Self { self }
+
+    /// The page's title.
+    var title: String {
+        switch self {
+        case .all: "Downloads"
+        case .downloading: "Downloading"
+        case .completed: "Completed"
+        case .errors: "Errors"
+        case .warnings: "Warnings"
+        case .archived: "Archived"
+        }
+    }
+
+    /// The Filter menu's item.
+    var menuTitle: String {
+        self == .all ? "All Downloads" : title
+    }
+
+    var systemImage: String {
+        switch self {
+        case .all: "tray.full"
+        case .downloading: "arrow.down.circle"
+        case .completed: "checkmark.circle"
+        case .errors: "xmark.octagon"
+        case .warnings: "exclamationmark.triangle"
+        case .archived: "archivebox"
+        }
+    }
+
+    func includes(_ item: JobStore.Item) -> Bool {
+        if self == .archived { return item.archived }
+        guard !item.archived else { return false }
+        let state = item.status.state
+        switch self {
+        case .all, .archived: return true
+        case .downloading: return state == .queued || state == .running
+        case .completed: return state == .done
+        case .errors: return state == .failed
+        case .warnings: return state == .done && item.status.warning != nil
+        }
     }
 }
 
