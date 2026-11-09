@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SegDown",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Download web videos: the whole video, or only the time ranges you mark.",
   "permissions": [
     "nativeMessaging",

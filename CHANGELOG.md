@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-09
+
+### Added
+
+- Errors and warnings in the app now appear in a tinted box with a Copy button, so you can paste the message straight into a bug report.
+
+### Fixed
+
+- HLS downloads no longer fail when a playlist contains empty segments that only hold an image; SegDown skips them and shows a warning instead.
+- The extension's player buttons are no longer placed against full-page overlays, so they appear on the actual video.
+
 ## [0.7.1] - 2026-11-08
 
 ### Fixed
