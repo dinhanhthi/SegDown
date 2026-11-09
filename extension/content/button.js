@@ -372,7 +372,10 @@
     return { left, top };
   }
 
+  let rectKey = ""; // the video's rect at the last position(): a move or resize re-places the host
+
   function position(video, r) {
+    rectKey = `${r.left} ${r.top} ${r.width} ${r.height}`;
     const p = visibleRect(video, r);
     hostLeft = Math.max(0, Math.min(Math.max(p.left, 0) + OFFSET, window.innerWidth - hostWidth));
     hostTop = Math.max(0, Math.min(Math.max(p.top, 0) + OFFSET, window.innerHeight - SIZE));
@@ -381,12 +384,15 @@
   }
 
   // While shown: the switches or the icon changed -> lay the buttons out again;
-  // none left on the video -> hide.
+  // the video moved or resized (a player that lays out again on its first play)
+  // -> place them again; none left on the video -> hide.
   function relayout() {
     if (!anyOn(target.video)) return hide();
-    if (layoutKeyOf() === layoutKey) return;
-    layout();
-    position(target.video, target.video.getBoundingClientRect());
+    const r = target.video.getBoundingClientRect();
+    const moved = `${r.left} ${r.top} ${r.width} ${r.height}` !== rectKey;
+    if (layoutKeyOf() === layoutKey && !moved) return;
+    if (layoutKeyOf() !== layoutKey) layout();
+    position(target.video, r);
     if (menuKey !== null) place(menu);
     if (!errorLine.hidden) place(errorLine);
   }
