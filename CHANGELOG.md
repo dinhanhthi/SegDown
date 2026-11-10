@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-11-10
+
 ### Added
 
 - Invisible mode (Settings › Privacy) shows only the downloads in progress: a download leaves the list as soon as it ends and nothing is kept in history. Your files stay on disk.
