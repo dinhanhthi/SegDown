@@ -2,6 +2,8 @@
 // start immediately and run concurrently. Every enqueued job and every probed source passes
 // `Validation` before anything is fetched or run. Error messages never echo header values.
 // Finished jobs are kept in `JobHistory` (never incognito ones) and listed again at launch.
+// With the Invisible mode setting on, no finished job is listed and the history file stays empty:
+// a job leaves the list when it ends and is never recorded. Files on disk are never touched.
 import AppKit
 import Foundation
 import Observation
@@ -54,6 +56,9 @@ final class JobStore {
     static let maxItems = 50
     /// Legacy UserDefaults key of the default precision, migrated once by `SettingsStore`.
     static let defaultPrecisionKey = "defaultPrecision"
+    /// How long a job removed at its end (Invisible mode) still answers `status`, in seconds, so
+    /// the browser overlay gets its final state.
+    static let endedGrace: TimeInterval = 10
     /// `~/Library/Application Support/SegDown/history.json`, next to the settings and the socket.
     static let historyFileURL = IPC.socketURL().deletingLastPathComponent()
         .appending(path: "history.json", directoryHint: .notDirectory)
@@ -80,7 +85,12 @@ final class JobStore {
     private let runner: JobRunner
     @ObservationIgnored private var server: IPCServer?
     /// Saved into the socket's folder, which `IPCServer.start()` creates before any job can end.
+    /// `init` saves it only when the file had records, so the folder exists then too.
     @ObservationIgnored private var history: JobHistory
+    /// The final status of each job Invisible mode removed at its end, with the time it ended.
+    /// Memory only: never listed, never written to disk; dropped by the first `status` request
+    /// after `endedGrace`.
+    @ObservationIgnored private var ended: [String: (status: JobStatus, at: Date)] = [:]
     @ObservationIgnored private let logger = Logger(subsystem: "com.math2it.segdown", category: "jobs")
 
     init(settings: SettingsStore, historyFileURL: URL = JobStore.historyFileURL) {
@@ -88,7 +98,18 @@ final class JobStore {
         runner = JobRunner(binaries: binaries)
         history = JobHistory(fileURL: historyFileURL)
         history.load()
-        items = history.records.prefix(Self.maxItems).map(Self.item(from:))
+        if settings.settings.invisibleMode {
+            // Nothing is listed; an empty history is not saved (the folder may not exist yet).
+            if !history.records.isEmpty {
+                do {
+                    try history.clear()
+                } catch {
+                    logHistoryError(error)
+                }
+            }
+        } else {
+            items = history.records.prefix(Self.maxItems).map(Self.item(from:))
+        }
         recheckDependencies()
         server = IPCServer(store: self)
         server?.start()
@@ -152,6 +173,7 @@ final class JobStore {
     ///   client settings (never paths).
     /// - `enqueue` → validates, starts the job, returns `enqueued(id)`; invalid → `error("invalid")`.
     /// - `status(ids)` → the statuses of those jobs (unknown ids are omitted); `nil` → all jobs.
+    ///   A job Invisible mode removed at its end still answers for `endedGrace` seconds.
     /// - `cancel(id)` → `cancelled(id)` for any listed job (a finished one is left as is);
     ///   unknown id → `error("notFound")`.
     /// - `probe(source)` → validates, then the variants of an HLS master playlist (`[]` for a media
@@ -170,8 +192,11 @@ final class JobStore {
         case let .enqueue(job):
             return await enqueue(job)
         case let .status(ids):
+            let now = Date()
+            ended = ended.filter { now.timeIntervalSince($0.value.at) <= Self.endedGrace }
             let selected = ids.map { ids in items.filter { ids.contains($0.id) } } ?? items
-            return .status(selected.map(\.status))
+            let gone = ended.values.map(\.status).filter { ids?.contains($0.id) ?? true }
+            return .status(selected.map(\.status) + gone)
         case let .cancel(id):
             guard items.contains(where: { $0.id == id }) else {
                 return .error(code: IPCResponse.ErrorCode.notFound, message: "No job with that id")
@@ -297,7 +322,8 @@ final class JobStore {
     }
 
     /// Archives or unarchives the jobs `ids` in the list and the history. Incognito jobs and running
-    /// ones are not in the history yet: a running one is recorded with its flag when it ends.
+    /// ones are not in the history yet: a running one is recorded with its flag when it ends
+    /// (unless Invisible mode is on then).
     func setArchived(ids: Set<String>, archived: Bool) {
         for index in items.indices where ids.contains(items[index].id) {
             items[index].archived = archived
@@ -318,6 +344,14 @@ final class JobStore {
         } catch {
             logHistoryError(error)
         }
+    }
+
+    /// Saves the Invisible mode setting. Turning it on removes every finished job from the list
+    /// and clears the history file (`clearHistory()`); running jobs stay. Turning it off restores
+    /// nothing.
+    func setInvisibleMode(_ on: Bool) {
+        settings.update { $0.invisibleMode = on }
+        if on { clearHistory() }
     }
 
     private func enqueue(_ request: JobRequest) async -> IPCResponse {
@@ -362,6 +396,8 @@ final class JobStore {
     /// Updates the job's item. On its end, records it in the history (unless incognito). A job
     /// removed while running is gone from `items`, so it is never recorded. A job the site refused
     /// (yt-dlp's HTTP 403/410, often an old yt-dlp) checks for updates, the only automatic check.
+    /// With Invisible mode on when the job ends (read then, not at its start), the item leaves the
+    /// list instead and is not recorded; its final status stays in `ended` for `status` requests.
     private func apply(_ status: JobStatus) {
         guard let index = items.firstIndex(where: { $0.id == status.id }) else { return }
         items[index].status = status
@@ -372,6 +408,11 @@ final class JobStore {
         items[index].finishedAt = Date()
         if status.state == .failed, status.message == JobRunner.siteRefusedMessage {
             Task { await checkForUpdates(force: true) }
+        }
+        if settings.settings.invisibleMode {
+            ended[status.id] = (status: status, at: Date())
+            items.remove(at: index)
+            return
         }
         let item = items[index]
         do {

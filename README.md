@@ -77,6 +77,8 @@ If the buttons hide the player's controls, drag them by their ⋮⋮ handle.
 
 Files go to `Downloads/SegDown/`. Change this and more in SegDown's Settings.
 
+**Invisible mode** (Settings › Privacy) makes SegDown show only the downloads in progress. A download leaves the list as soon as it finishes, fails or is cancelled, and nothing is kept in the history. Turning it on also clears the list and the history you already have, for good: turning it off does not bring them back. Your files are never touched: they stay on disk, in the output folder.
+
 To keep SegDown off on a site, choose **Ignore this site** in the ▾ menu or right-click the SegDown toolbar button. Turn it back on from the same toolbar menu or under Settings › Browser › Ignored sites.
 
 ## Not supported

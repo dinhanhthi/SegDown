@@ -1,5 +1,5 @@
 // The Settings page: one grouped form over the window's glass; each change is saved at once through
-// `SettingsStore.update`.
+// `SettingsStore.update`, except Invisible mode, which asks first and goes through `JobStore.setInvisibleMode`.
 import AppKit
 import SegDownCore
 import SwiftUI
@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var domainText = ""
     @State private var domainError: String?
     @State private var confirmClear = false
+    @State private var confirmInvisible = false
     @FocusState private var focus: Field?
 
     private enum Field { case size, duration }
@@ -101,8 +102,14 @@ struct SettingsView: View {
                 }
             }
             Section("Privacy") {
+                switchRow(isOn: invisibleMode, title: "Invisible mode",
+                          hint: "Shows only the downloads in progress. A download leaves the list as soon as it "
+                              + "finishes, fails or is cancelled, and nothing is kept in history. "
+                              + "Files stay in the output folder.")
                 switchRow(isOn: setting(\.incognitoDefault), title: "Incognito by default",
-                          hint: "Jobs are not kept in history; the browser does not keep their segments.")
+                          hint: "Jobs are not kept in history; the browser does not keep their segments."
+                              + (settings.settings.invisibleMode
+                                  ? " Always on in the browser while Invisible mode is on." : ""))
             }
             Section("Browser") {
                 LabeledContent {
@@ -206,6 +213,32 @@ struct SettingsView: View {
                 },
                 cancel: { confirmClear = false })
         }
+        .sheet(isPresented: $confirmInvisible) {
+            DialogSheet(
+                title: "Turn on Invisible mode?",
+                message: "Every finished download, archived ones included, is removed from the list and from "
+                    + "history now, and each new one as soon as it ends, errors too. This can't be undone: "
+                    + "turning Invisible mode off does not bring them back. "
+                    + "Files stay on disk in the output folder.",
+                actionTitle: "Turn On", destructive: true,
+                action: {
+                    store.setInvisibleMode(true)
+                    confirmInvisible = false
+                },
+                cancel: { confirmInvisible = false })
+        }
+    }
+
+    /// Off: saved at once. On: asks first (it clears the list and the history), and changes nothing
+    /// until confirmed.
+    private var invisibleMode: Binding<Bool> {
+        Binding(get: { settings.settings.invisibleMode }, set: { on in
+            if on {
+                confirmInvisible = true
+            } else {
+                store.setInvisibleMode(false)
+            }
+        })
     }
 
     /// A settings field for a control; each change is saved.

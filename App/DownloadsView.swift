@@ -1,6 +1,7 @@
 // The Downloads page: one card per job, newest first, with selection; remove from the list, or also move the files to
 // the Trash after a confirmation. The Filter menu shows every download, those of one state, or the archived ones; Search
-// filters the cards shown by title.
+// filters the cards shown by title. With the Invisible mode setting on, only the downloads in progress are listed, with
+// no Filter menu, and a notice says so, with a button that opens the output folder.
 import AppKit
 import SegDownCore
 import SwiftUI
@@ -11,10 +12,12 @@ import UniformTypeIdentifiers
 /// The list shows the downloads the Filter menu picks (all, downloading, completed, errors, warnings, or the archived
 /// ones); the header, selection and Remove All act on the list shown. Search grows into a field beside the title and
 /// fuzzy-filters that list by title, best match first; X or Escape closes it and shows the whole list again.
+/// With Invisible mode on, the list shows every job (finished ones have left the store), the Filter menu is hidden and
+/// a notice sits above the cards, or in the empty page.
 struct DownloadsView: View {
     let store: JobStore
     @State private var selection: Set<String> = []
-    /// The cards shown; the Archived option shows once a download is archived.
+    /// The cards shown; the Archived option shows once a download is archived. Ignored while Invisible mode is on.
     @State private var filter = DownloadFilter.all
     @State private var anchor: String?
     @State private var confirmTrash = false
@@ -31,9 +34,14 @@ struct DownloadsView: View {
     @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// The jobs of the list shown, before the search: those the filter picks.
+    private var invisible: Bool {
+        store.settings.settings.invisibleMode
+    }
+
+    /// The jobs of the list shown, before the search: those the filter picks. With Invisible mode on, every job,
+    /// archived ones too: the Filter menu is hidden, so a stale filter must not hide a running card.
     private var scoped: [JobStore.Item] {
-        store.items.filter(filter.includes)
+        invisible ? store.items : store.items.filter(filter.includes)
     }
 
     /// The jobs of the list shown, matching the search best first while there is a query.
@@ -46,7 +54,7 @@ struct DownloadsView: View {
     var body: some View {
         Group {
             if store.items.isEmpty {
-                EmptyDownloads()
+                EmptyDownloads(store: store)
             } else {
                 list
             }
@@ -105,7 +113,18 @@ struct DownloadsView: View {
 
     private var list: some View {
         ScrollView {
-            // The header stays, so the Filter menu can switch back.
+            if invisible {
+                HStack(spacing: 8) {
+                    Text("Invisible mode: downloads leave this list when they end. Files stay in the output folder.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    OpenOutputFolderButton(store: store)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+            }
+            // The header stays, so the Filter menu (hidden in Invisible mode) can switch back.
             if shown.isEmpty {
                 Text(scoped.isEmpty ? "No downloads" : "No matching downloads")
                     .foregroundStyle(.secondary)
@@ -141,7 +160,7 @@ struct DownloadsView: View {
     /// The title and count stay while searching; the search field takes the rest of the row.
     private var header: some View {
         HStack(spacing: 12) {
-            Text(filter.title)
+            Text(invisible ? DownloadFilter.all.title : filter.title)
                 .font(.title2.weight(.semibold))
             Text(verbatim: String(shown.count))
                 .font(.callout.weight(.semibold))
@@ -187,33 +206,36 @@ struct DownloadsView: View {
                 .fixedSize()
                 .help("Remove the selected downloads from the list (⌫), or also move their files to the Trash")
             }
-            Menu {
-                Picker("Show", selection: $filter) {
-                    ForEach(DownloadFilter.allCases.filter { $0 != .archived }) { option in
-                        Label(option.menuTitle, systemImage: option.systemImage).tag(option)
+            // Hidden while Invisible mode is on: the list ignores the filter then.
+            if !invisible {
+                Menu {
+                    Picker("Show", selection: $filter) {
+                        ForEach(DownloadFilter.allCases.filter { $0 != .archived }) { option in
+                            Label(option.menuTitle, systemImage: option.systemImage).tag(option)
+                        }
+                        if store.items.contains(where: \.archived) {
+                            Divider()
+                            Label(DownloadFilter.archived.menuTitle, systemImage: DownloadFilter.archived.systemImage)
+                                .tag(DownloadFilter.archived)
+                        }
                     }
-                    if store.items.contains(where: \.archived) {
-                        Divider()
-                        Label(DownloadFilter.archived.menuTitle, systemImage: DownloadFilter.archived.systemImage)
-                            .tag(DownloadFilter.archived)
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: filter == .all
+                              ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                            .foregroundStyle(filter == .all ? Color.primary : Color.accentColor)
+                            .accessibilityLabel("Filter")
+                        MenuChevron()
                     }
                 }
-                .pickerStyle(.inline)
-                .labelsHidden()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: filter == .all
-                          ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
-                        .foregroundStyle(filter == .all ? Color.primary : Color.accentColor)
-                        .accessibilityLabel("Filter")
-                    MenuChevron()
-                }
+                .menuStyle(.button)
+                .buttonStyle(RaisedButtonStyle(height: Self.controlHeight, horizontalPadding: 10))
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Show every download, or only those downloading, completed, with an error or a warning, or archived")
             }
-            .menuStyle(.button)
-            .buttonStyle(RaisedButtonStyle(height: Self.controlHeight, horizontalPadding: 10))
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Show every download, or only those downloading, completed, with an error or a warning, or archived")
             Menu {
                 Button("Remove All from List", action: removeAllFromList)
                 Button("Move All to Trash…", action: askTrashAll)
@@ -714,19 +736,50 @@ private struct StateBadge: View {
     }
 }
 
-/// No jobs yet: how to start one from the browser.
+/// Opens the output folder in Finder; a beep when it does not exist yet (nothing downloaded so far).
+private struct OpenOutputFolderButton: View {
+    let store: JobStore
+
+    var body: some View {
+        Button("Open Output Folder") {
+            if let folder = store.settings.settings.jobOptions.baseDirectory,
+               FileManager.default.fileExists(atPath: folder.path) {
+                NSWorkspace.shared.open(folder)
+            } else {
+                NSSound.beep()
+            }
+        }
+        .buttonStyle(RowTextButtonStyle())
+        .fixedSize()
+        .help("Open the output folder in Finder")
+    }
+}
+
+/// No jobs yet: how to start one from the browser. With Invisible mode on: why the list is empty, and where the
+/// files are.
 private struct EmptyDownloads: View {
+    let store: JobStore
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("No downloads yet", systemImage: "arrow.down.circle")
-                .font(.title3.weight(.semibold))
-            Text("To download part of a video from your browser:")
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("1. Open a page with a video.")
-                Text("2. Click the SegDown toolbar button, or press Alt+Shift+S.")
-                Text("3. Mark the segments you want.")
-                Text("4. Click Download.")
+            if store.settings.settings.invisibleMode {
+                Label("Invisible mode is on", systemImage: "eye.slash")
+                    .font(.title3.weight(.semibold))
+                Text("Only downloads in progress are shown here. Finished, failed and cancelled downloads leave this "
+                    + "list and are not kept in history. Your files are still on disk, in the output folder.")
+                    .foregroundStyle(.secondary)
+                OpenOutputFolderButton(store: store)
+            } else {
+                Label("No downloads yet", systemImage: "arrow.down.circle")
+                    .font(.title3.weight(.semibold))
+                Text("To download part of a video from your browser:")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("1. Open a page with a video.")
+                    Text("2. Click the SegDown toolbar button, or press Alt+Shift+S.")
+                    Text("3. Mark the segments you want.")
+                    Text("4. Click Download.")
+                }
             }
         }
         .padding(.horizontal, 20)

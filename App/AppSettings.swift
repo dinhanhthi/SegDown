@@ -21,6 +21,9 @@ struct AppSettings: Codable, Equatable, Sendable {
     var maxDuration: Double?
     /// Incognito when the extension does not say: no history entry for the job.
     var incognitoDefault = false
+    /// Only the downloads in progress are listed: a job that ends (done, failed or cancelled) leaves
+    /// the list at once and nothing is kept in the history. The files on disk are never touched.
+    var invisibleMode = false
     /// Re-encode each finished job's files to make them smaller.
     var compress = false
     /// Save every job's files straight into the output folder, without a folder per title.
@@ -63,11 +66,13 @@ struct AppSettings: Codable, Equatable, Sendable {
     }
 
     /// What the extension gets in `pong`. Another app with no app chosen is sent as SegDown, so the
-    /// extension never offers to open a link in no app.
+    /// extension never offers to open a link in no app. Invisible mode is sent as incognito by
+    /// default, so the extension keeps no marks or titles either.
     var clientSettings: ClientSettings {
         let otherAppName = downloadWith == .otherApp ? otherAppPath.map(Self.appName) : nil
         let sentDownloadWith = downloadWith == .otherApp && otherAppName == nil ? .segdown : downloadWith
-        return ClientSettings(mode: mode, incognitoDefault: incognitoDefault, maxDuration: maxDuration,
+        return ClientSettings(mode: mode, incognitoDefault: incognitoDefault || invisibleMode,
+                              maxDuration: maxDuration,
                               fullClipButton: fullClipButton, fullClipConfirm: fullClipConfirm,
                               playerButton: playerButton, fullDownloadButton: fullDownloadButton,
                               preferredHeight: preferredHeight, ignoredDomains: ignoredDomains,
@@ -97,7 +102,7 @@ struct AppSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case outputFolder, mode, precision, autoFallback, maxBytes, maxDuration, incognitoDefault, compress
         case flattenOutput, snakeCaseNames, fullClipButton, fullClipConfirm, playerButton, preferredHeight, ignoredDomains
-        case fullDownloadButton, downloadWith, downloadWithRev, otherAppPath
+        case fullDownloadButton, downloadWith, downloadWithRev, otherAppPath, invisibleMode
     }
 }
 
@@ -112,6 +117,7 @@ extension AppSettings {
         maxBytes = try c.decodeIfPresent(Int64.self, forKey: .maxBytes) ?? defaults.maxBytes
         maxDuration = try c.decodeIfPresent(Double.self, forKey: .maxDuration) ?? defaults.maxDuration
         incognitoDefault = try c.decodeIfPresent(Bool.self, forKey: .incognitoDefault) ?? defaults.incognitoDefault
+        invisibleMode = try c.decodeIfPresent(Bool.self, forKey: .invisibleMode) ?? defaults.invisibleMode
         compress = try c.decodeIfPresent(Bool.self, forKey: .compress) ?? defaults.compress
         flattenOutput = try c.decodeIfPresent(Bool.self, forKey: .flattenOutput) ?? defaults.flattenOutput
         snakeCaseNames = try c.decodeIfPresent(Bool.self, forKey: .snakeCaseNames) ?? defaults.snakeCaseNames
