@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- When a new version is available, the menu bar icon gets a small green download badge and its menu shows "Update to SegDown <version>…" instead of "Update Available…".
+
 ## [0.7.4] - 2026-11-10
 
 ### Added

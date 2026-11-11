@@ -5,14 +5,18 @@ import Sparkle
 
 /// Sparkle updater, started only when `SUPublicEDKey` is a base64 Ed25519 public key (32 bytes); an empty or
 /// malformed key would show a misconfiguration alert.
-/// Background checks (at launch, then every `SUScheduledCheckInterval`) never pop Sparkle's dialog: a found update
-/// sets `updateAvailable`, which turns the status menu's item into "Update Available…" (read each time the menu
-/// opens). They also download the update silently (`SUAutomaticallyUpdate`); once downloaded, `installReady` shows the
-/// main window's install button, which installs and relaunches.
+/// Background checks (at launch, then every `SUScheduledCheckInterval`) never pop Sparkle's dialog while the status
+/// item listens: a found update sets `availableUpdateVersion`, which badges the status item's logo and turns the menus'
+/// item into "Update to SegDown <version>…" (read each time a menu opens). They also download the update silently
+/// (`SUAutomaticallyUpdate`); once downloaded, `installReady` shows the main window's install button, which installs
+/// and relaunches.
 @MainActor
 @Observable
 final class Updater: NSObject {
-    private(set) var updateAvailable = false
+    /// Version of the update a check found (`displayVersionString`), until it is skipped or its update session ends.
+    private(set) var availableUpdateVersion: String? {
+        didSet { if availableUpdateVersion != oldValue { onAvailableUpdateChange?() } }
+    }
     private(set) var downloading = false
     private(set) var installReady = false
     private var started = false
@@ -24,8 +28,12 @@ final class Updater: NSObject {
     var menuTitle: String {
         if installReady { return "Install Update and Relaunch" }
         if downloading { return "Downloading Update…" }
-        return updateAvailable ? "Update Available…" : "Check for Updates…"
+        if let availableUpdateVersion { return "Update to SegDown \(availableUpdateVersion)…" }
+        return "Check for Updates…"
     }
+
+    /// Called when `availableUpdateVersion` changes; set by the status item.
+    @ObservationIgnored var onAvailableUpdateChange: (() -> Void)?
 
     @ObservationIgnored private let logger = Logger(subsystem: "com.math2it.segdown", category: "updater")
     @ObservationIgnored private var controller: SPUStandardUpdaterController!
@@ -64,12 +72,12 @@ extension Updater: SPUUpdaterDelegate {
     /// Also called when Sparkle resumes an update it downloaded but could not install silently (it needs
     /// authorization), so the menus offer it again.
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
-        updateAvailable = true
+        availableUpdateVersion = item.displayVersionString
         downloading = false
     }
 
     func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
-        updateAvailable = false
+        availableUpdateVersion = nil
         installReady = false
         installNow = nil
     }
@@ -99,7 +107,7 @@ extension Updater: SPUUpdaterDelegate {
     func updater(_ updater: SPUUpdater, userDidMake choice: SPUUserUpdateChoice, forUpdate updateItem: SUAppcastItem,
                  state: SPUUserUpdateState) {
         if choice == .skip {
-            updateAvailable = false
+            availableUpdateVersion = nil
             installReady = false
             installNow = nil
         }
@@ -109,13 +117,24 @@ extension Updater: SPUUpdaterDelegate {
 extension Updater: @preconcurrency SPUStandardUserDriverDelegate {
     var supportsGentleScheduledUpdateReminders: Bool { true }
 
-    /// The status menu item stands in for Sparkle's dialog on background checks.
+    /// The status item's badge stands in for Sparkle's dialog on background checks; without a status item listening,
+    /// Sparkle's dialog shows.
     func standardUserDriverShouldHandleShowingScheduledUpdate(_ update: SUAppcastItem,
                                                               andInImmediateFocus immediateFocus: Bool) -> Bool {
-        false
+        onAvailableUpdateChange == nil
     }
 
-    /// Required by Sparkle when the delegate shows scheduled updates; `didFindValidUpdate` already set the flag.
+    /// Required by Sparkle when the delegate shows scheduled updates; `didFindValidUpdate` has usually set the version
+    /// already.
     func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool, forUpdate update: SUAppcastItem,
-                                                   state: SPUUserUpdateState) {}
+                                                   state: SPUUserUpdateState) {
+        guard !handleShowingUpdate else { return }
+        availableUpdateVersion = update.displayVersionString
+    }
+
+    /// The badge goes after an install, a skip, "Remind Me Later" or an error. Silent automatic updates have no session
+    /// here, so their version stays through the download and `installReady`.
+    func standardUserDriverWillFinishUpdateSession() {
+        availableUpdateVersion = nil
+    }
 }
